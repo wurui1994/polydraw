@@ -2,7 +2,7 @@
 !ifndef COMP
 COMP=1
 !endif
-eval.exe: eval.c; cl eval.c /Ox /G6Fy /Gs /MD /nologo /DEVALTEST /DCOMPILE=$(COMP) /link /opt:nowin98 /nologo kernel32.lib
+eval.exe: eval.c; cl eval.c /Ox /G6Fy /Gs /MD /nologo /DEVALTEST /DCOMPILE=$(COMP) /link /nologo kernel32.lib
 	del eval.obj
 !if 0
 #endif

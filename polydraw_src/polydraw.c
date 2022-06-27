@@ -1,6 +1,6 @@
 #if 0 //To compile, type "nmake polydraw.c" (compile options for VC6)
 polydraw.exe: polydraw.obj kplib.obj eval.obj
-			link polydraw.obj kplib.obj eval.obj opengl32.lib gdi32.lib user32.lib comdlg32.lib winmm.lib /opt:nowin98
+			link polydraw.obj kplib.obj eval.obj opengl32.lib gdi32.lib user32.lib comdlg32.lib winmm.lib
 polydraw.obj: polydraw.c; cl /c polydraw.c /Ox /G6Fy /MD
 kplib.obj:    kplib.c   ; cl /c kplib.c    /Ox /G6Fy /MD
 eval.obj:     eval.c    ; cl /c eval.c     /Ox /G6Fy /MD
