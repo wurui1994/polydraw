@@ -237,15 +237,7 @@ Ken`s official website: http://advsys.net/ken
 #endif
 
 //----------------------------------------- KASM87 BEGINS -----------------------------------------
-
-#ifndef COMPILE
-// if `COMPILE` is not specified in the makefile, choose the fastest supported option
-#if defined(_M_IX86) || defined(__i386__)
-#define COMPILE 1 // True compile (Windows/Linux)
-#else
 #define COMPILE 0 // Virtual machine (PowerPC)
-#endif
-#endif
 
 enum
 {
@@ -454,51 +446,12 @@ static long round0msk[2048][2];
 //--------------------------------------------------
 static long cputype = 0, cpuinited = 0;
 
-#ifdef _MSC_VER
-static _inline long testflag(long c)
-{
-	_asm {
-		mov ecx, c
-		pushfd
-		pop eax
-		mov edx, eax
-		xor eax, ecx
-		push eax
-		popfd
-		pushfd
-		pop eax
-		xor eax, edx
-		mov eax, 1
-		jne menostinx
-		xor eax, eax
-		menostinx:
-	}
-}
 
-static _inline void cpuid(long a, long *s)
-{
-	_asm
-	{
-		push ebx
-		push esi
-		mov eax, a
-		cpuid
-		mov esi, s
-		mov dword ptr [esi+0], eax
-		mov dword ptr [esi+4], ebx
-		mov dword ptr [esi+8], ecx
-		mov dword ptr [esi+12], edx
-		pop esi
-		pop ebx
-	}
-}
-#else
 static _inline long testflag(long c)
 {
 	return (0);
 }
 static _inline void cpuid(long a, long *s) { return; }
-#endif
 
 // Bit numbers of return value:
 // 0:FPU, 4:RDTSC, 15:CMOV, 22:MMX+, 23:MMX, 25:SSE, 26:SSE2, 27:SSE3, 30:3DNow!+, 31:3DNow!
@@ -4310,145 +4263,6 @@ begit:;
 #endif
 }
 
-static char fpustat;
-static long putwrite = 0;
-static void put1byte(long a)
-{
-	if (putwrite)
-		compcode[kasm87leng] = (char)a;
-	kasm87leng++;
-}
-static void put2byte(long a)
-{
-	if (putwrite)
-		*(short *)&compcode[kasm87leng] = (short)a;
-	kasm87leng += 2;
-}
-static void put4byte(long a)
-{
-	if (putwrite)
-		*(long *)&compcode[kasm87leng] = a;
-	kasm87leng += 4;
-}
-
-static void putsib(long opcode, long a, rtyp b)
-{
-	long hbr, lbr;
-
-	if ((b.r & 0xf0000000) == KPTR)
-	{
-		b.r &= 0x0fffffff;
-		if ((b.r >= -128) && (b.r < 128))
-			put4byte((b.r << 24) + 0x244c8b); // mov ecx, [esp+imm8]
-		else
-		{
-			put2byte(0x8c8b);
-			put1byte(0x24);
-			put4byte(b.r);
-		} // mov ecx, [esp+imm32]
-		b.r = KECX + b.q * 8;
-	}
-	else if ((b.r & 0xf0000000) == KEDX)
-		b.r += b.q * 8;
-
-	if (!(opcode & 0xffffff00))
-		put1byte(opcode);
-	else
-		put2byte(opcode);
-
-	hbr = (((unsigned long)b.r) >> 28);
-	lbr = (b.r & 0x0fffffff);
-	if (hbr == (KFST >> 28))
-	{
-		// d9 c0   fld   st(0)
-		// d9 c8   fxch  st(0)
-		// dd c0   ffree st(0)
-		// dd d0   fst   st(0)
-		// dd d8   fstp  st(0)
-		//  ...
-		if (putwrite)
-		{
-			if ((compcode[kasm87leng - 1] != 0xdd) || ((a & 0x30) != 0x10)) // Don't do hack for FST or FSTP...
-				compcode[kasm87leng - 1] -= 0x04;							// Nasty hack!!!
-		}
-		fpustat |= (1 << (lbr >> 3));
-		put1byte(a + 0xc0 + (lbr >> 3));
-		return;
-	}
-	a &= 0x38; // Throw away stack pointer position when using memory access!
-	if ((hbr == (KIMM >> 28)) || (hbr == (KGLB >> 28)))
-	{
-		put1byte(a + 0x05);
-#if (COMPILE == 0)
-		if (hbr == (KIMM >> 28))
-			put4byte((long)(gevalext[lbr].ptr) + b.q * 8); // access static variable (imm32)
-		else
-			put4byte(gstatmem + lbr + b.q * 8); // access static variable (imm32)
-#else
-		if (putwrite)
-		{
-			checkpatch(patchnum + 1);
-			patch[patchnum].lptr = (long *)&compcode[kasm87leng];
-			patch[patchnum].ind = b.r;
-			patchnum++;
-		}
-		put4byte(b.q * 8); // access static variable (imm32)
-#endif
-		return;
-	}
-	if ((lbr < -128) || (lbr >= 128))
-	{
-		put1byte(a + 0x80 + hbr);
-		if (hbr == 4)
-			put1byte(0x24);
-		put4byte(lbr);
-	}
-	else if ((lbr) && (hbr != 5))
-	{
-		put1byte(a + 0x40 + hbr);
-		if (hbr == 4)
-			put1byte(0x24);
-		put1byte(lbr);
-	}
-	else
-	{
-		put1byte(a + hbr);
-		if (hbr == 4)
-			put1byte(0x24);
-	}
-}
-
-static long putlen(rtyp b)
-{
-	long r, lng;
-
-	lng = 0;
-	if ((b.r & 0xf0000000) == KPTR)
-	{
-		b.r &= 0x0fffffff;
-		if ((b.r >= -128) && (b.r < 128))
-			lng = 4;
-		else
-			lng = 7;
-		b.r = KECX + b.q * 8;
-	}
-	else if ((b.r & 0xf0000000) == KEDX)
-		b.r += b.q * 8;
-
-	r = (((unsigned long)b.r) >> 28);
-	b.r &= 0x0fffffff;
-	if (r == (KFST >> 28))
-		return (lng + 1);
-	if ((r == (KIMM >> 28)) || (r == (KGLB >> 28)))
-		return (lng + 5);
-	if ((b.r < -128) || (b.r >= 128))
-		return (lng + (r == 4) + 5);
-	else if ((b.r) && (r != 5))
-		return (lng + (r == 4) + 2);
-	else
-		return (lng + (r == 4) + 1);
-}
-
 // This function helps find sequences like this which can be safely removed:
 //  fld qword ptr [esp+0x28]
 //  fstp qword ptr [esp+0x28]
@@ -4528,25 +4342,6 @@ static long anyreadsbeforewrites(long i, rtyp r, long firstop)
 	anyreads1stop = firstop;
 	anyreads1stinst = (i | 0x80000000);
 	return (anyreadsbeforewritesrec(i, r));
-}
-
-static void put1stfld(long i, rtyp r)
-{
-	if ((gasm[i - 1].f) && (gasmeq(gasm[i - 1].r[0], r)))
-	{
-		long j = (putlen(gasm[i - 1].r[0]) + 1);
-#if (COMPILE != 0)
-		if ((patchnum > 0) && (patch[patchnum - 1].lptr >= (long *)&compcode[kasm87leng - j]) &&
-			(putwrite) && (patch[patchnum - 1].lptr <= (long *)&compcode[kasm87leng - 4]))
-			patchnum--;
-#endif
-		kasm87leng -= j;
-		// Replace fld...fstp to same location with fst
-		if (gasmeq(gasm[i].r[1], gasm[i].r[2]) || (anyreadsbeforewrites(i, r, 1)))
-			putsib(0xdd, 0x11, r); // fst qword ptr [?]
-	}
-	else
-		putsib(0xdd, 0x00, r); // fld qword ptr [?]
 }
 
 void kasm87freeall()
