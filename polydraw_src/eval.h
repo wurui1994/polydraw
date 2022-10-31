@@ -5,6 +5,9 @@
 extern "C" {
 #endif
 
+#define _cdecl
+#define EVALTEST 1
+
 	//Suppress warnings about overriding return value of kasm87 function
 #pragma warning(disable:4055)
 #pragma warning(disable:4152)
