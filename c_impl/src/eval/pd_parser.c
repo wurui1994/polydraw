@@ -651,7 +651,6 @@ static int parse_expr_stmt(pd_Parser *p) {
         pd_eat(p);
         pd_Reg value = pd_parse_expr(p);
         if (!p->ok) return 0;
-        accept_punct(p, ";");
         if (lvIsArray) {
             /* POKE family: out = array base (lvSym->reg), in[0]=value, in[1]=idx */
             pd_Op pop = (assignOp==PD_MOV) ? PD_POKE :
@@ -671,17 +670,14 @@ static int parse_expr_stmt(pd_Parser *p) {
                 pd_Reg combined = pd_new_local(p->b);
                 pd_emit2(p->b, assignOp, combined, cur, value);
                 pd_emit1(p->b, PD_MOV, lvSym->reg, combined);
-                /* assignment-expression value is the combined result */
-                pd_Reg valResult = pd_new_local(p->b);
-                pd_emit1(p->b, PD_MOV, valResult, lvSym->reg);
-                p->lastValueReg = valResult;
-                return 0;
             }
         }
         /* assignment is a value expression in EVAL: its value is the RHS */
         pd_Reg valResult = pd_new_local(p->b);
         pd_emit1(p->b, PD_MOV, valResult, value);
         p->lastValueReg = valResult;
+        if (accept_punct(p, ",")) { parse_expr_stmt(p); return 0; }
+        accept_punct(p, ";");
         return 0;
     }
 
@@ -717,6 +713,7 @@ static int parse_expr_stmt(pd_Parser *p) {
             } else if (lv->kind == PD_SYM_ARRAY) {
                 /* array element increment not supported in postfix; ignore */
             }
+            if (accept_punct(p, ",")) { parse_expr_stmt(p); return 0; }
             accept_punct(p, ";");
             return 0;
         }
@@ -726,6 +723,7 @@ static int parse_expr_stmt(pd_Parser *p) {
     if (!p->ok) return 0;
     /* bare expression: this is the "value" form. */
     p->lastValueReg = left;
+    if (accept_punct(p, ",")) { parse_expr_stmt(p); return 1; }
     accept_punct(p, ";");
     return 1;
 }
@@ -904,7 +902,18 @@ static long eval_const_expr(pd_Parser *p) {
         } else { pd_error(p, "expected constant"); return -1; }
         t = pd_cur(p);
     } else { pd_error(p, "expected constant"); return -1; }
-    /* handle trailing binary ops: * / + - */
+    /* handle trailing binary ops: ^ * / + - (^ is exponent in EVAL, right-assoc).
+     * Recurse for ^ so 2^3^2 = 2^9; the others fold left-to-right here. */
+    if (t->kind == PD_TOK_PUNCT && t->len==1 && t->text[0]=='^') {
+        pd_eat(p);
+        long r = eval_const_expr(p);
+        if (!p->ok) return -1;
+        long base = v, acc = 1;
+        long e = r; if (e < 0) e = 0; /* const dim power can't be negative */
+        for (long i = 0; i < e; i++) acc *= base;
+        v = acc;
+        t = pd_cur(p);
+    }
     while (t->kind == PD_TOK_PUNCT && t->len==1 &&
            (t->text[0]=='*'||t->text[0]=='/'||t->text[0]=='+'||t->text[0]=='-')) {
         char op = t->text[0];
@@ -1002,7 +1011,11 @@ static void parse_static(pd_Parser *p) {
                         pd_Reg slot = pdR(PD_FAM_GLOBAL, (uint32_t)(baseOff + elem*8));
                         pd_emit1(p->b, PD_MOV, slot, v);
                         elem++;
-                        if (accept_punct(p, ",")) continue;
+                        if (accept_punct(p, ",")) {
+                            /* trailing comma before }: list ends (EVAL allows it) */
+                            if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='}') break;
+                            continue;
+                        }
                         break;
                     }
                 }
@@ -1347,16 +1360,21 @@ static void prescan_functions(pd_Parser *p) {
 }
 
 /* ---- top-level program parse ---- */
-/* Detect & parse an anonymous main: () { body }. Returns 1 if parsed. */
+/* Detect & parse the program's main body. EVAL allows two main shapes:
+ *   (a) anonymous main:  () { body }     (explicit, may follow decls)
+ *   (b) bare block:      { body }        (original EVAL treats a script whose
+ *       first '(' lies inside the block as an implicit "()" main — i.e. a bare
+ *       block IS the main. We accept this form directly.)
+ * Returns 1 if a main body was parsed. */
 static int try_parse_anon_main(pd_Parser *p) {
     /* pd_cur_at takes an ABSOLUTE token index, so peek at tok+1 / tok+2. */
-    if (!(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='(' &&
+    int hasParen = (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='(' &&
           pd_cur_at(p->tok+1)->kind == PD_TOK_PUNCT && pd_cur_at(p->tok+1)->len==1 && pd_cur_at(p->tok+1)->text[0]==')' &&
-          pd_cur_at(p->tok+2)->kind == PD_TOK_PUNCT && pd_cur_at(p->tok+2)->len==1 && pd_cur_at(p->tok+2)->text[0]=='{'))
-        return 0;
-    pd_eat(p); /* ( */
-    pd_eat(p); /* ) */
-    pd_expect_punct(p, "{");
+          pd_cur_at(p->tok+2)->kind == PD_TOK_PUNCT && pd_cur_at(p->tok+2)->len==1 && pd_cur_at(p->tok+2)->text[0]=='{');
+    int hasBareBrace = (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='{');
+    if (!hasParen && !hasBareBrace) return 0;
+    if (hasParen) { pd_eat(p); /* ( */ pd_eat(p); /* ) */ }
+    if (!pd_expect_punct(p, "{")) return 1;
     while (p->ok && !(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='}')) {
         pd_parse_stmt(p);
         if (!p->ok) break;

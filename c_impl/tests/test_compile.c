@@ -137,6 +137,22 @@ TEST(anon_main_after_enum){ ASSERT_NEAR(ev("enum{N=5}; () { N }"), 5, 1e-12); re
 /* ---- EVAL parameter prefixes: &ref, $str, arr[], fnptr() ---- */
 TEST(param_ref_prefix)   { ASSERT(ev_ok("f(&x,&y,&z){ 1 } f(1,2,3)")); return 1; }
 
+/* ---- bare-block main: { ... } equivalent to () { ... } (disco blur etc.) ---- */
+TEST(bare_block_main)    { ASSERT_NEAR(ev("{ t=5; t*2 }"), 10, 1e-12); return 1; }
+TEST(bare_block_after_decl){ ASSERT_NEAR(ev("static g; { g = 7; g }"), 7, 1e-12); return 1; }
+
+/* ---- comma-separated statement units (ribbons idiom) ---- */
+TEST(comma_assignments)  { ASSERT_NEAR(ev("a=1,b=2,c=3; c"), 3, 1e-12); return 1; }
+TEST(comma_in_expr_seq)  { ASSERT_NEAR(ev("a=10; a+=5, b=a*2; b"), 30, 1e-12); return 1; }
+
+/* ---- const-expr power operator ^ in array dims (gspiral: enum{N=2^16}) ---- */
+TEST(const_dim_power)    { ASSERT(ev_ok("enum{N=2^16}; static a[N]; 5")); return 1; }
+TEST(const_dim_power2)   { ASSERT(ev_ok("static a[3^2]; 5")); return 1; }
+
+/* ---- trailing comma in array initializer list (curvybuild data tables) ---- */
+TEST(init_list_trailing_comma){ ASSERT_NEAR(ev("static a[5]={1,2,3,}; a[2]"), 3, 1e-12); return 1; }
+TEST(init_list_multiline){ ASSERT_NEAR(ev("static a[4]={\n1,\n2,\n3,\n4,\n}; a[3]"), 4, 1e-12); return 1; }
+
 /* ---- user-defined functions ---- */
 TEST(func_simple)       { ASSERT_NEAR(ev("sq(x){x*x} sq(7)"), 49, 1e-12); return 1; }
 TEST(func_two_args)     { ASSERT_NEAR(ev("add(a,b){a+b} add(3,4)"), 7, 1e-12); return 1; }
@@ -175,6 +191,10 @@ static test_fn_t tests[] = {
     test_run_multidim_enum_dim,
     test_run_anon_main_after_static, test_run_anon_main_after_enum,
     test_run_param_ref_prefix,
+    test_run_bare_block_main, test_run_bare_block_after_decl,
+    test_run_comma_assignments, test_run_comma_in_expr_seq,
+    test_run_const_dim_power, test_run_const_dim_power2,
+    test_run_init_list_trailing_comma, test_run_init_list_multiline,
     test_run_func_simple, test_run_func_two_args, test_run_func_calls_func,
     test_run_func_recursion, test_run_func_locals, test_run_func_in_loop,
     test_run_func_multi_in_script, test_run_func_then_main,
