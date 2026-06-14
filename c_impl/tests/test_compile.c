@@ -122,6 +122,21 @@ TEST(static_preserves)   { /* globals persist across the single run */
     ASSERT_NEAR(ev("static counter; counter+=1; counter+=1; counter"), 2, 1e-12); return 1;
 }
 
+/* ---- multi-dimensional arrays (row-major flat storage) ---- */
+/* buf3d[5][3][2]: buf3d[a][b][c] => int(a)*3*2 + int(b)*2 + c */
+TEST(multidim_2d_rw)     { ASSERT_NEAR(ev("static g[3][4]; g[1][2]=99; g[1][2]"), 99, 1e-12); return 1; }
+TEST(multidim_3d_rw)     { ASSERT_NEAR(ev("static b[2][3][4]; b[1][2][3]=7; b[1][2][3]"), 7, 1e-12); return 1; }
+TEST(multidim_flatten)   { /* b[0][1][0] and b[0][0][4] map to the same flat slot (4) */
+    ASSERT_NEAR(ev("static b[2][3][4]; b[0][1][0]=5; b[0][0][4]"), 5, 1e-12); return 1; }
+TEST(multidim_enum_dim)  { ASSERT_NEAR(ev("enum{R=3,C=4}; static g[R][C]; g[2][3]=8; g[2][3]"), 8, 1e-12); return 1; }
+
+/* ---- anonymous main () {...} after declarations (common .pss shape) ---- */
+TEST(anon_main_after_static){ ASSERT_NEAR(ev("static g; () { g = 42; g }"), 42, 1e-12); return 1; }
+TEST(anon_main_after_enum){ ASSERT_NEAR(ev("enum{N=5}; () { N }"), 5, 1e-12); return 1; }
+
+/* ---- EVAL parameter prefixes: &ref, $str, arr[], fnptr() ---- */
+TEST(param_ref_prefix)   { ASSERT(ev_ok("f(&x,&y,&z){ 1 } f(1,2,3)")); return 1; }
+
 /* ---- user-defined functions ---- */
 TEST(func_simple)       { ASSERT_NEAR(ev("sq(x){x*x} sq(7)"), 49, 1e-12); return 1; }
 TEST(func_two_args)     { ASSERT_NEAR(ev("add(a,b){a+b} add(3,4)"), 7, 1e-12); return 1; }
@@ -156,6 +171,10 @@ static test_fn_t tests[] = {
     test_run_static_scalar, test_run_static_array_write,
     test_run_static_array_pow2, test_run_static_array_nonpow2,
     test_run_enum_as_array_size, test_run_array_sum_loop, test_run_static_preserves,
+    test_run_multidim_2d_rw, test_run_multidim_3d_rw, test_run_multidim_flatten,
+    test_run_multidim_enum_dim,
+    test_run_anon_main_after_static, test_run_anon_main_after_enum,
+    test_run_param_ref_prefix,
     test_run_func_simple, test_run_func_two_args, test_run_func_calls_func,
     test_run_func_recursion, test_run_func_locals, test_run_func_in_loop,
     test_run_func_multi_in_script, test_run_func_then_main,

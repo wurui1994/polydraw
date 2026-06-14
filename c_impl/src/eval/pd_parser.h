@@ -36,6 +36,11 @@ typedef struct {
     pd_Reg     reg;        /* storage (LOCAL/PARAM/CONST/EXT/GLOBAL) */
     /* for arrays: element count (compile-time). 0 if not array. */
     int        arraySize;
+    /* per-dimension sizes for multi-dim arrays (e.g. a[3][4]); nDims=0 for
+     * scalar/non-array. Used to flatten N-dim indices: idx = sum of
+     * index[d] * product(dims[d+1..nDims-1]). */
+    int        dims[8];
+    int        nDims;
     /* linked-list index for function overloading by # params */
     int        nextOverload;
     /* for user FUNC: index into program->funcs[] */

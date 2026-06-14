@@ -487,20 +487,56 @@ static pd_Reg parse_primary(pd_Parser *p) {
             return pd_new_const(p->b, 0.0);
         }
 
-        /* array access? name[expr] */
+        /* array access? name[expr] or name[i0][i1]... (multi-dim, flattened).
+         * For buf3d[5][3][2]: buf3d[a][b][c] => int(a)*3*2 + int(b)*2 + c.
+         * Inner indices are truncated toward 0; the last index is used raw. */
         if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len == 1 && pd_cur(p)->text[0] == '[') {
-            pd_eat(p); /* [ */
-            pd_Reg idx = parse_expr_prec(p, 0);
-            if (!pd_expect_punct(p, "]")) return idx;
             pd_Sym *s = sym_find_name(p, name);
             if (!s) s = declare_local(p, name);
+            pd_Reg idxs[8]; int nd = 0;
+            while (accept_punct(p, "[")) {
+                pd_Reg ix = parse_expr_prec(p, 0);
+                if (!p->ok) return ix;
+                if (!pd_expect_punct(p, "]")) return ix;
+                if (nd < 8) idxs[nd++] = ix;
+            }
+            /* flatten: flat = sum_d trunc(idxs[d]) * product(dims[d+1..nDims-1]) */
+            pd_Reg flat;
+            if (nd > 1) {
+                pd_Reg acc = pd_new_const(p->b, 0.0);
+                for (int d = 0; d < nd; d++) {
+                    pd_Reg term = idxs[d];
+                    /* truncate inner indices toward 0 (EVAL array indices) */
+                    if (d < nd - 1) {
+                        pd_Reg tr = pd_new_local(p->b);
+                        pd_emit1(p->b, PD_ROUND0, tr, term);
+                        term = tr;
+                    }
+                    /* multiply by product of remaining dims (using known sizes) */
+                    int stride = 1;
+                    int symDims = (s->nDims > 0) ? s->nDims : nd;
+                    for (int e = d + 1; e < symDims; e++) stride *= s->dims[e];
+                    if (stride != 1) {
+                        pd_Reg st = pd_new_const(p->b, (double)stride);
+                        pd_Reg mul = pd_new_local(p->b);
+                        pd_emit2(p->b, PD_TIMES, mul, term, st);
+                        term = mul;
+                    }
+                    pd_Reg sum = pd_new_local(p->b);
+                    pd_emit2(p->b, PD_PLUS, sum, acc, term);
+                    acc = sum;
+                }
+                flat = acc;
+            } else {
+                flat = idxs[0];
+            }
             pd_Reg out = pd_new_local(p->b);
-            size_t ii = pd_emit2(p->b, PD_PEEK, out, s->reg, idx);
+            size_t ii = pd_emit2(p->b, PD_PEEK, out, s->reg, flat);
             p->b->instr[ii].aux = s->arraySize;
             /* remember lvalue info for assignment */
             p->lastLValue = s;
             p->lastLValueIsArrayIndex = 1;
-            p->lastArrayIdx = idx;
+            p->lastArrayIdx = flat;
             return out;
         }
 
@@ -565,13 +601,15 @@ static int parse_expr_stmt(pd_Parser *p) {
         /* skip ident */
         p->tok++;
         if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='[') {
-            /* array index: parse to find assign after ] */
-            p->tok++; /* [ */
-            int depth=1;
-            while (pd_cur(p)->kind != PD_TOK_EOF && depth>0) {
-                if (pd_cur(p)->kind==PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='[') depth++;
-                else if (pd_cur(p)->kind==PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]==']') depth--;
-                p->tok++;
+            /* array index: skip all [..] dimensions to find the assign op. */
+            while (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='[') {
+                p->tok++; /* [ */
+                int depth=1;
+                while (pd_cur(p)->kind != PD_TOK_EOF && depth>0) {
+                    if (pd_cur(p)->kind==PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='[') depth++;
+                    else if (pd_cur(p)->kind==PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]==']') depth--;
+                    p->tok++;
+                }
             }
         }
         pd_Tok *nt = pd_cur(p);
@@ -916,18 +954,20 @@ static void parse_static(pd_Parser *p) {
         char name[40]; size_t nl = nt->len < sizeof(name) ? nt->len : sizeof(name)-1;
         memcpy(name, nt->text, nl); name[nl] = 0;
         int isArr = 0; long arrSize = 1;
+        int dims[8]; int nDims = 0;
+        /* N-dimensional array: name[d0][d1]...[dk] -> flat storage of d0*d1*..*dk.
+         * Each bracket pair holds a constant size expression. */
         if (accept_punct(p, "[")) {
             isArr = 1;
-            arrSize = eval_const_expr(p);
-            if (!p->ok) return;
-            /* support multi-dim by multiplying (e.g. a[3][4]) */
-            while (accept_punct(p, "[")) {
+            for (;;) {
                 long d = eval_const_expr(p);
                 if (!p->ok) return;
+                if (d <= 0) { pd_error(p, "invalid array dimension"); return; }
                 arrSize *= d;
-                pd_expect_punct(p, "]");
+                if (nDims < 8) dims[nDims++] = (int)d;
+                if (!pd_expect_punct(p, "]")) return;
+                if (!accept_punct(p, "[")) break;
             }
-            pd_expect_punct(p, "]");
         }
         /* allocate from global storage */
         if (!p->globals) {
@@ -944,6 +984,8 @@ static void parse_static(pd_Parser *p) {
         pd_Sym *s = sym_add(p, name, PD_SYM_ARRAY);
         s->reg = pdR(PD_FAM_GLOBAL, (uint32_t)baseOff);
         s->arraySize = isArr ? (int)arrSize : 0;
+        s->nDims = nDims;
+        for (int di = 0; di < nDims; di++) s->dims[di] = dims[di];
 
         /* initializer: = expr (scalar) or = { expr, expr, ... } (array list).
          * Array lists like {0} or {1,2,3} initialize elements; {0} (single
@@ -1071,11 +1113,49 @@ static int try_parse_function_def(pd_Parser *p) {
     pd_Reg paramRegs[16];
     if (!(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]==')')) {
         for (;;) {
-            /* parameter: [type] name  (EVAL allows optional type prefix) */
+            /* EVAL parameter forms (Plan section 4):
+             *   a        double
+             *   &a       pass-by-reference (double*)   -- prefix skipped, treated as double
+             *   $a       string arg (char*)            -- prefix skipped, treated as double
+             *   a[n]     array                          -- [..] skipped, treated as double
+             *   a(,,)    function pointer               -- (..) skipped, treated as double
+             * Optional C-style type prefix (double/void/...) is also allowed. */
+            while (pd_cur(p)->kind == PD_TOK_IDENT &&
+                   !(pd_cur_at(p->tok+1)->kind == PD_TOK_PUNCT &&
+                     pd_cur_at(p->tok+1)->len==1 &&
+                     (pd_cur_at(p->tok+1)->text[0]==',' || pd_cur_at(p->tok+1)->text[0]==')'))) {
+                /* skip a type-prefix ident (e.g. "double x") — heuristic: an
+                 * ident followed by another ident is a type+name */
+                size_t nx = p->tok+1;
+                if (pd_cur_at(nx)->kind != PD_TOK_IDENT) break;
+                pd_eat(p);
+            }
+            if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 &&
+                (pd_cur(p)->text[0]=='&' || pd_cur(p)->text[0]=='$')) {
+                pd_eat(p); /* consume & or $ prefix */
+            }
             pd_Tok *pt = pd_eat(p);
             if (pt->kind != PD_TOK_IDENT) { pd_error(p, "expected param name"); goto restore; }
             char pname[40]; size_t pnl = pt->len < sizeof(pname)?pt->len:sizeof(pname)-1;
             memcpy(pname, pt->text, pnl); pname[pnl] = 0;
+            /* array param: name[...] — skip the dimension(s) */
+            if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='[') {
+                while (accept_punct(p, "[")) {
+                    while (!(pd_cur(p)->kind==PD_TOK_EOF ||
+                             (pd_cur(p)->kind==PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]==']'))) {
+                        pd_eat(p);
+                    }
+                    pd_expect_punct(p, "]");
+                }
+            }
+            /* function-pointer param: name(,,) — skip param-count parens */
+            if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='(') {
+                int d=0;
+                do {
+                    if (pd_cur(p)->kind==PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='(') d++;
+                    pd_eat(p);
+                } while (d>0 && !(pd_cur(p)->kind==PD_TOK_EOF));
+            }
             /* allocate a PARAM reg */
             paramRegs[nParams] = pdR(PD_FAM_PARAM, (uint32_t)(nParams * 8));
             pd_Sym *ps = sym_add(p, pname, PD_SYM_PARAM);
@@ -1269,9 +1349,10 @@ static void prescan_functions(pd_Parser *p) {
 /* ---- top-level program parse ---- */
 /* Detect & parse an anonymous main: () { body }. Returns 1 if parsed. */
 static int try_parse_anon_main(pd_Parser *p) {
+    /* pd_cur_at takes an ABSOLUTE token index, so peek at tok+1 / tok+2. */
     if (!(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='(' &&
-          pd_cur_at(1)->kind == PD_TOK_PUNCT && pd_cur_at(1)->len==1 && pd_cur_at(1)->text[0]==')' &&
-          pd_cur_at(2)->kind == PD_TOK_PUNCT && pd_cur_at(2)->len==1 && pd_cur_at(2)->text[0]=='{'))
+          pd_cur_at(p->tok+1)->kind == PD_TOK_PUNCT && pd_cur_at(p->tok+1)->len==1 && pd_cur_at(p->tok+1)->text[0]==')' &&
+          pd_cur_at(p->tok+2)->kind == PD_TOK_PUNCT && pd_cur_at(p->tok+2)->len==1 && pd_cur_at(p->tok+2)->text[0]=='{'))
         return 0;
     pd_eat(p); /* ( */
     pd_eat(p); /* ) */
