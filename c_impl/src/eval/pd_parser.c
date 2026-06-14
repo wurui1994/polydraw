@@ -80,6 +80,12 @@ void pd_parser_free(pd_Parser *p) {
 pd_Tok *pd_cur(pd_Parser *p) {
     return (p->tok < p->ts->nToks) ? &p->ts->toks[p->tok] : &p->ts->toks[p->ts->nToks-1];
 }
+/* peek a token at a specific index without advancing */
+static const pd_Tok *pd_cur_at_idx(const pd_Parser *p, size_t idx) {
+    if (idx >= p->ts->nToks) return &p->ts->toks[p->ts->nToks-1];
+    return &p->ts->toks[idx];
+}
+#define pd_cur_at(idx) pd_cur_at_idx(p, (idx))
 pd_Tok *pd_eat(pd_Parser *p) {
     pd_Tok *t = pd_cur(p);
     if (p->tok < p->ts->nToks) p->tok++;
@@ -428,8 +434,16 @@ static pd_Reg parse_primary(pd_Parser *p) {
             pd_Sym *s = sym_find(p, name, nArgs);
             if (!s) s = sym_find_name(p, name);
             if (!s) {
-                /* implicit declaration: create a local var (EVAL auto-declares) */
-                s = declare_local(p, name);
+                /* unknown function — EVAL is lenient: emit a CALL to an
+                 * unresolved function (aux=-1 → returns 0 at runtime). This
+                 * lets scripts with unregistered host funcs still compile. */
+                pd_Reg out = pd_new_local(p->b);
+                size_t idx = p->b->nInstr;
+                if (pd_emit(p->b, PD_CALL, out, args, nArgs) == (size_t)-1) {
+                    pd_error(p, "emit fail"); return out;
+                }
+                p->b->instr[idx].aux = -1; /* unresolved */
+                return out;
             }
             if (s->kind == PD_SYM_BUILTIN) {
                 pd_Op op = (pd_Op)s->reg.off;
@@ -547,8 +561,13 @@ static int parse_expr_stmt(pd_Parser *p) {
             }
         }
         pd_Tok *nt = pd_cur(p);
+        /* assignment ops: '=' (len1) or '+=' '-=' '*=' '/=' '%=' '^=' (len2,
+         * second char '=' and first char in +-* /%^). NOT '==' '<=' '>=' '!=' */
         if (nt->kind == PD_TOK_PUNCT &&
-            ((nt->len==1 && nt->text[0]=='=') || (nt->len==2 && nt->text[1]=='='))) {
+            ((nt->len==1 && nt->text[0]=='=') ||
+             (nt->len==2 && nt->text[1]=='=' &&
+              (nt->text[0]=='+'||nt->text[0]=='-'||nt->text[0]=='*'||
+               nt->text[0]=='/'||nt->text[0]=='%'||nt->text[0]=='^')))) {
             isAssign = 1;
             for (int i = 0; ASSIGNOPS[i].tok; i++) {
                 if (nt->len==(int)strlen(ASSIGNOPS[i].tok) && strncmp(nt->text,ASSIGNOPS[i].tok,nt->len)==0) {
@@ -612,6 +631,43 @@ static int parse_expr_stmt(pd_Parser *p) {
         pd_emit1(p->b, PD_MOV, valResult, value);
         p->lastValueReg = valResult;
         return 0;
+    }
+
+    /* postfix ++ / -- as a STATEMENT: "IDENT++" or "IDENT--" (EVAL form).
+     * The lexer splits ++ into two '+', so detect: IDENT followed by two
+     * identical + or - chars with nothing else between. Must check BEFORE
+     * the expression parser treats the first + as a binary operator. */
+    if (t->kind == PD_TOK_IDENT) {
+        /* look ahead: IDENT then '+' '+' or '-' '-' */
+        size_t a1 = p->tok + 1;
+        if (a1 + 1 < p->ts->nToks &&
+            p->ts->toks[a1].kind == PD_TOK_PUNCT && p->ts->toks[a1].len==1 &&
+            (p->ts->toks[a1].text[0]=='+' || p->ts->toks[a1].text[0]=='-') &&
+            p->ts->toks[a1+1].kind == PD_TOK_PUNCT && p->ts->toks[a1+1].len==1 &&
+            p->ts->toks[a1+1].text[0] == p->ts->toks[a1].text[0]) {
+            /* it's IDENT++ or IDENT-- */
+            char name[40]; size_t nl = t->len<sizeof(name)?t->len:sizeof(name)-1;
+            memcpy(name, t->text, nl); name[nl]=0;
+            char c1 = p->ts->toks[a1].text[0];
+            pd_eat(p); /* IDENT */
+            pd_eat(p); pd_eat(p); /* ++ or -- */
+            pd_Sym *lv = sym_find_name(p, name);
+            if (!lv) lv = declare_local(p, name);
+            if (lv->kind == PD_SYM_VAR || lv->kind == PD_SYM_PARAM || lv->kind == PD_SYM_EXT_VAR ||
+                (lv->kind == PD_SYM_ARRAY && lv->arraySize == 0)) {
+                pd_Op op = (c1=='+') ? PD_PLUS : PD_MINUS;
+                pd_Reg one = pd_new_const(p->b, 1.0);
+                pd_Reg cur = pd_new_local(p->b);
+                pd_Reg combined = pd_new_local(p->b);
+                pd_emit1(p->b, PD_MOV, cur, lv->reg);
+                pd_emit2(p->b, op, combined, cur, one);
+                pd_emit1(p->b, PD_MOV, lv->reg, combined);
+            } else if (lv->kind == PD_SYM_ARRAY) {
+                /* array element increment not supported in postfix; ignore */
+            }
+            accept_punct(p, ";");
+            return 0;
+        }
     }
 
     pd_Reg left = pd_parse_expr(p);
@@ -770,25 +826,46 @@ static void parse_block_or_stmt(pd_Parser *p) {
     pd_parse_stmt(p);
 }
 
-/* Evaluate a constant expression: either a NUMBER token or an enum/const
- * symbol name. Returns the integer value, or -1 with p->ok=0 on error. */
+/* Evaluate a constant expression: number, enum/const name, or simple
+ * arithmetic on them (n*3, N+1, etc). Used for array sizes & enum values.
+ * Supports: NUMBER, CONST_NAME, (expr), and + - * / between them. */
 static long eval_const_expr(pd_Parser *p) {
     pd_Tok *t = pd_cur(p);
-    if (t->kind == PD_TOK_NUMBER) { pd_eat(p); return (long)t->num; }
-    if (t->kind == PD_TOK_IDENT) {
+    long v;
+    if (t->kind == PD_TOK_PUNCT && t->len==1 && t->text[0]=='(') {
+        pd_eat(p);
+        v = eval_const_expr(p);
+        if (!p->ok) return -1;
+        if (!pd_expect_punct(p, ")")) return -1;
+        t = pd_cur(p);
+    } else if (t->kind == PD_TOK_NUMBER) {
+        pd_eat(p);
+        v = (long)t->num;
+        t = pd_cur(p);
+    } else if (t->kind == PD_TOK_IDENT) {
         char name[40]; size_t nl = t->len < sizeof(name) ? t->len : sizeof(name)-1;
         memcpy(name, t->text, nl); name[nl] = 0;
         pd_Sym *s = sym_find_name(p, name);
         if (s && s->kind == PD_SYM_CONST) {
             pd_eat(p);
-            /* const value is stored in the const table at reg.off/8 */
-            return (long)p->b->consts[s->reg.off / 8];
-        }
-        pd_error(p, "expected constant");
-        return -1;
+            v = (long)p->b->consts[s->reg.off / 8];
+        } else { pd_error(p, "expected constant"); return -1; }
+        t = pd_cur(p);
+    } else { pd_error(p, "expected constant"); return -1; }
+    /* handle trailing binary ops: * / + - */
+    while (t->kind == PD_TOK_PUNCT && t->len==1 &&
+           (t->text[0]=='*'||t->text[0]=='/'||t->text[0]=='+'||t->text[0]=='-')) {
+        char op = t->text[0];
+        pd_eat(p);
+        long r = eval_const_expr(p);
+        if (!p->ok) return -1;
+        if (op=='*') v *= r;
+        else if (op=='/') v /= r;
+        else if (op=='+') v += r;
+        else v -= r;
+        t = pd_cur(p);
     }
-    pd_error(p, "expected constant");
-    return -1;
+    return v;
 }
 
 /* enum { NAME, NAME=expr, NAME, ... }
@@ -854,16 +931,189 @@ static void parse_static(pd_Parser *p) {
         s->reg = pdR(PD_FAM_GLOBAL, (uint32_t)baseOff);
         s->arraySize = isArr ? (int)arrSize : 0;
 
-        /* initializer: = expr (for scalar) */
+        /* initializer: = expr (scalar) or = { expr, expr, ... } (array list).
+         * Array lists like {0} or {1,2,3} initialize elements; {0} (single
+         * zero) zero-fills the whole array. */
         if (accept_punct(p, "=")) {
-            pd_Reg v = pd_parse_expr(p);
-            if (!p->ok) return;
-            /* store into global[0] of this array */
-            pd_emit1(p->b, PD_MOV, s->reg, v);
+            if (accept_punct(p, "{")) {
+                /* array initializer list */
+                size_t elem = 0;
+                if (!(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='}')) {
+                    for (;;) {
+                        pd_Reg v = pd_parse_expr(p);
+                        if (!p->ok) return;
+                        /* store into global[elem] */
+                        pd_Reg slot = pdR(PD_FAM_GLOBAL, (uint32_t)(baseOff + elem*8));
+                        pd_emit1(p->b, PD_MOV, slot, v);
+                        elem++;
+                        if (accept_punct(p, ",")) continue;
+                        break;
+                    }
+                }
+                pd_expect_punct(p, "}");
+            } else {
+                pd_Reg v = pd_parse_expr(p);
+                if (!p->ok) return;
+                pd_emit1(p->b, PD_MOV, s->reg, v);
+            }
         }
         if (accept_punct(p, ",")) continue;
         break;
     }
+}
+
+/* Forward */
+static int try_parse_function_def(pd_Parser *p);
+
+/* Check if the current position is a function definition:
+ *   NAME ( params ) { body }
+ *   ( params ) { body }      <- anonymous (main function)
+ * If so, parse it (into a sub-program in p->funcs[]) and return 1.
+ * Otherwise return 0 and leave the token stream unchanged. */
+static int try_parse_function_def(pd_Parser *p) {
+    size_t save = p->tok;
+    pd_Tok *t = pd_cur(p);
+
+    /* optional name */
+    char name[40] = {0};
+    if (t->kind == PD_TOK_IDENT) {
+        /* must not be a keyword handled above (already consumed those) */
+        size_t nl = t->len < sizeof(name) ? t->len : sizeof(name)-1;
+        memcpy(name, t->text, nl); name[nl] = 0;
+        p->tok++;
+    }
+    /* expect '(' */
+    if (!(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='(')) {
+        p->tok = save; return 0;
+    }
+    /* scan to matching ')' */
+    int depth = 0;
+    size_t scan = p->tok;
+    while (pd_cur_at(scan)->kind != PD_TOK_EOF) {
+        const pd_Tok *st = pd_cur_at(scan);
+        if (st->kind == PD_TOK_PUNCT && st->len==1 && st->text[0]=='(') depth++;
+        else if (st->kind == PD_TOK_PUNCT && st->len==1 && st->text[0]==')') {
+            depth--;
+            if (depth == 0) break;
+        }
+        scan++;
+    }
+    if (depth != 0) { p->tok = save; return 0; }
+    /* after ')', expect '{' (function body) — if not, it's a call expression */
+    const pd_Tok *after = pd_cur_at(scan + 1);
+    if (!(after->kind == PD_TOK_PUNCT && after->len==1 && after->text[0]=='{')) {
+        p->tok = save; return 0;
+    }
+
+    /* It's a function definition. Parse it. */
+    /* consume name (already consumed if named) and '(' */
+    p->tok = save;
+    if (name[0]) pd_eat(p); /* name */
+    pd_eat(p); /* ( */
+
+    /* set up a sub-builder for this function */
+    pd_Builder *savedB = p->b;
+    pd_Builder fb; pd_builder_init(&fb);
+    p->b = &fb;
+
+    /* save & reset symbol table scope: parameters are local to this function.
+     * Simplest: save nSyms, parse params (adding PARAM symbols), parse body,
+     * then restore nSyms. Locals declared inside still leak to the saved
+     * scope, but since each function is parsed fully before restoring, and
+     * we look up symbols innermost-first, this is acceptable. */
+    int savedNSyms = p->nSyms;
+    int savedBreak = p->breakLabel, savedCont = p->contLabel;
+    p->breakLabel = PD_NO_LOOP; p->contLabel = PD_NO_LOOP;
+
+    /* pre-allocate function slot & register symbol (for recursion).
+     * If prescan_functions already registered this name, reuse its slot. */
+    pd_Sym *existing = name[0] ? sym_find_name(p, name) : NULL;
+    int fidx;
+    pd_Sym *fnSym = NULL;
+    if (existing && existing->kind == PD_SYM_FUNC && existing->funcIdx >= 0) {
+        /* reuse prescan-allocated slot */
+        fidx = existing->funcIdx;
+        fnSym = existing;
+    } else {
+        if (!p->funcs) {
+            p->nFuncsAlloc = 16;
+            p->funcs = calloc(p->nFuncsAlloc, sizeof(pd_Program));
+        }
+        if (p->nFuncs >= p->nFuncsAlloc) {
+            p->nFuncsAlloc *= 2;
+            p->funcs = realloc(p->funcs, p->nFuncsAlloc * sizeof(pd_Program));
+        }
+        fidx = (int)p->nFuncs;
+        memset(&p->funcs[fidx], 0, sizeof(pd_Program));
+        p->nFuncs++;
+        if (name[0]) {
+            fnSym = sym_add(p, name, PD_SYM_FUNC);
+            if (fnSym) { fnSym->funcIdx = fidx; fnSym->nParams = -1; }
+        }
+    }
+
+    /* parse parameter list */
+    int nParams = 0;
+    pd_Reg paramRegs[16];
+    if (!(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]==')')) {
+        for (;;) {
+            /* parameter: [type] name  (EVAL allows optional type prefix) */
+            pd_Tok *pt = pd_eat(p);
+            if (pt->kind != PD_TOK_IDENT) { pd_error(p, "expected param name"); goto restore; }
+            char pname[40]; size_t pnl = pt->len < sizeof(pname)?pt->len:sizeof(pname)-1;
+            memcpy(pname, pt->text, pnl); pname[pnl] = 0;
+            /* allocate a PARAM reg */
+            paramRegs[nParams] = pdR(PD_FAM_PARAM, (uint32_t)(nParams * 8));
+            pd_Sym *ps = sym_add(p, pname, PD_SYM_PARAM);
+            ps->reg = paramRegs[nParams];
+            nParams++;
+            if (accept_punct(p, ",")) continue;
+            break;
+        }
+    }
+    if (fnSym) fnSym->nParams = nParams;
+    if (!pd_expect_punct(p, ")")) goto restore;
+    if (!pd_expect_punct(p, "{")) goto restore;
+
+    /* parse body statements until } */
+    p->lastValueReg = pd_new_const(p->b, 0.0);
+    while (p->ok && !(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='}')) {
+        pd_parse_stmt(p);
+        if (!p->ok) break;
+    }
+    pd_expect_punct(p, "}");
+    /* implicit return of last value */
+    pd_emit1(p->b, PD_RETURN, pdR(PD_FAM_VOID,0), p->lastValueReg);
+
+restore:
+    p->breakLabel = savedBreak; p->contLabel = savedCont;
+    /* restore symbol scope but KEEP the function symbol (if newly added)
+     * so the enclosing scope can call it. Parameters and locals are dropped.
+     * If fnSym was pre-existing (from prescan), it's already in scope. */
+    if (fnSym && fnSym >= &p->syms[savedNSyms] && fnSym < &p->syms[p->nSyms]) {
+        /* fnSym was added during this function's parse (new) — keep it */
+        if (fnSym != &p->syms[savedNSyms]) {
+            p->syms[savedNSyms] = *fnSym;
+        }
+        p->nSyms = savedNSyms + 1;
+    } else {
+        /* fnSym pre-existed or NULL — just restore */
+        p->nSyms = savedNSyms;
+    }
+
+    /* finalize the function into the pre-reserved p->funcs[fidx] slot.
+     * If this was a reused prescan slot, nFuncs was already incremented. */
+    if (p->ok) {
+        pd_Program *fnp = &p->funcs[fidx];
+        /* free any previous content (prescan left it zeroed) then finish */
+        pd_builder_finish(p->b, fnp);
+        fnp->nParams = nParams;
+        fnp->globals = NULL;
+        fnp->host = NULL;
+        if (fnSym) fnSym->nParams = nParams;
+    }
+    p->b = savedB;
+    return 1;
 }
 
 int pd_parse_stmt(pd_Parser *p) {
@@ -875,6 +1125,8 @@ int pd_parse_stmt(pd_Parser *p) {
         if (accept_ident(p, "DO")) { parse_do_while(p); return 1; }
         if (accept_ident(p, "ENUM")) { parse_enum(p); accept_punct(p, ";"); return 1; }
         if (accept_ident(p, "STATIC")) { parse_static(p); accept_punct(p, ";"); return 1; }
+        /* function definition: NAME(params) { ... } */
+        if (try_parse_function_def(p)) return 1;
         if (accept_ident(p, "RETURN")) {
             if (!(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]==';')) {
                 pd_Reg v = pd_parse_expr(p);
@@ -919,17 +1171,118 @@ int pd_parse_stmt(pd_Parser *p) {
     return 1;
 }
 
+/* Pre-scan: walk the token stream and pre-register all named function
+ * definitions so forward references work. Allocates func slots in order.
+ * Does NOT consume tokens (restores position at end). */
+static void prescan_functions(pd_Parser *p) {
+    size_t savedTok = p->tok;
+    p->tok = 0;
+    while (pd_cur(p)->kind != PD_TOK_EOF) {
+        pd_Tok *t = pd_cur(p);
+        /* look for: IDENT ( ... ) {   (function def) */
+        if (t->kind == PD_TOK_IDENT) {
+            /* find '(' right after name (no operators) */
+            size_t afterName = p->tok + 1;
+            if (afterName < p->ts->nToks &&
+                pd_cur_at(afterName)->kind == PD_TOK_PUNCT &&
+                pd_cur_at(afterName)->len==1 && pd_cur_at(afterName)->text[0]=='(') {
+                /* scan to matching ')' */
+                int depth = 0; size_t s = afterName;
+                while (pd_cur_at(s)->kind != PD_TOK_EOF) {
+                    const pd_Tok *st = pd_cur_at(s);
+                    if (st->kind==PD_TOK_PUNCT && st->len==1 && st->text[0]=='(') depth++;
+                    else if (st->kind==PD_TOK_PUNCT && st->len==1 && st->text[0]==')') {
+                        depth--;
+                        if (depth==0) break;
+                    }
+                    s++;
+                }
+                /* after ')', is it '{'? */
+                const pd_Tok *after = pd_cur_at(s+1);
+                if (after->kind==PD_TOK_PUNCT && after->len==1 && after->text[0]=='{') {
+                    /* it's a function def. count params (commas at depth 1) */
+                    int nParams = 0; depth = 0;
+                    for (size_t k = afterName; k <= s; k++) {
+                        const pd_Tok *st = pd_cur_at(k);
+                        if (st->kind==PD_TOK_PUNCT && st->len==1 && st->text[0]=='(') depth++;
+                        else if (st->kind==PD_TOK_PUNCT && st->len==1 && st->text[0]==')') depth--;
+                        else if (st->kind==PD_TOK_PUNCT && st->len==1 && st->text[0]==',' && depth==1) nParams++;
+                    }
+                    /* if there's content between ( and ), it's nParams+1 */
+                    if (s > afterName) nParams++;
+                    /* allocate slot */
+                    if (!p->funcs) {
+                        p->nFuncsAlloc = 16;
+                        p->funcs = calloc(p->nFuncsAlloc, sizeof(pd_Program));
+                    }
+                    if (p->nFuncs >= p->nFuncsAlloc) {
+                        p->nFuncsAlloc *= 2;
+                        p->funcs = realloc(p->funcs, p->nFuncsAlloc*sizeof(pd_Program));
+                    }
+                    int fidx = (int)p->nFuncs;
+                    memset(&p->funcs[fidx], 0, sizeof(pd_Program));
+                    p->nFuncs++;
+                    /* register symbol (only if not already) */
+                    char name[40]; size_t nl = t->len<sizeof(name)?t->len:sizeof(name)-1;
+                    memcpy(name, t->text, nl); name[nl]=0;
+                    pd_Sym *existing = sym_find_name(p, name);
+                    if (!existing) {
+                        pd_Sym *fs = sym_add(p, name, PD_SYM_FUNC);
+                        if (fs) { fs->nParams = nParams; fs->funcIdx = fidx; }
+                    }
+                }
+            }
+        }
+        p->tok++;
+    }
+    p->tok = savedTok;
+}
+
 /* ---- top-level program parse ---- */
-int pd_parse_program(pd_Parser *p) {
-    /* parse statements until EOF. The last bare expression (no trailing
-     * assignment) becomes the implicit return value. */
-    pd_Reg zero = pd_new_const(p->b, 0.0);
-    p->lastValueReg = zero;
-    while (p->ok && pd_cur(p)->kind != PD_TOK_EOF) {
+/* Detect & parse an anonymous main: () { body }. Returns 1 if parsed. */
+static int try_parse_anon_main(pd_Parser *p) {
+    if (!(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='(' &&
+          pd_cur_at(1)->kind == PD_TOK_PUNCT && pd_cur_at(1)->len==1 && pd_cur_at(1)->text[0]==')' &&
+          pd_cur_at(2)->kind == PD_TOK_PUNCT && pd_cur_at(2)->len==1 && pd_cur_at(2)->text[0]=='{'))
+        return 0;
+    pd_eat(p); /* ( */
+    pd_eat(p); /* ) */
+    pd_expect_punct(p, "{");
+    while (p->ok && !(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='}')) {
         pd_parse_stmt(p);
         if (!p->ok) break;
     }
-    /* emit final return of the last seen value-expression */
+    pd_expect_punct(p, "}");
     pd_emit1(p->b, PD_RETURN, pdR(PD_FAM_VOID,0), p->lastValueReg);
+    return 1;
+}
+
+int pd_parse_program(pd_Parser *p) {
+    /* The entry point. EVAL allows either:
+     *   (a) bare statements at top level (implicit main), or
+     *   (b) an anonymous main: () { ... }  optionally followed by named funcs.
+     * The last bare expression (no trailing assignment) is the return value. */
+    pd_Reg zero = pd_new_const(p->b, 0.0);
+    p->lastValueReg = zero;
+
+    /* pre-register all named functions so forward references resolve */
+    prescan_functions(p);
+
+    /* main loop: parse top-level statements. An anonymous main () {...}
+     * may appear anywhere (after static/enum decls). Once it's parsed, we
+     * emit the final return; subsequent statements are named func defs. */
+    int sawMain = 0;
+    while (p->ok && pd_cur(p)->kind != PD_TOK_EOF) {
+        if (!sawMain && try_parse_anon_main(p)) {
+            sawMain = 1;
+            continue;
+        }
+        pd_parse_stmt(p);
+        if (!p->ok) break;
+    }
+    if (!sawMain) {
+        /* implicit main: emit final return of last value-expression */
+        pd_emit1(p->b, PD_RETURN, pdR(PD_FAM_VOID,0), p->lastValueReg);
+    }
     return p->ok;
 }

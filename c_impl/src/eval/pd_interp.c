@@ -175,25 +175,26 @@ double pd_run_ctx(pd_Ctx *c) {
             case PD_POKEPLUS:  { double *base=pd_array_base(c,in->out); long j=pd_bounds((long)b,in->aux); base[j]+=a; break; }
             case PD_POKEMINUS: { double *base=pd_array_base(c,in->out); long j=pd_bounds((long)b,in->aux); base[j]-=a; break; }
             case PD_CALL: {
-                /* aux >= 0: user function (index into funcs[]).
+                /* aux >= 0: user function (index into root->funcs[]).
                  * aux <= -1000: external host function (host idx = -1000 - aux).
                  * aux == -1: unresolved; return 0. */
+                const pd_Program *root = c->root ? c->root : p;
                 int na = in->nIn;
                 double argbuf[16];
                 if (na > 0) argbuf[0] = *pd_slot(c, in->in[0]);
                 if (na > 1) argbuf[1] = *pd_slot(c, in->in[1]);
                 for (int k = 2; k < na && k < 16; k++)
-                    argbuf[k] = *pd_slot(c, p->extra[in->extraIdx + k - 2]);
+                    argbuf[k] = *pd_slot(c, root->extra[in->extraIdx + k - 2]);
                 if (in->aux <= -1000) {
                     int hidx = -1000 - in->aux;
-                    if (p->host && hidx >= 0 && hidx < p->host->nFns) {
-                        double rv = p->host->fns[hidx].fn(na, argbuf);
+                    if (root->host && hidx >= 0 && hidx < root->host->nFns) {
+                        double rv = root->host->fns[hidx].fn(na, argbuf);
                         if (out) *out = rv;
                     } else { if (out) *out = 0; }
                     break;
                 }
-                pd_Program *fn = (in->aux >= 0 && (size_t)in->aux < p->nFuncs)
-                                 ? &p->funcs[in->aux] : NULL;
+                pd_Program *fn = (in->aux >= 0 && (size_t)in->aux < root->nFuncs)
+                                 ? &root->funcs[in->aux] : NULL;
                 if (!fn) { if (out) *out = 0; break; }
                 pd_Ctx child;
                 child.prog = fn;
@@ -202,6 +203,7 @@ double pd_run_ctx(pd_Ctx *c) {
                 child.globals = c->globals;
                 child.shouldQuit = c->shouldQuit;
                 child.parent = c;
+                child.root = root;
                 double r = pd_run_ctx(&child);
                 free(child.frame);
                 if (out) *out = r;
@@ -223,6 +225,7 @@ double pd_run(const pd_Program *prog, const double *params,
     c.globals = globals;
     c.shouldQuit = shouldQuit;
     c.parent = NULL;
+    c.root = prog;
     double r = pd_run_ctx(&c);
     free(c.frame);
     return r;

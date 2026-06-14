@@ -25,6 +25,7 @@ typedef struct pd_Ctx {
     volatile int *shouldQuit; /* freeze-probe; checked in loops */
     int        quitCounter;
     struct pd_Ctx *parent; /* caller's ctx, for accessing host externs */
+    const pd_Program *root; /* the entry program (holds funcs[], host, extra[]) */
 } pd_Ctx;
 
 /* Resolve a register to a double storage pointer (for value operands).

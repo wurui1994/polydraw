@@ -113,6 +113,16 @@ TEST(static_preserves)   { /* globals persist across the single run */
     ASSERT_NEAR(ev("static counter; counter+=1; counter+=1; counter"), 2, 1e-12); return 1;
 }
 
+/* ---- user-defined functions ---- */
+TEST(func_simple)       { ASSERT_NEAR(ev("sq(x){x*x} sq(7)"), 49, 1e-12); return 1; }
+TEST(func_two_args)     { ASSERT_NEAR(ev("add(a,b){a+b} add(3,4)"), 7, 1e-12); return 1; }
+TEST(func_calls_func)   { ASSERT_NEAR(ev("sq(x){x*x} sum(a,b){a+b} sum(sq(2),sq(3))"), 13, 1e-12); return 1; }
+TEST(func_recursion)    { ASSERT_NEAR(ev("fib(n){ if(n<2) return n; return fib(n-1)+fib(n-2) } fib(10)"), 55, 1e-9); return 1; }
+TEST(func_locals)       { ASSERT_NEAR(ev("f(x){ y=x*2; z=y+1; z } f(5)"), 11, 1e-12); return 1; }
+TEST(func_in_loop)      { ASSERT_NEAR(ev("dbl(x){x*2} s=0; for(i=1;i<=4;i+=1){s=dbl(i)+s}; s"), 20, 1e-12); return 1; }
+TEST(func_multi_in_script){ ASSERT_NEAR(ev("a(x){x+1} b(x){x*2} a(b(5))"), 11, 1e-12); return 1; }
+TEST(func_then_main)    { ASSERT_NEAR(ev("helper(n){n*n} helper(6)"), 36, 1e-12); return 1; }
+
 static test_fn_t tests[] = {
     test_run_num_literal, test_run_neg_literal, test_run_add, test_run_add_sub,
     test_run_mul_div, test_run_pemdas1, test_run_pemdas2, test_run_power,
@@ -135,6 +145,9 @@ static test_fn_t tests[] = {
     test_run_static_scalar, test_run_static_array_write,
     test_run_static_array_pow2, test_run_static_array_nonpow2,
     test_run_enum_as_array_size, test_run_array_sum_loop, test_run_static_preserves,
+    test_run_func_simple, test_run_func_two_args, test_run_func_calls_func,
+    test_run_func_recursion, test_run_func_locals, test_run_func_in_loop,
+    test_run_func_multi_in_script, test_run_func_then_main,
     NULL
 };
 

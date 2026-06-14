@@ -33,6 +33,10 @@ int pd_compile_host(pd_Program *prog, const char *src, const pd_Host *host, char
     prog->globals = p.globals;
     prog->nGlobals = p.nGlobals;
     p.globals = NULL;
+    /* transfer user functions */
+    prog->funcs = p.funcs;
+    prog->nFuncs = p.nFuncs;
+    p.funcs = NULL;
     if (host) pd_host_attach(prog, host);
     pd_lex_free(&ts);
     pd_builder_free(&b);

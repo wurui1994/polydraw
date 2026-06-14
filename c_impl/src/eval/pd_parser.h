@@ -60,7 +60,9 @@ typedef struct {
 
     /* user functions table (mirrors program->funcs) */
     pd_Program *funcs;
+    size_t      nFuncsAlloc;
     size_t     *pNFuncs;
+    size_t      nFuncs;
 
     /* error reporting */
     char      err[256];
