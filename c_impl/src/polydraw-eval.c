@@ -4,6 +4,7 @@
  *   polydraw-eval 'expr'           # compile and evaluate, print result
  *   polydraw-eval -f file.pss      # compile host block of a .pss, run once
  *   polydraw-eval -f file.pss -n 3 # run N iterations (for loops with state)
+ *   polydraw-eval -c -f file.pss   # compile only (no execution)
  *   polydraw-eval -d 'expr'        # dump IR then run
  *
  * For -f, the .pss is split into sections (@v/@g/@f/@h); the host block is
@@ -39,11 +40,13 @@ int main(int argc, char **argv) {
     const char *src = NULL;
     char *fileBuf = NULL;
     int dump = 0;
+    int compileOnly = 0;
     int nRuns = 1;
     int useHost = 0;  /* attach polydraw host */
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-d") == 0) dump = 1;
+        else if (strcmp(argv[i], "-c") == 0) compileOnly = 1;
         else if (strcmp(argv[i], "-f") == 0 && i+1 < argc) {
             fileBuf = read_file(argv[++i], NULL);
             if (!fileBuf) { fprintf(stderr, "cannot read %s\n", argv[i]); return 2; }
@@ -76,7 +79,8 @@ int main(int argc, char **argv) {
             "  polydraw-eval 'expr'         evaluate expression, print result\n"
             "  polydraw-eval -f file.pss    run host block of a .pss once\n"
             "  polydraw-eval -d 'expr'      dump IR then run\n"
-            "  polydraw-eval -f f.pss -n N  run N iterations\n");
+            "  polydraw-eval -f f.pss -n N  run N iterations\n"
+            "  polydraw-eval -c -f f.pss    compile only, no execution\n");
         return 1;
     }
 
@@ -96,6 +100,13 @@ int main(int argc, char **argv) {
         fprintf(stderr, "compile error: %s\n", err);
         free(fileBuf);
         return 1;
+    }
+
+    if (compileOnly) {
+        printf("OK: compiled (%zu instructions)\n", prog.nInstr);
+        pd_program_free(&prog);
+        free(fileBuf);
+        return 0;
     }
 
     if (dump) {
