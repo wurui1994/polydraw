@@ -365,6 +365,20 @@ static pd_Reg parse_primary(pd_Parser *p) {
     pd_Tok *t = pd_eat(p);
     p->lastLValue = NULL;
     p->lastLValueIsArrayIndex = 0;
+    /* address-of prefix: &ident (EVAL pass-by-reference). For now, returns
+     * the variable's value; full pointer semantics come with host arrays. */
+    if (t->kind == PD_TOK_PUNCT && t->len==1 && t->text[0]=='&') {
+        /* parse the following identifier as a normal primary */
+        return parse_primary(p);
+    }
+    /* string-prefix dollar-ident or dollar-string: EVAL string arg. Return 0. */
+    if (t->kind == PD_TOK_PUNCT && t->len==1 && t->text[0] == 0x24) {
+        if (pd_cur(p)->kind == PD_TOK_IDENT || pd_cur(p)->kind == PD_TOK_STRING) pd_eat(p);
+        pd_Reg out = pd_new_local(p->b);
+        pd_Reg z = pd_new_const(p->b, 0.0);
+        pd_emit1(p->b, PD_MOV, out, z);
+        return out;
+    }
     if (t->kind == PD_TOK_NUMBER) {
         pd_Reg c = pd_new_const(p->b, t->num);
         pd_Reg out = pd_new_local(p->b);
@@ -1118,6 +1132,20 @@ restore:
 
 int pd_parse_stmt(pd_Parser *p) {
     pd_Tok *t = pd_cur(p);
+    /* label definition: IDENT :  (EVAL goto labels). We accept and skip them;
+     * goto support is partial (goto itself is a no-op for now). */
+    if (t->kind == PD_TOK_IDENT) {
+        size_t a1 = p->tok + 1;
+        if (a1 < p->ts->nToks &&
+            p->ts->toks[a1].kind == PD_TOK_PUNCT && p->ts->toks[a1].len==1 &&
+            p->ts->toks[a1].text[0] == ':') {
+            /* skip "label:" and optional ";" */
+            pd_eat(p); /* IDENT */
+            pd_eat(p); /* : */
+            accept_punct(p, ";");
+            return 1;
+        }
+    }
     if (t->kind == PD_TOK_IDENT) {
         if (accept_ident(p, "IF")) { parse_if(p); return 1; }
         if (accept_ident(p, "WHILE")) { parse_while(p); return 1; }

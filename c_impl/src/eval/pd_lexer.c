@@ -71,7 +71,7 @@ static pd_Tok *new_tok(pd_TokenStream *t) {
  * NOTE: ++ and -- are NOT merged here so that "--5" lexes as two unary '-'.
  * Prefix/postfix ++/-- as statement ops can be handled in the parser. */
 static const char *PUNCT2[] = {"<=",">=","==","!=","&&","||","+=","-=","*=","/=","%=","^=",NULL};
-static const char *VALID_PUNCT = "+-*/%^()[]{};,<>=&$."
+static const char *VALID_PUNCT = "+-*/%^()[]{};,<>=&$.:"
                                  "<=>!&|";
 
 static int starts_punct(char c) {

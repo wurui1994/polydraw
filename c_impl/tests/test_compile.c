@@ -86,6 +86,15 @@ TEST(break_in_loop)      { ASSERT_NEAR(ev("i=0; while(1){ if(i>=3) break; i+=1 }
 TEST(last_value)         { ASSERT_NEAR(ev("1; 2; 3"), 3, 1e-12); return 1; }
 TEST(trailing_expr)      { ASSERT_NEAR(ev("x=5; x*x"), 25, 1e-12); return 1; }
 
+/* ---- EVAL prefix forms: &ident (pass-by-ref) and $arg (string) ---- */
+/* &ident currently passes through the variable's value (pointer semantics
+ * arrive with host arrays); $arg yields 0. These guard the parse_primary
+ * prefix branches so the NUMBER case is never silently dropped again. */
+TEST(addr_of_passthrough){ ASSERT_NEAR(ev("x=7; &x"), 7, 1e-12); return 1; }
+TEST(dollar_str_arg)     { ASSERT_NEAR(ev("x=5; x+$\"hi\""), 5, 1e-12); return 1; }
+TEST(label_def_skipped)  { ASSERT_NEAR(ev("start: 41+1"), 42, 1e-12); return 1; }
+TEST(number_primary_guard){ ASSERT_NEAR(ev("2+3"), 5, 1e-12); return 1; } /* regression: NUMBER case */
+
 /* ---- comments & whitespace ---- */
 TEST(line_comment)       { ASSERT_NEAR(ev("2+3 // comment\n+1"), 6, 1e-12); return 1; }
 TEST(block_comment)      { ASSERT_NEAR(ev("2 /* hi */ + 3"), 5, 1e-12); return 1; }
@@ -139,6 +148,8 @@ static test_fn_t tests[] = {
     test_run_if_true, test_run_if_false, test_run_while_loop, test_run_for_loop,
     test_run_for_loop_body, test_run_break_in_loop,
     test_run_last_value, test_run_trailing_expr,
+    test_run_addr_of_passthrough, test_run_dollar_str_arg,
+    test_run_label_def_skipped, test_run_number_primary_guard,
     test_run_line_comment, test_run_block_comment,
     test_run_empty_returns_zero, test_run_missing_paren_err,
     test_run_enum_basic, test_run_enum_with_init, test_run_enum_implicit_seq,
