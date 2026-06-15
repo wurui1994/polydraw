@@ -404,15 +404,15 @@ static pd_Reg parse_primary(pd_Parser *p) {
         size_t nl = t->len < sizeof(name) ? t->len : sizeof(name)-1;
         memcpy(name, t->text, nl); name[nl] = 0;
 
-        /* parameterless builtins: RND, NRND */
-        if (strcmp(name, "RND") == 0) {
+        /* parameterless builtins: RND, NRND. EVAL allows both bare `rnd`
+         * and `rnd()` with empty parens; consume optional () here. */
+        if (strcmp(name, "RND") == 0 || strcmp(name, "NRND") == 0) {
+            if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='(') {
+                pd_eat(p); /* ( */
+                pd_expect_punct(p, ")");
+            }
             pd_Reg out = pd_new_local(p->b);
-            pd_emit0(p->b, PD_RND, out);
-            return out;
-        }
-        if (strcmp(name, "NRND") == 0) {
-            pd_Reg out = pd_new_local(p->b);
-            pd_emit0(p->b, PD_NRND, out);
+            pd_emit0(p->b, (name[0]=='R') ? PD_RND : PD_NRND, out);
             return out;
         }
 

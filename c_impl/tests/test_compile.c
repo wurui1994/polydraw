@@ -63,6 +63,20 @@ TEST(and_logic)          { ASSERT_NEAR(ev("1&&0"), 0, 1e-12); return 1; }
 TEST(or_logic)           { ASSERT_NEAR(ev("0||1"), 1, 1e-12); return 1; }
 TEST(chain_cmp)          { ASSERT_NEAR(ev("2+2==4"), 1, 1e-12); return 1; }
 
+/* ---- RNG: deterministic sequence (32-bit wraparound, seeded) ---- */
+TEST(rnd_in_range)       { double r = ev("srand(1); rnd()"); ASSERT(r >= 0.0 && r < 1.0); return 1; }
+TEST(rnd_two_calls_differ){ /* second call must NOT return garbage (>1) — 32-bit
+                             * wraparound bug guard. Both in [0,1). */
+    double r = ev("srand(1); r1=rnd(); r2=rnd(); r2");
+    ASSERT(r >= 0.0 && r < 1.0); return 1;
+}
+TEST(rnd_seeded_reproducible){ /* within one run, multiple RND calls all stay in [0,1).
+                             * This is the real guard for the 32-bit wraparound bug:
+                             * before the fix, the 2nd+ call returned huge values. */
+    double r = ev("s=0; for(i=0;i<100;i+=1){ r=rnd(); if(r>=1||r<0) s+=1 }; s");
+    ASSERT_NEAR(r, 0, 1e-12); return 1; /* s==0 means all 100 values were valid */
+}
+
 /* ---- variables & assignment ---- */
 TEST(assign_return)      { ASSERT_NEAR(ev("x=5"), 5, 1e-12); return 1; }
 TEST(var_use)            { ASSERT_NEAR(ev("x=10; x*2"), 20, 1e-12); return 1; }
@@ -174,6 +188,7 @@ static test_fn_t tests[] = {
     test_run_sgn, test_run_unit, test_run_fact5,
     test_run_less_true, test_run_equal_true, test_run_not_equal,
     test_run_and_logic, test_run_or_logic, test_run_chain_cmp,
+    test_run_rnd_in_range, test_run_rnd_two_calls_differ, test_run_rnd_seeded_reproducible,
     test_run_assign_return, test_run_var_use, test_run_var_multi,
     test_run_compound_add, test_run_compound_mul, test_run_var_case_insens,
     test_run_if_true, test_run_if_false, test_run_while_loop, test_run_for_loop,

@@ -16,6 +16,7 @@
 #include "pd_host.h"
 #include <math.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 /* RNG — exact copy of original krand/nrnd (eval.c:497, 503) so that
@@ -24,11 +25,16 @@ static unsigned long g_holdrand = 1;
 static int g_normstat = 0;
 static double g_srand2;
 
-void pd_srand(unsigned long s) { g_holdrand = s; g_normstat = 0; }
+void pd_srand(unsigned long s) { g_holdrand = (uint32_t)s; g_normstat = 0; }
 
+/* Original krand uses 32-bit long arithmetic (Win32): kholdrand*214013*2
+ * +2531011*2 wraps at 32 bits, then >>1. On 64-bit unsigned long that wrap
+ * is lost, so explicitly truncate to uint32. */
 static unsigned long pd_krand(void) {
-    g_holdrand = (unsigned long)((g_holdrand * (214013u * 2u) + 2531011u * 2u) >> 1);
-    return g_holdrand;
+    uint32_t v = (uint32_t)g_holdrand;
+    v = (uint32_t)((v * (214013u * 2u) + 2531011u * 2u) >> 1);
+    g_holdrand = v;
+    return v;
 }
 
 static double pd_nrnd(void) {
