@@ -83,11 +83,12 @@ static double hf_printf(int n, const double *a) {
 
 static double hf_printg(int n, const double *a) { (void)n; (void)a; return 0; } /* TODO: GPU text */
 static double hf_klock(int n, const double *a) {
-    double now = (double)clock() / CLOCKS_PER_SEC - g_state->startTime;
-    if (n >= 1 && a[0] != 0.0) {
-        /* return date/time components — simplified: just return time */
-        return now;
-    }
+    /* Deterministic mode: if clockScale > 0, return numframes*clockScale
+     * (so renders are reproducible across runs for golden diffing). */
+    double now;
+    if (g_state->clockScale > 0.0) now = g_state->numframes * g_state->clockScale;
+    else                            now = (double)clock() / CLOCKS_PER_SEC - g_state->startTime;
+    if (n >= 1 && a[0] != 0.0) return now;  /* date/time components: approx */
     return now;
 }
 static double hf_srand(int n, const double *a) { if (n>=1) pd_srand((unsigned long)a[0]); return 0; }

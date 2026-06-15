@@ -8,11 +8,21 @@ SRC_EVAL = src/eval/pd_ir.c src/eval/pd_interp.c src/eval/pd_lexer.c \
            src/eval/pd_parser.c src/eval/pd_compile.c src/eval/pd_host.c \
            src/eval/pd_section.c
 SRC_POLY = src/pd_polyhost.c
+SRC_RENDER = src/render/glcmd.c src/render/pd_polyhost_render.c src/render/pd_runlib.c
 
-TESTS = build/test_interp build/test_lexer build/test_compile build/test_host build/test_section
+TESTS = build/test_interp build/test_lexer build/test_compile build/test_host build/test_section build/test_render
 TOOLS = build/polydraw-eval
 
-all: $(TESTS) $(TOOLS)
+# macOS uses .dylib, Linux .so
+ifeq ($(shell uname -s),Darwin)
+  SHLIB = build/libpolydraw_eval.dylib
+  SHARED = -dynamiclib
+else
+  SHLIB = build/libpolydraw_eval.so
+  SHARED = -shared
+endif
+
+all: $(TESTS) $(TOOLS) $(SHLIB)
 
 build:
 	mkdir -p build
@@ -39,6 +49,15 @@ build/test_host: tests/test_host.c $(SRC_EVAL) \
 build/test_section: tests/test_section.c src/eval/pd_section.c \
                      src/eval/pd_section.h tests/test_main.h | build
 	$(CC) $(CFLAGS) -o $@ tests/test_section.c src/eval/pd_section.c $(LDFLAGS)
+
+build/test_render: tests/test_render.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) \
+                    src/render/glcmd.h src/render/pd_runlib.h src/pd_polyhost.h \
+                    tests/test_main.h | build
+	$(CC) $(CFLAGS) -o $@ tests/test_render.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(LDFLAGS)
+
+# Shared library for Python ctypes (and future C offscreen). Exposes pdrl_*.
+$(SHLIB): $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) | build
+	$(CC) $(CFLAGS) $(SHARED) -o $@ $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(LDFLAGS)
 
 build/polydraw-eval: src/polydraw-eval.c $(SRC_EVAL) $(SRC_POLY) \
                      src/eval/pd_compile.h src/eval/pd_ir.h src/eval/pd_interp.h \

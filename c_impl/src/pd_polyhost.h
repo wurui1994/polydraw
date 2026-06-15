@@ -23,6 +23,9 @@ typedef struct {
     double keystatus[256];   /* indexed by scancode */
     /* accumulated time since compile (seconds) */
     double startTime;
+    /* deterministic-clock mode for reproducible rendering: if > 0, klock()
+     * returns numframes*clockScale instead of wall-clock. */
+    double clockScale;
     /* printf output buffer (or NULL = stdout) */
     char  *logBuf;
     size_t logLen, logCap;
@@ -33,6 +36,11 @@ void pd_polystate_init(pd_PolyState *s);
 /* Populate a host table with all default polydraw symbols. The state's
  * lifetime must outlive the host table. */
 void pd_polyhost_install(pd_Host *h, pd_PolyState *s);
+
+/* Variant: gl* calls are recorded into the given GLCmdBuf (see render/glcmd.h)
+ * instead of being no-op stubs. Also registers the GL_ constants. */
+struct GLCmdBuf;
+void pd_polyhost_install_render(pd_Host *h, pd_PolyState *s, struct GLCmdBuf *glbuf);
 
 #ifdef __cplusplus
 }
