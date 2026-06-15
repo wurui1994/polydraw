@@ -1,13 +1,46 @@
-# 05 — 图形子系统（GPU 抽象）
+# 05 — 图形子系统（GPU 抽象）+ Offscreen 渲染
 
-## 1. 范围
+## 1. 范围与优先级
+
+> **这是当前最高优先级。** EVAL 宿主脚本通过 `glXxx` 外部函数调用图形 API。目标是尽快打通"加载 `.pss` → 编译 host 块 → 执行渲染调用 → **出图**"的完整流程，让脚本能真正跑起来并产生可验证的画面。
 
 EVAL 宿主脚本通过 `glXxx` 外部函数调用图形 API。原版用 fixed-function OpenGL 1.x + ARB 扩展。现代化方案：
 
 - **C 实现**：OpenGL 3.3 Core Profile（GLAD 加载，GLFW 窗口）。
 - **JS 实现**：WebGL2（GLSL ES 3.0）。
+- **两种渲染模式**（同等支持，共享同一套 EVAL 侧 API）：
+  - **窗口渲染**：可见窗口，交互（鼠标/键盘），主循环。
+  - **Offscreen 渲染**：无窗口（headless），渲染到 FBO/离屏缓冲，导出帧到 PNG/缓冲区。**这是验收渲染正确性的主要手段**（见 §11）。
 
 两者共享同一套"EVAL 侧 API 语义"，差异只在后端实现。
+
+## 1.1 Offscreen 渲染（验收优先路径）
+
+为方便自动化检查与无显示器的 CI 环境，offscreen 渲染是**第一类**支持，而非附属功能。
+
+**C 实现 offscreen**：
+- 创建一个 **EGL/pbuffer** 或 **带隐藏窗口的 FBO** 上下文（无需可见窗口）。
+  - macOS：`CGLContextObj` + offscreen pixel buffer；或隐藏 `NSOpenGLView` + FBO。
+  - Linux：EGL surfaceless（`EGL_MESA_platform_surfaceless`）或 GBM；或隐藏 GLFW 窗口 + FBO。
+  - Windows：隐藏窗口 + WGL + FBO；或 `WGL_ARB_pbuffer`。
+- 渲染目标：固定尺寸的 FBO（color attachment = RGBA8 纹理，可选 depth/stencil）。
+- 帧导出：`glReadPixels` → 原始像素 / `stb_image_write` PNG。
+- CLI：`polydraw render foo.pss --frames N --w 640 --h 480 --out frame%04d.png [--single N]`
+  - `--single N`：只渲染并导出第 N 帧（用于快速视觉检查）。
+  - `--frames N`：连续渲染 N 帧，导出每一帧（用于动画/状态累积验证）。
+
+**JS 实现 offscreen**：
+- 浏览器：`OffscreenCanvas` + WebGL2（可在 Worker 里）；`canvas.convertToBlob()` 导出 PNG。
+- Node：`headless-gl`（社区库，纯软件/硬件 GL）或 `skia-canvas`；若无 GL，降级为"解释器跑 EVAL + 软件光栅化"的最小验收路径。
+
+**验收用法**：
+```
+# 渲染单帧，肉眼/工具比对
+polydraw render balls.pss --single 30 --w 640 --h 480 --out balls_f30.png
+# 渲染序列（动画）
+polydraw render drawsph.pss --frames 60 --out drawsph_%04d.png
+```
+
 
 ---
 
@@ -177,8 +210,22 @@ uniform mat4 _modelview, _proj, _mvp;
 
 ---
 
-## 10. 测试
+## 10. 测试（以 offscreen 出图为验收）
 
-- 每个 `ken/`、`tigrou/` 示例脚本能加载并渲染（截图比对原版输出，容许 GPU 驱动差异）。
+- **首要验收**：每个 `ken/`、`tigrou/` 示例脚本能用 offscreen 模式渲染出图（`polydraw render foo.pss --single N --out foo.png`），人工/工具比对画面合理（容许 GPU 驱动差异）。这是"渲染全流程打通"的可执行判据。
 - fixed-function 兼容层：`glBegin/glVertex/glEnd` 累积的几何与原版 GL 渲染一致（位置/颜色/法线/纹理坐标）。
 - GLSL 适配方言：所有示例的 `@v/@f` 块能在 modern GL 上编译通过。
+- 窗口模式与 offscreen 模式产出**像素一致**的帧（同一 GL 上下文语义）。
+
+## 11. 渲染全流程里程碑（当前主线）
+
+打通渲染的渐进式子步骤（对应重排后的 M2-host → M3-render）：
+
+1. **FBO + 离屏上下文**：建立 offscreen GL 上下文 + FBO（color/depth），`glReadPixels` 出图。先不接 EVAL，验证"清屏 → 画一个三角形 → 出 PNG"。
+2. **fixed-function 兼容层（最小集）**：`glBegin/glVertex/glEnd/glColor/glPushMatrix/glTranslate/...` 累积到 VBO，passthrough 着色器出图。跑 `balls.pss`（纯 fixed-function）。
+3. **GLSL 适配方言**：`@v/@f` 块的旧符号翻译，passthrough → 用户着色器切换。跑 `drawsph.pss` / `interference.pss`。
+4. **纹理**：`stb_image` 加载 + colmode 上传 + capture-to-texture。
+5. **窗口模式**：GLFW 窗口 + 输入 + 主循环，与 offscreen 共享渲染层。
+
+每步都用 offscreen 出图验收，不依赖人工盯窗口。
+

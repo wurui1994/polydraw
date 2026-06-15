@@ -145,9 +145,9 @@ while (!shouldClose):
 - 布局：CSS flexbox / grid。
 - 文件加载：`<input type=file>` 或拖拽；浏览器无法自由访问文件系统，提供示例脚本下拉菜单。
 
-### 5.3 Headless 模式（C）
+### 5.3 Offscreen / Headless 模式（C，验收主线）
 
-`polydraw --headless script.pss --frames 100 --out frame%04d.png`：无窗口，渲染到 FBO，输出 PNG。用于自动化测试与截图比对。
+见 `05_Graphics.md` §1.1。`polydraw render script.pss --frames N --out frame%04d.png [--single N]`：无窗口，渲染到 FBO，输出 PNG。**这是渲染正确性的主要验收手段**（不依赖人工盯窗口），优先于窗口模式实现。
 
 ---
 

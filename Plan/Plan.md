@@ -88,16 +88,19 @@ typedef struct {
 - **备选解析器 (Plan B)**：**严格复刻原版**的链表折叠算法，作为参考实现与 fuzzing 对照基准。两者输出同一份 `gasm[]` IR，保证行为一致。
 - 语句级（`if/while/for/goto/return/static/enum`）用经典递归下降，两套解析器共享这部分。
 
-### 2.3 JIT 后端：sljit（C）+ V8（JS）
+### 2.3 JIT 后端：sljit 过渡 → LLVM 终极（C）+ V8（JS）
 
-| 关注点           | C 实现：sljit                                                            | JS 实现：V8                                  |
-| ---------------- | ------------------------------------------------------------------------ | -------------------------------------------- |
-| 是否手写汇编     | **否**。sljit 提供 `SLJIT_MOV/F64`、`SLJIT_ADD_F64`、`sljit_emit_jump` 等跨平台 RISC 后端指令 | 不适用 —— 把 IR 翻译成 JS 字符串，V8 自身做 JIT |
-| 支持架构         | x86, x86-64, ARM (32), ARM64, MIPS, PPC, RISC-V                           | V8 所运行的任何架构                           |
-| 许可证           | BSD-2-Clause                                                              | (JS 侧无第三方库)                            |
-| 集成方式         | 单文件 `sljit_src/sljit_src.c`（vendored，约 6k 行）直接编进项目          | 原生 `new Function()`                         |
-| 内存权限         | sljit 内部用 `mmap`+`mprotect` (POSIX) / `VirtualProtect` (Win) 处理 W^X   | 浏览器/Node 自动                              |
-| 回退             | sljit 编译失败 → 走解释器                                                 | `new Function` 抛错 → 走解释器（eval 沙箱）  |
+> **JIT 当前可选。** 先打通渲染全流程（M2/M3），解释器驱动渲染；渲染稳定后再做 JIT。
+
+C 侧分两步：**sljit**（过渡，单文件、零依赖，验证 IR→机器码链路）→ **LLVM JIT**（终极基准，平台最优代码，经 `llvm-c`）。两者共用同一份 EVAL IR 与遍历骨架，差别只在"发射"层。编译开关 `POLYDRAW_JIT=llvm|sljit|off`。
+
+| 关注点           | C：sljit（过渡）                          | C：LLVM JIT（终极）                | JS 实现：V8                                  |
+| ---------------- | ------------------------------------------ | ---------------------------------- | -------------------------------------------- |
+| 是否手写汇编     | 否（跨平台 RISC 后端指令）                 | 否（生成 LLVM IR，LLVM 后端发码）  | 不适用 —— 把 IR 翻译成 JS 字符串，V8 自身做 JIT |
+| 支持架构         | x86/x64/ARM32/ARM64/MIPS/PPC/RISC-V        | LLVM 支持的全部（x86-64/ARM64…）   | V8 所运行的任何架构                           |
+| 许可证           | BSD-2-Clause                               | Apache-2.0 w/ LLVM-exception       | (JS 侧无第三方库)                            |
+| 集成方式         | vendored 单文件                            | 系统探测（不 vendor），找不到降级  | 原生 `new Function()`                         |
+| 回退             | sljit 失败 → 解释器                        | LLVM 不可用 → sljit → 解释器       | `new Function` 抛错 → 走解释器（eval 沙箱）  |
 
 详见 `Plan/04_JIT_Backend.md`。
 
@@ -109,12 +112,13 @@ typedef struct {
 - **C/解释器路径**：解释器主循环每 N 条指令检查一次标志。
 - **JS 路径**：JS 单线程，依靠 `requestAnimationFrame` 帧间隔 + 在循环里插入合作式 `if (globalQuit) return` 检查（生成的 JS 代码里自动注入）。
 
-### 2.5 GPU / 图形抽象
+### 2.5 GPU / 图形抽象（当前主线）
 
 原版直接调 fixed-function OpenGL + ARB 扩展。现代化方案（见 `Plan/05_Graphics.md`）：
 
 - **C 实现**：OpenGL 3.3 Core Profile（跨平台用 GLAD/GLFW 加载）。fixed-function 调用（`glBegin/glVertex/glPushMatrix/...`）用一个**保留的矩阵/顶点状态机**在宿主侧模拟，最终落到 `glDrawArrays`。GLSL 块加 `#version 330` 包装，`ftransform()`/`gl_FragColor` 等遗留符号做源到源的翻译。
 - **JS 实现**：WebGL2（GLSL ES 3.0）。同样的宿主侧 fixed-function 模拟层用纯 JS 实现，EVAL 调 `glVertex` 时累积顶点，`glEnd` 时 flush。
+- **Offscreen 渲染（验收主线）**：C 用 EGL/pbuffer 或隐藏窗口 + FBO，`glReadPixels` → PNG（`stb_image_write`），CLI `polydraw render foo.pss --frames/--single/--out`；JS 用 `OffscreenCanvas`。**渲染正确性以 offscreen 出图为首要判据**，不依赖人工盯窗口。
 
 ### 2.6 多平台宿主窗口
 
@@ -143,22 +147,21 @@ polydraw/
 │   ├── 08_Testing_and_Compat.md
 │   └── 09_Roadmap.md
 │
-├── c_impl/                  # C/C++ 现代化实现（后续阶段创建）
-│   ├── third_party/sljit/   # vendored sljit
+├── c_impl/                  # C/C++ 现代化实现
+│   ├── third_party/         # vendored: stb_image(_write), GLFW, miniz; sljit (可选)
 │   ├── src/
 │   │   ├── eval/            # EVAL 编译器：lexer, parser(plan A & B), ir, optimizer
-│   │   ├── jit/             # sljit 后端 + 回退解释器
-│   │   ├── gpu/             # OpenGL 3.3 Core 抽象 + fixed-function 模拟
-│   │   ├── host/            # 宿主程序：.pss 分块、外部函数注册、主循环
-│   │   └── main.c
+│   │   ├── host/            # 宿主程序：.pss 分块、外部函数注册、主循环、offscreen
+│   │   ├── gpu/             # OpenGL 3.3 Core 抽象 + offscreen(FBO) + fixed-function 模拟
+│   │   ├── jit/             # JIT 后端：sljit (过渡) + llvm (终极) + 回退解释器
+│   │   └── main.c           # 入口（含 `polydraw render` offscreen CLI）
 │   └── tests/
 │
-└── js_impl/                 # JavaScript 实现（后续阶段创建）
+└── js_impl/                 # JavaScript 实现（EVAL 核心已完成）
     ├── src/
-    │   ├── eval/            # 同构的 EVAL 编译器（TS）
-    │   ├── jit-js/          # IR→JS 字符串翻译（V8 JIT）
-    │   ├── interp/          # 字节码解释器回退
-    │   ├── gpu/             # WebGL2 抽象
+    │   ├── eval/            # EVAL 编译器（TS）：lexer, parser, ir（已完成，91 单测）
+    │   ├── backend/         # 解释器（已完成）+ IR→JS JIT（待）
+    │   ├── gpu/             # WebGL2 抽象 + OffscreenCanvas（待）
     │   └── host/
     └── tests/
 ```
@@ -199,13 +202,17 @@ polydraw/
 
 ## 6. 里程碑（高层；详细排期见 `Plan/09_Roadmap.md`）
 
-1. **M1 — EVAL 核心可独立运行**：lexer + parser(Plan A) + IR + 优化器 + 解释器。能编译并执行纯数学表达式，输出与原版逐位一致。*(无 GPU)*
-2. **M2 — JIT 后端接入**：sljit 后端；解释器作为回退；冻结保护；`kasm87_showdebug` 等价物。*(仍无 GPU)*
-3. **M3 — 宿主框架**：`.pss` 分块、外部函数表、矩阵/纹理/着色器管理、(C) GLFW+ImGui / (JS) canvas+textarea。
-4. **M4 — GPU 完整**：fixed-function 模拟、GLSL 适配方言、所有 `glXxx` 外部函数、纹理、capture-to-texture。
-5. **M5 — 解析器 Plan B**：复刻原版链表折叠算法，作为对照基准与 fuzzing 甲虫。
-6. **M6 — JS 实现对齐**：与 C 实现行为等价；浏览器 demo 可跑全部 `ken/`、`tigrou/` 示例。
-7. **M7 — 打磨**：错误位置高亮、INI 配置、性能基准对比原版。
+> **优先级原则**：先打通 `.pss` 输入 → 渲染全流程（含 offscreen 出图），JIT 在渲染稳定后再做。解释器是最低保证（永远可用）。JIT 终极基准是 **LLVM**，sljit 为过渡。
+
+1. **M1 — EVAL 核心** ✅：lexer + parser(Plan A) + IR + 解释器。能编译并执行纯数学表达式，48/48 示例脚本可编译。*(无 GPU)*
+2. **M2 — 宿主框架**：`.pss` 分块、外部函数表（桩）、offscreen GL 上下文 + FBO、渲染主循环（`polydraw render`，解释器驱动）。*(无 JIT)*
+3. **M3 — 渲染全流程** ⭐当前主线：fixed-function 模拟、GLSL 适配方言、纹理、capture-to-texture。`balls/interference/drawsph` 能 **offscreen 出图**（验收主线）。
+4. **M4 — JIT 过渡（sljit）**：可选；解释器作回退；冻结保护。渲染稳定后再做。
+5. **M5 — JIT 终极（LLVM）**：可选；平台最优代码，性能基准。
+6. **M6 — 解析器 Plan B**：复刻原版链表折叠算法，作为对照基准与 fuzzing 甲虫。
+7. **M7 — JS 渲染对齐**：WebGL2 + OffscreenCanvas，与 C 像素等价。（JS 的 EVAL 核心已在 M1 随 C 同步移植完成。）
+8. **M8 — 打磨**：窗口 GUI（GLFW+ImGui）、错误位置高亮、INI 配置、性能基准对比原版。
+
 
 ---
 
@@ -229,8 +236,8 @@ polydraw/
 | `01_Lexer.md`                | 词法分析：大小写归一化、注释剥离、字符串字面量、`texttrans` 错误定位 |
 | `02_IR_and_Optimizer.md`     | `gasm[]` IR 设计、寄存器族编码、优化 pass 清单                       |
 | `03_Parser.md`               | Pratt (Plan A) + 链表折叠 (Plan B) 双解析器；语句级递归下降          |
-| `04_JIT_Backend.md`          | sljit 后端、IR→sljit 翻译、解释器回退、冻结保护、调用约定           |
-| `05_Graphics.md`             | OpenGL 3.3 Core / WebGL2、fixed-function 模拟、GLSL 适配方言        |
+| `04_JIT_Backend.md`          | **sljit 过渡 → LLVM 终极**、IR→机器码翻译、解释器回退、冻结保护、调用约定（JIT 可选，渲染优先） |
+| `05_Graphics.md`             | OpenGL 3.3 Core / WebGL2、**offscreen 渲染**、fixed-function 模拟、GLSL 适配方言（当前主线） |
 | `06_Host_and_SectionParser.md` | `.pss` 分块、外部函数注册、主循环、输入/计时                         |
 | `07_JS_Implementation.md`    | JS/TS 实现的结构、IR→JS 字符串翻译、V8 JIT、模块边界                 |
 | `08_Testing_and_Compat.md`   | 等价性测试矩阵、differential testing、fuzzing                        |

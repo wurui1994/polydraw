@@ -1,17 +1,34 @@
-# 04 — JIT 后端（sljit）与解释器回退
+# 04 — JIT 后端（sljit 过渡 → LLVM JIT 终极）与解释器回退
 
 ## 1. 核心约束（用户要求）
 
 > "jit 执行是核心。我们允许解释执行作为回退，但不允许绕过跨平台 jit 的汇编，js 的实现除外。"
 
 含义：
-- **C 实现的 JIT 必须用跨平台 JIT 库（sljit），不得手写任何架构相关汇编。**
+- **C 实现的 JIT 必须用跨平台 JIT 库，不得手写任何架构相关汇编。**
 - **JS 实现豁免**：用 V8 的 `new Function()` 做 JIT，不视为"汇编"。
 - 解释器作为 JIT 不可用 / 编译失败时的回退，**永远可用**。
 
+## 1.1 JIT 路线（sljit 过渡 → LLVM 终极）
+
+> **注意：当前阶段 JIT 是可选的。优先级是先打通 `.pss` 输入 → 宿主框架 → GPU 渲染 → offscreen 出图（见 `09_Roadmap.md` 的 M2 宿主 + M3 渲染），JIT 在渲染流程稳定后再做。**
+
+JIT 后端分两步：
+
+| 阶段 | 方案 | 定位 |
+| ---- | ---- | ---- |
+| **过渡（M4）** | **sljit** | 单文件 C、BSD、跨架构、零外部依赖、快速接入。**不是最终基准。** 用于尽早验证 IR→JIT 的可行性与差分测试基础设施。 |
+| **终极（M5）** | **LLVM JIT**（`LLVMOrcJIT` / `llvm-c`） | 产生平台最优代码（x86-64 / ARM64 后端均有重度优化）；作为**最终性能基准**。sljit 验证过的 IR→JIT 翻译逻辑直接迁移到 LLVM 后端。 |
+
+为什么不一步到位：LLVM 体积大、集成复杂、对 vendored 构建不友好。先用 sljit 把"IR → 机器码 → 与解释器逐位一致"这条链路打通，再换 LLVM 后端即可，IR 与解释器不受影响。
+
+**最终交付**：LLVM JIT 为默认执行路径，解释器为回退；sljit 后端保留为"轻量无依赖"的可选编译配置（`POLYDRAW_JIT=sljit` / `=llvm` / `=off`）。
+
 ---
 
-## 2. sljit 选型理由（基于内在知识）
+## 2. sljit 选型理由（过渡阶段）
+
+> sljit 是**过渡方案**（见 §1.1）。这里论证的是"为何先用 sljit 而非其它轻量库"。LLVM 终极方案见 §12。
 
 | 维度        | sljit                                                            | GNU lightning           | LuaJIT DynASM                | asmjit            |
 | ----------- | ---------------------------------------------------------------- | ----------------------- | ---------------------------- | ----------------- |
@@ -60,7 +77,9 @@ void *code = sljit_generate_code(C, 0, NULL);
 
 ---
 
-## 3. IR → sljit 翻译
+## 3. IR → sljit 翻译（过渡后端）
+
+> 下面的翻译表是 **sljit 过渡后端**的。LLVM 终极后端（§12）沿用同样的 IR 遍历与寄存器映射，只是把 `sljit_emit_*` 换成 LLVM IR builder。
 
 遍历优化后的 `Instr[]`，逐条翻译。每个 `LOCAL` 寄存器映射到一个 `[SLJIT_SP + off]` 栈槽。
 
@@ -222,12 +241,60 @@ JIT 后端把这段编译为 sljit 指令；解释器逐条执行。**两条路�
 
 ## 10. 性能目标
 
-- 纯数学循环（如 `balls.pss` 的 N=16384 粒子更新）：JIT 路径应达到原版 x87 JIT 的 **50%+** 性能（sljit 略有开销但现代 CPU 补偿）。解释器路径约为 JIT 的 1/5~1/10。
-- 编译时间：与原版同数量级（sljit 编译本身很快）。
+- 纯数学循环（如 `balls.pss` 的 N=16384 粒子更新）：
+  - **LLVM JIT（终极基准）**：达到或超过原版 x87 JIT 性能。
+  - **sljit（过渡）**：达到原版的 **50%+**（sljit 略有开销但现代 CPU 补偿）。
+  - **解释器**：约为 JIT 的 1/5~1/10。
+- 编译时间：sljit 与原版同数量级；LLVM 首次编译略慢但可缓存（`LLVMOrcJIT` 支持）。
 
 ---
 
-## 11. 测试
+## 11. 当前优先级（重要）
+
+> **JIT 当前是可选项。** 工程优先级是先打通 **`.pss` 输入 → 宿主框架 → GPU 渲染 → 出图** 的全流程（M3 + M4），让脚本能真正"跑起来并看到画面"。JIT（sljit 或 LLVM）在渲染流程稳定后再做，此时解释器已能驱动所有渲染调用。
+
+里程碑顺序据此调整（见 `09_Roadmap.md`）：**M1 (EVAL) → M2-host (宿主) → M3-render (渲染+offscreen) → M4-jit (sljit 过渡) → M5-jit-llvm (LLVM 终极) → ...**
+
+---
+
+## 11.5 LLVM JIT 终极后端
+
+sljit 过渡完成后，把同一套 IR→JIT 遍历逻辑迁移到 LLVM，获得平台最优代码。
+
+### 11.5.1 集成方式
+
+- 通过 **`llvm-c`**（LLVM 的 C API，随 LLVM 一起分发）调用，避免 C++ ABI 依赖。或用 `ORCv2` API（`LLVMOrcJIT`）实现懒编译与缓存。
+- vendored 策略：LLVM 体积大（~百 MB），**不 vendor 进仓库**，而是：
+  - 构建时探测系统 LLVM（`llvm-config --libdir --includedir`），
+  - 找不到时自动降级为 sljit 或纯解释器（`POLYDRAW_JIT=llvm|sljit|off`）。
+- 许可：Apache-2.0 with LLVM-exception（兼容）。
+
+### 11.5.2 IR → LLVM IR
+
+| EVAL IR | LLVM IR |
+| ------- | ------- |
+| `LOCAL:off` | `alloca double`，或更优：SSA `phi`/`select`（由 LLVM 寄存器分配） |
+| `CONST` | `LLVMConstReal` |
+| `MOV` | 不发射（SSA 直接引用） |
+| `PLUS/MINUS/TIMES/SLASH` | `fadd/fsub/fmul/fdiv` |
+| `SIN/COS/...` | 声明 `declare double @sin(double)`，`call @sin` |
+| `IF0/IF1/GOTO` | 基本块 + `br cond`（LLVM 天然支持任意控制流，无需 goto 模拟） |
+| `CALL userfunc` | `call` 另一个 LLVM 函数 |
+| `PEEK/POKE` | `getelementptr + load/store`（边界检查内联或调用 helper） |
+
+### 11.5.3 冻结保护
+
+每个循环回跳基本块入口插入 `if (load g_shouldQuit) br exit`。LLVM 的基本块天然支持，比 sljit 更干净。
+
+### 11.5.4 与 sljit 的关系
+
+- 二者**共用同一份 EVAL IR**与"遍历 IR → 发射"的骨架代码，差别只在"发射"层（`emitSljit(...)` vs `emitLLVM(...)`）。
+- 差分测试：LLVM JIT vs 解释器 vs sljit，三方逐位一致。
+- 最终默认走 LLVM；sljit 保留为无外部依赖场景的可选配置。
+
+---
+
+## 12. 测试
 
 - JIT 与解释器对同一 IR 的执行结果**逐位相同**（差分测试）。
 - 冻结保护：`while(1){}` 脚本能在 100ms 内被外部停止。
