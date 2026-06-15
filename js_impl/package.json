@@ -6,7 +6,7 @@
   "main": "src/main.ts",
   "scripts": {
     "build": "tsc",
-    "test": "node --experimental-strip-types --test tests/",
+    "test": "for f in tests/*.test.ts; do echo \"=== $f ===\"; node --experimental-strip-types --test \"$f\"; done",
     "cli": "node --experimental-strip-types src/cli.ts"
   },
   "devDependencies": {
