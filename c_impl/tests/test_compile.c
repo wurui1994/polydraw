@@ -159,6 +159,10 @@ TEST(bare_block_after_decl){ ASSERT_NEAR(ev("static g; { g = 7; g }"), 7, 1e-12)
 TEST(comma_assignments)  { ASSERT_NEAR(ev("a=1,b=2,c=3; c"), 3, 1e-12); return 1; }
 TEST(comma_in_expr_seq)  { ASSERT_NEAR(ev("a=10; a+=5, b=a*2; b"), 30, 1e-12); return 1; }
 
+/* ---- >2-arg function calls (extra[] arg path in interpreter) ---- */
+TEST(call_4_args)        { ASSERT_NEAR(ev("sum4(a,b,c,d){a+b+c+d} sum4(1,2,3,4)"), 10, 1e-12); return 1; }
+TEST(call_5_args)        { ASSERT_NEAR(ev("f(a,b,c,d,e){a*b*c*d*e} f(1,2,3,4,5)"), 120, 1e-12); return 1; }
+
 /* ---- const-expr power operator ^ in array dims (gspiral: enum{N=2^16}) ---- */
 TEST(const_dim_power)    { ASSERT(ev_ok("enum{N=2^16}; static a[N]; 5")); return 1; }
 TEST(const_dim_power2)   { ASSERT(ev_ok("static a[3^2]; 5")); return 1; }
@@ -208,6 +212,7 @@ static test_fn_t tests[] = {
     test_run_param_ref_prefix,
     test_run_bare_block_main, test_run_bare_block_after_decl,
     test_run_comma_assignments, test_run_comma_in_expr_seq,
+    test_run_call_4_args, test_run_call_5_args,
     test_run_const_dim_power, test_run_const_dim_power2,
     test_run_init_list_trailing_comma, test_run_init_list_multiline,
     test_run_func_simple, test_run_func_two_args, test_run_func_calls_func,

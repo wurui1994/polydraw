@@ -175,11 +175,11 @@ double pd_run_ctx(pd_Ctx *c) {
                 if (base) base[j] = a;
                 break;
             }
-            case PD_POKETIMES: { double *base=pd_array_base(c,in->out); long j=pd_bounds((long)b,in->aux); base[j]*=a; break; }
-            case PD_POKESLASH: { double *base=pd_array_base(c,in->out); long j=pd_bounds((long)b,in->aux); base[j]/=a; break; }
-            case PD_POKEPERC:  { double *base=pd_array_base(c,in->out); long j=pd_bounds((long)b,in->aux); base[j]-=floor(base[j]/fabs(a))*fabs(a); break; }
-            case PD_POKEPLUS:  { double *base=pd_array_base(c,in->out); long j=pd_bounds((long)b,in->aux); base[j]+=a; break; }
-            case PD_POKEMINUS: { double *base=pd_array_base(c,in->out); long j=pd_bounds((long)b,in->aux); base[j]-=a; break; }
+            case PD_POKETIMES: { double *base=pd_array_base(c,in->out); long j=pd_bounds((long)b,in->aux); if(base) base[j]*=a; break; }
+            case PD_POKESLASH: { double *base=pd_array_base(c,in->out); long j=pd_bounds((long)b,in->aux); if(base) base[j]/=a; break; }
+            case PD_POKEPERC:  { double *base=pd_array_base(c,in->out); long j=pd_bounds((long)b,in->aux); if(base) base[j]-=floor(base[j]/fabs(a))*fabs(a); break; }
+            case PD_POKEPLUS:  { double *base=pd_array_base(c,in->out); long j=pd_bounds((long)b,in->aux); if(base) base[j]+=a; break; }
+            case PD_POKEMINUS: { double *base=pd_array_base(c,in->out); long j=pd_bounds((long)b,in->aux); if(base) base[j]-=a; break; }
             case PD_CALL: {
                 /* aux >= 0: user function (index into root->funcs[]).
                  * aux <= -1000: external host function (host idx = -1000 - aux).
@@ -189,8 +189,10 @@ double pd_run_ctx(pd_Ctx *c) {
                 double argbuf[16];
                 if (na > 0) argbuf[0] = *pd_slot(c, in->in[0]);
                 if (na > 1) argbuf[1] = *pd_slot(c, in->in[1]);
+                /* extra args live in the CURRENT program's extra[] table (the
+                 * program whose IR contains this CALL), not root's. */
                 for (int k = 2; k < na && k < 16; k++)
-                    argbuf[k] = *pd_slot(c, root->extra[in->extraIdx + k - 2]);
+                    argbuf[k] = *pd_slot(c, p->extra[in->extraIdx + k - 2]);
                 if (in->aux <= -1000) {
                     int hidx = -1000 - in->aux;
                     if (root->host && hidx >= 0 && hidx < root->host->nFns) {
