@@ -1,0 +1,16 @@
+{
+  "name": "polydraw-js",
+  "version": "0.1.0",
+  "description": "PolyDraw EVAL engine — TypeScript implementation (mirror of c_impl). Zero runtime deps; tests use Node's built-in test runner.",
+  "type": "module",
+  "main": "src/main.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --experimental-strip-types --test tests/",
+    "cli": "node --experimental-strip-types src/cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.4.0"
+  }
+}

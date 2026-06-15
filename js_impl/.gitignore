@@ -1,0 +1,5 @@
+node_modules/
+dist/
+*.js
+!vitest.config.ts
+package-lock.json
