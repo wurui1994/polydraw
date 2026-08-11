@@ -18,16 +18,19 @@ EVAL 宿主脚本通过 `glXxx` 外部函数调用图形 API。原版用 fixed-f
 
 为方便自动化检查与无显示器的 CI 环境，offscreen 渲染是**第一类**支持，而非附属功能。
 
-**C 实现 offscreen**：
-- 创建一个 **EGL/pbuffer** 或 **带隐藏窗口的 FBO** 上下文（无需可见窗口）。
-  - macOS：`CGLContextObj` + offscreen pixel buffer；或隐藏 `NSOpenGLView` + FBO。
-  - Linux：EGL surfaceless（`EGL_MESA_platform_surfaceless`）或 GBM；或隐藏 GLFW 窗口 + FBO。
-  - Windows：隐藏窗口 + WGL + FBO；或 `WGL_ARB_pbuffer`。
-- 渲染目标：固定尺寸的 FBO（color attachment = RGBA8 纹理，可选 depth/stencil）。
-- 帧导出：`glReadPixels` → 原始像素 / `stb_image_write` PNG。
-- CLI：`polydraw render foo.pss --frames N --w 640 --h 480 --out frame%04d.png [--single N]`
-  - `--single N`：只渲染并导出第 N 帧（用于快速视觉检查）。
-  - `--frames N`：连续渲染 N 帧，导出每一帧（用于动画/状态累积验证）。
+**C 实现 offscreen**（**已完成**，`c_impl/src/render/gl_offscreen.{h,c}` + `gl_renderer.{h,c}`）：
+- 上下文：无窗口、无显示服务器，镜像 moderngl `create_standalone_context()`。
+  - macOS：CGL，`kCGLPFAOpenGLProfile` + `kCGLOGLPVersion_3_2_Core`，**不挂 drawable**（FBO 渲染不需要）。
+  - Linux：EGL surfaceless（`EGL_MESA_platform_surfaceless`，回退 `eglGetDisplay`）+ 无 surface 上下文（GLAD 加载）。
+  - Windows：TODO（WGL 隐藏窗口）。
+- 渲染目标：固定尺寸 FBO（RGBA8 + Depth24 renderbuffer）。
+- 管线：GLCmd 流（跨后端契约）→ 立即模式状态机（当前色/texcoord/normal + 矩阵栈）→ 图元镶嵌（QUADS/POLYGON/QUAD_STRIP/FAN/STRIP → 三角形）→ 交错 VBO/VAO → 适配后的 GLSL 330 core 程序 → `glDrawArrays` → `glReadPixels` → `stb_image_write` PNG（`c_impl/third_party/`）。
+- 投影矩阵：逐位复刻 `pyref/software_renderer.py` 的 `mat_perspective`/`mat_ortho`（numpy 转置存储，`m[3,2]` 是 w 系数）——**不是**标准 gluPerspective 布局，这是与参考软件渲染器像素对齐的关键。
+- 混合语义复刻参考：RGB 覆盖（src=ONE, dst=ZERO）、alpha 取 max（`glBlendEquationSeparate(GL_FUNC_ADD, GL_MAX)`）。
+- 图元镶嵌顺序、varying 语义、默认 `glDisable(GL_DEPTH_TEST/CULL_FACE)` 均与参考一致。
+- CLI：`polydraw-render foo.pss [--frame N] [--w W] [--h H] [--fovy DEG] [-o out.png]`
+  （默认 frame 30 / 640x480 / fovy 73.74 = setfov(90) 有效值 / 时钟 1/60 确定性）。
+- 验证：`ken/balls.pss` f5、`ken/ceilflor2.pss` f2 与 `pyref/golden/*.png` 像素对比，diff>2 像素 < 0.01%（余量为 GPU 光栅化规则的边缘像素差异）。
 
 **JS 实现 offscreen**：
 - 浏览器：`OffscreenCanvas` + WebGL2（可在 Worker 里）；`canvas.convertToBlob()` 导出 PNG。

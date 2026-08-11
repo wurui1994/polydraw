@@ -9,17 +9,20 @@ SRC_EVAL = src/eval/pd_ir.c src/eval/pd_interp.c src/eval/pd_lexer.c \
            src/eval/pd_section.c
 SRC_POLY = src/pd_polyhost.c
 SRC_RENDER = src/render/glcmd.c src/render/pd_polyhost_render.c src/render/pd_runlib.c
+SRC_GL = src/render/gl_offscreen.c src/render/gl_renderer.c
 
 TESTS = build/test_interp build/test_lexer build/test_compile build/test_host build/test_section build/test_render
-TOOLS = build/polydraw-eval
+TOOLS = build/polydraw-eval build/polydraw-render
 
 # macOS uses .dylib, Linux .so
 ifeq ($(shell uname -s),Darwin)
   SHLIB = build/libpolydraw_eval.dylib
   SHARED = -dynamiclib
+  GLLIBS = -framework OpenGL
 else
   SHLIB = build/libpolydraw_eval.so
   SHARED = -shared
+  GLLIBS = -lEGL -lGL
 endif
 
 all: $(TESTS) $(TOOLS) $(SHLIB)
@@ -63,6 +66,14 @@ build/polydraw-eval: src/polydraw-eval.c $(SRC_EVAL) $(SRC_POLY) \
                      src/eval/pd_compile.h src/eval/pd_ir.h src/eval/pd_interp.h \
                      src/eval/pd_section.h src/pd_polyhost.h | build
 	$(CC) $(CFLAGS) -o $@ src/polydraw-eval.c $(SRC_EVAL) $(SRC_POLY) $(LDFLAGS)
+
+# Offscreen GL renderer: .pss → EVAL → GLCmd stream → CGL/EGL GL → PNG
+build/polydraw-render: src/render_main.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) \
+                       src/render/glcmd.h src/render/pd_runlib.h src/render/gl_renderer.h \
+                       src/render/gl_offscreen.h src/eval/pd_section.h src/pd_polyhost.h \
+                       third_party/stb_image_write.h | build
+	$(CC) $(CFLAGS) -Isrc/render -Ithird_party -o $@ src/render_main.c \
+	    $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) $(LDFLAGS) $(GLLIBS)
 
 test: $(TESTS)
 	@for t in $(TESTS); do echo "=== $$t ==="; $$t || exit 1; done
