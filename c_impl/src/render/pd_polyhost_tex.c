@@ -137,20 +137,19 @@ static const int imagenotfoundbmp[32] = {
 
 static void make_placeholder(int *w, int *h, double **out)
 {
-    /* Seed once so the placeholder noise is deterministic across runs (and
-     * across the interp vs JIT differential runs, which must compare byte
-     * for byte). The original uses rand() unsweded; we pin it to a fixed
-     * seed so the result is reproducible. */
-    static int seeded = 0;
-    if (!seeded) { srand(0x9e3779b1u); seeded = 1; }
+    /* Deterministic "IMAGE NOT FOUND" texture. The original used rand(),
+     * which made placeholder pixels depend on unrelated prior rand() calls
+     * and differ between the interp and JIT differential runs. We replace
+     * it with a pure function of (x,y) so the result is byte-stable and
+     * identical across runs. */
     *w = 32; *h = 32;
     double *pix = malloc(32 * 32 * sizeof(double));
     for (int y = 0; y < 32; y++)
         for (int x = 0; x < 32; x++) {
             if (imagenotfoundbmp[y] & (1 << x)) { pix[y * 32 + x] = (double)0xf0102030u; continue; }
-            /* note: the original always writes gbmp[0] here (a bug we
-             * keep for byte-identical behaviour) */
-            pix[y * 32 + x] = (double)(((rand() << 15) + rand()) & 0x1f1f1f) + 0xff506070;
+            unsigned hx = (unsigned)(x * 2654435761u) ^ (unsigned)(y * 40503u);
+            hx = (hx >> 13) & 0x1f1f1f;
+            pix[y * 32 + x] = (double)hx + 0xff506070;
         }
     *out = pix;
 }
@@ -163,7 +162,6 @@ static double rh_glSetTexFile(pd_Host *h, int n, const double *a)
     const char *file = str_arg(a, 1);
     if (!file) return -2;
     int colmode = n >= 3 ? (int)a[2] : (KGL_MIPMAP + KGL_REPEAT);
-    int coltype = colmode & 15;
 
     /* skip re-load when the same file+colmode is already in (original
      * semantics: glsettex is only called once per texture normally) */

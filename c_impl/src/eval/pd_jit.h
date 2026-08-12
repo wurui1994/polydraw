@@ -29,6 +29,10 @@ extern "C" {
 /* 1 if any JIT backend was compiled in (POLYDRAW_JIT != off). */
 int pd_jit_available(void);
 
+/* Human-readable name of the preferred JIT backend ("llvm", "sljit", or
+ * "none"), for diagnostics. Always safe to call. */
+const char *pd_jit_backend_name(void);
+
 /* Runtime on/off toggle (only meaningful when pd_jit_available()). */
 void pd_jit_set_enabled(int on);
 int  pd_jit_enabled(void);

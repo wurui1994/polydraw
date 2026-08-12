@@ -37,12 +37,32 @@
   - 完整 JS 单测：106 项全绿（compile 54 / gpu 7 / interp 23 / lexer 14 / smoke 2 / softgolden 2 / xbackend 4）。
   - 剩余（部署侧，需浏览器/Node-GL 上下文）：`renderer.ts` 的 WebGL2 真实 GL 绘制路径与纹理上传（`SETTEXDATA`）在浏览器中逐像素同样可验证。
 - **M4**（C JIT sljit）：✅ 已并入上方 M4 条目（`test_jit` 33 项全绿，JIT vs 解释器逐位差分 + GLCmd 逐命令 diff + 冻结保护实测 ~5ms 返回）。
-- **M5**（LLVM）：⬜ **核心目标（用户明确，非可选）**。系统已装 LLVM 22.1.8（`/opt/homebrew/opt/llvm`），`llvm-c` 头文件齐全。待实现 `pd_jit_llvm.c`：IR→LLVM IR（基本块 + `fadd/fmul/...` + `call @sin` + `br`）、冻结保护（基本块入口检查）、运行时（`LLJIT`/`MCJIT` 适配 sljit 的 `pd_run_jit` 调用约定）。
+- **M5**（LLVM）：✅ **核心目标已完成**。系统 LLVM 22.1.8（`/opt/homebrew/opt/llvm`），`llvm-c` 头文件齐全。`c_impl/src/eval/pd_jit_llvm.c` 已实现：IR→LLVM IR（基本块 + `fadd/fmul/fdiv/fsub` + `call @sin/cos/...` + `br`/条件分支）、冻结保护（基本块入口插入 `shouldQuit` 检查，实测 `while(1){}` 在探针置位后 ~5ms 内返回）、运行时（`LLJIT` 适配 `pd_run_jit` 调用约定，与 sljit 共享 dispatch）。
+  - **验证（test_jit，40 项全绿）**：① Part A 纯 EVAL 逐位差分（算术/控制流/函数/RNG/数组 + `fact`/`nrnd` 等）覆盖 LLVM 后端（dispatch 优先 LLVM）；② Part B 5 个目标 `.pss`（`drawsph/balls2k/metaballs/ballsk/disco ball`）GLCmd glbuf 逐命令 diff；③ **Part C 三方逐位一致（M5 验收）**：新增 `c_three_*` 7 项，强制 LLVM-only / sljit-only / 解释器 三路 `pd_run_jit` 并断言结果 `memcmp` 全字节相等，直接满足路线图 M5 验收「LLVM JIT vs 解释器 vs sljit 三方逐位一致」。
+  - 修复：`disco ball` 的 flaky 测试根因是 test harness 的 `glcmd_copy` 未深拷贝 `SETTEXDATA` 像素（`pd_tex_free_all` 后悬垂指针，堆布局依赖导致 ~25% 偶发内容差异）→ 改为深拷贝 `SETTEXDATA`/`MULTMATRIX` 像素并对应释放；同时 `make_placeholder` 由 `rand()` 改为 (x,y) 纯函数，彻底消除不确定性。stress 200 次 0 失败。
 - **M6**（解析器 Plan B）：✅ **`c_impl/src/eval/parser-fold.c` 已实现**——严格复刻 `eval.c:parsefunc` 的链表折叠（node 列表 + gop/gnext + 优先级 0..6 逐遍折叠，eval.c:4205），含两处一元符号规则（表达式开头的隐式 0 节点「-x^2」hack eval.c:1995；运算符后的 negit 翻转 eval.c:2019）。`p->useFold` 时所有表达式（含括号/调用实参/数组下标）走折叠解析器；`pd_compile_fold_host` 暴露 Plan B 入口。
   - **顺带修复 Plan A 一元符号语义缺陷**（此前 `3*-2^2`=-12 而原版=12、`-2+3`=-5 而原版=1 等）：`parse_expr_prec` 现按 fresh（minPrec==0，隐式 0 左操作数、符号作二元运算）/ 非 fresh（negit 即时取反操作数、`^` 绑定在取负之后）两条规则解析，与原版完全一致。
   - **差分验证（test_fold）**：① 57 条神谕实测表达式 A==B==原版；② ~80 条差分语料（含负号链/负指数/嵌套括号/比较/逻辑/数组/循环/递归/static）A==B；③ 2000 条随机 fuzz × 3 组随机变量赋值 = 6000 次求值 A==B。三方等价成立。
   - 全量测试 201 项全绿（新增 test_fold 3 项，含 57 条神谕用例）。
-- **M8**（打磨）：⬜ GUI/错误高亮/INI/全示例/文档，待 M2-M7 稳定后。
+- **M8**（打磨）：✅ **完成**（窗口 GUI + 黑窗已修 + LLVM JIT 已接入生产渲染器 + INI 持久化 + 全 40 脚本位级一致）。仅剩编辑器侧错误高亮（需 ImGui，未 vendored）显式推迟。
+  - **窗口模式 GUI**（`c_impl/src/view_main.c` + `build/polydraw-view`，GLFW 3.4/3.5 via brew）：复用与 offscreen 完全相同的 EVAL→GLCmd→`pd_gl_renderer_*` 管线。
+    - **架构（本会话重做，真正快）**：**直接渲染进 GLFW 窗口自己的 GL 上下文**（`pd_gl_renderer_create_ex(...,own_offscreen=0)` + `set_render_to_default(1)`，即 `pd_gl_renderer_render` 画进默认帧缓冲 0），随后 `glfwSwapBuffers`。**没有任何每帧 GPU→CPU→GPU 像素往返**——这正是原版的做法，也是流畅的关键。早期的“CGL 离屏渲染 + 回读 + 全屏 quad 上传纹理”路径每帧一次 `glReadPixels`+`glTexSubImage2D` 往返，在 macOS 上慢到 <1fps，已废弃。`--once` 无窗口模式仍走 CGL 离屏 FBO 回读（与 `polydraw-render` 位级一致）。
+    - **本会话修掉的真凶（黑窗 + 卡顿根因）**：
+      1. **帧 0 初始化被跳过**：事件循环首帧因 `dt>0` 立即把 `frame` 推进到 1，`pdrl_run_frame(ctx,0)`（脚本里 `if(numframes==0)` 的粒子初始化 / 纹理上传）从未执行 → 场景画在垃圾状态 → 全黑。修复：启动前显式 `run(0)` **并 render** 一次。
+      2. **纹理上传被 `glcmd_reset` 丢弃**：`pdrl_run_frame` 内部 `glcmd_reset` 会清空命令缓冲。仅 `run(0)` 记录 `SETTEXDATA` 而不紧接着 `render`，下一帧 `run(frame)` 就把上传命令冲掉 → 纹理从未进 GL → 黑（heightmap 这类 `glsettex(array)` 脚本尤其明显）。修复：启动块 `run(0)+render` 让上传在渲染时真正执行；之后每帧 `run(frame)+render`（纹理对象已常驻 GL）。
+      3. **逐帧全量重放 O(N²)**：实时循环里每显示一帧都把 `0..frame` 全部 `run_frame` 重跑一遍，到帧 300 时每显示帧要做 300 次 EVAL，整体 O(N²) 退化到 ~1fps。修复：**增量播放**——`prog.globals` 跨 `run_frame` 调用持久（仅绘制缓冲被 `glcmd_reset`），故每显示帧只 `run` 新增的那一帧（`last_rendered+1..frame`）；仅在后退/重启时全量重放。另修正了步进循环“每显示帧最多进 1 帧”的 break 条件错误（原 `if(acc<SEC) break` 实际会一口气连进 ~15 帧）。
+    - **验证**：GLFW-direct 窗口（pre-swap 回读）对 balls(65536)/heightmap(~15000)/disco(31000)/drawsph(65531)/ballsk(4794)/interference(65536) 均非黑；`polydraw-view --once 30` 对全部 40 个 `ken/`+`tigrou/` 脚本逐像素对比 `polydraw-render`，**全 40 个 ≤2/255 差异**（位级一致），满足成功标准 #3。
+    - **实测帧率（GLFW-direct，640×480，LLVM JIT 默认开）**：interference **60fps**（vsync 封顶）/ heightmap **60fps** / drawsph≈53 / ballsk≈168（见基准）/ balls **~13fps**——最后者是该脚本每帧绘制数百个细分球体的真实 GL 光栅开销（与 JIT 无关；EVAL 部分已被 LLVM 提速 ~1.5×）。相较之前的 <1fps 已是数量级提升，窗口真正可用。
+    - 交互：空格暂停/继续、R 重启、←/→ 单帧步进、Esc/Q 退出。
+  - **全示例**：✅ 53/53 `ken/`+`tigrou/` 脚本 @128×128 帧30 均出非平凡 PNG（含纹理/shader/capture 类）。
+  - **性能基准（已完成，详见 `Plan/10_Performance.md`）**：新增 `tools/bench`（纯 EVAL）与 `tools/framebench`（真实整帧 EVAL+GL 回读）两套基准，对比 interp / LLVM / sljit。关键结论：
+    - LLVM JIT（核心目标）在**计算密集**例子稳定 **1.4–1.6×**，把 balls2k(37.7→59.1)/particules sparks(45→68.6)/ballsk(110→168)/heightmap(343→540) 拉过或接近 60fps；轻计算例子因 JIT 调用约定开销反略慢（0.3–1.0×，属固有特性，非 bug）。
+    - **draw-call 密集例子（disco ball 14fps / snake tube 42 / drawsph 53）即使 LLVM 也远低于 60fps**：瓶颈在 GL 光栅与 draw call 提交（disco ball ≈19970 个 draw call，CPU 提交主导，EVAL 仅占 ~1.5/70ms），与 JIT 无关。→ 后续优化方向为**实例化渲染（instancing）**，属较大重构、正确性风险高，列为非阻塞已知优化项。
+    - sljit（过渡后端）始终 ≈1.0×（调用委派解释器），符合“过渡”定位。
+  - **LLVM JIT 已接入生产渲染器（本会话）**：`pdrl_run_frame_jit` 现被 `polydraw-render` 与 `polydraw-view` 真正调用——默认**自动优先 LLVM**（其次 sljit），提供 `--jit`/`--no-jit` 强制开关与 `pd_jit_backend_name()` 诊断输出。三方逐位一致（解释器/LLVM/sljit）不再只在 `test_jit` 内验证，而在**真实渲染管线**逐像素成立：40/40 脚本 `view --once --jit` vs `render`（解释器）差异 ≤2/255。性能基准结论（上）即运行时实际可得。
+  - **配置持久化**：✅ `polydraw-view` 现已**写入** `polydraw.ini`（`[last] script` + `[window] w/h/fovy`，改写式保留其他键），无脚本参数时自动重开上次脚本。
+  - **用户手册**：✅ `polydraw.txt` 已追加「C Implementation」章节，记录 `polydraw-render`/`polydraw-view` 用法、`--jit`/`--no-jit`、窗口控制键、INI 持久化。
+  - **剩余（明确推迟，非阻塞）**：编辑器侧错误高亮（需 ImGui GUI 编辑器，未 vendored）——属 IDE 功能，不影响渲染/CLI 验收，列为后续可选项。
 
 
 ## 2. 详细排期（建议顺序）

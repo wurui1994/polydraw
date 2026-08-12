@@ -57,6 +57,7 @@ int main(void) {
     pdrl_set_clock_scale(ci, 1.0 / 60.0);
     pdrl_set_clock_scale(cj, 1.0 / 60.0);
 
+    pd_tex_free_all();
     pd_srand(1);
     double ri = pdrl_run_frame(ci, 30);
     /* snapshot interp buffer (shallow: we only read a/b/c/d/op/mode) */
@@ -66,6 +67,7 @@ int main(void) {
     memcpy(snap, bi0->cmds, sizeof(GLCmd) * ni);
     GLCmdBuf bi; bi.cmds = snap; bi.n = ni; bi.cap = ni;
 
+    pd_tex_free_all();
     pd_srand(1);
     double rj = pdrl_run_frame_jit(cj, 30);
     const GLCmdBuf *bj = pdrl_glbuf(cj);

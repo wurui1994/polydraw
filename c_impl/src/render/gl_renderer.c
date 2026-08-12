@@ -242,7 +242,17 @@ typedef struct {
 
 struct pd_GLRenderer {
     int w, h;
+    int fb_w, fb_h;           /* actual drawable pixels (Retina: 2x logical).
+                                 Used for glViewport in render_to_default mode. */
     double fovy;
+    int owns_ctx;            /* 1: created+owns an offscreen GL context (and
+                               must destroy it); 0: caller owns the current
+                               GL context (e.g. a GLFW window) */
+    pd_GLOSCtx *osc;         /* offscreen context handle when owns_ctx==1 */
+    int render_to_default;   /* 1: replay directly into the window's default
+                               framebuffer (0) instead of the offscreen FBO —
+                               used by the interactive viewer so no blit is
+                               needed; 0 (default): replay into rd->fbo */
 
     GLuint program;
     GLuint u_mvp;
@@ -332,6 +342,14 @@ static GLuint link_program(const char *vert_src, const char *frag_src)
     }
     glDeleteShader(vs); glDeleteShader(fs);
     return prog;
+}
+
+/* Public wrapper around the internal link_program, for callers (e.g. the
+ * window viewer) that need their own tiny GL programs in the display context.
+ * Returns a linked GL program object, or 0 on failure. */
+GLuint pd_gl_link_program(const char *vert_src, const char *frag_src)
+{
+    return link_program(vert_src, frag_src);
 }
 
 static void bind_attributes(void)
@@ -528,14 +546,23 @@ static void draw_quad(pd_GLRenderer *rd)
 
 pd_GLRenderer *pd_gl_renderer_create(int w, int h, double fovy)
 {
-    pd_GLOSCtx *osc = pd_gl_offscreen_create();
-    if (!osc) {
-        fprintf(stderr, "gl_renderer: could not create offscreen context\n");
-        return NULL;
+    return pd_gl_renderer_create_ex(w, h, fovy, 1);
+}
+
+pd_GLRenderer *pd_gl_renderer_create_ex(int w, int h, double fovy, int own_offscreen)
+{
+    pd_GLOSCtx *osc = NULL;
+    if (own_offscreen) {
+        osc = pd_gl_offscreen_create();
+        if (!osc) {
+            fprintf(stderr, "gl_renderer: could not create offscreen context\n");
+            return NULL;
+        }
     }
     pd_GLRenderer *rd = calloc(1, sizeof(*rd));
-    if (!rd) { pd_gl_offscreen_destroy(osc); return NULL; }
-    rd->w = w; rd->h = h; rd->fovy = fovy;
+    if (!rd) { if (osc) pd_gl_offscreen_destroy(osc); return NULL; }
+    rd->w = w; rd->h = h; rd->fb_w = w; rd->fb_h = h; rd->fovy = fovy; rd->owns_ctx = own_offscreen ? 1 : 0;
+    rd->osc = osc;
     rd->mode = -1;
     rd->mvm_top = 0;
     mat4_identity(rd->mvm_stack[0]);
@@ -564,7 +591,6 @@ pd_GLRenderer *pd_gl_renderer_create(int w, int h, double fovy)
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         fprintf(stderr, "gl_renderer: FBO incomplete\n");
         pd_gl_renderer_destroy(rd);
-        pd_gl_offscreen_destroy(osc);
         return NULL;
     }
     glViewport(0, 0, w, h);
@@ -599,7 +625,6 @@ pd_GLRenderer *pd_gl_renderer_create(int w, int h, double fovy)
     if (!rd->program) {
         fprintf(stderr, "gl_renderer: default program failed\n");
         pd_gl_renderer_destroy(rd);
-        pd_gl_offscreen_destroy(osc);
         return NULL;
     }
     rd->u_mvp = glGetUniformLocation(rd->program, "u_mvp");
@@ -643,8 +668,13 @@ void pd_gl_renderer_set_shaders(pd_GLRenderer *rd,
 
 void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
 {
-    glBindFramebuffer(GL_FRAMEBUFFER, rd->fbo);
-    glViewport(0, 0, rd->w, rd->h);
+    glBindFramebuffer(GL_FRAMEBUFFER, rd->render_to_default ? 0 : rd->fbo);
+    /* In render_to_default mode the drawable is the window's real framebuffer,
+     * which on a HiDPI display is larger than the logical w/h (e.g. 2x). Use
+     * the actual pixel size so the image fills the window instead of sitting
+     * in a quarter of it. For the offscreen FBO, fb_w==w. */
+    if (rd->render_to_default) glViewport(0, 0, rd->fb_w, rd->fb_h);
+    else                        glViewport(0, 0, rd->w, rd->h);
     if (getenv("PD_DEBUG_GL"))
         fprintf(stderr, "RENDER buf=%zu cmds\n", buf->n);
 
@@ -1041,8 +1071,41 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
 
 void pd_gl_renderer_read_rgba(pd_GLRenderer *rd, unsigned char *out)
 {
-    glBindFramebuffer(GL_FRAMEBUFFER, rd->fbo);
+    /* When rendering directly into the window's default framebuffer
+     * (render_to_default), the pixels live in FB 0, not rd->fbo. Read from the
+     * one we actually drew into. */
+    glBindFramebuffer(GL_FRAMEBUFFER, rd->render_to_default ? 0 : rd->fbo);
     glReadPixels(0, 0, rd->w, rd->h, GL_RGBA, GL_UNSIGNED_BYTE, out);
+}
+
+void pd_gl_renderer_acquire(pd_GLRenderer *rd)
+{
+    if (rd && rd->owns_ctx && rd->osc) pd_gl_offscreen_make_current(rd->osc);
+}
+void pd_gl_renderer_release(pd_GLRenderer *rd)
+{
+    if (rd && rd->owns_ctx && rd->osc) pd_gl_offscreen_make_current(NULL);
+}
+
+unsigned int pd_gl_renderer_fbo(pd_GLRenderer *rd)
+{
+    return (unsigned int)(rd ? rd->fbo : 0);
+}
+
+void pd_gl_renderer_set_render_to_default(pd_GLRenderer *rd, int on)
+{
+    if (rd) rd->render_to_default = on ? 1 : 0;
+}
+
+void pd_gl_renderer_set_framebuffer_size(pd_GLRenderer *rd, int fbw, int fbh)
+{
+    if (rd) { rd->fb_w = fbw; rd->fb_h = fbh; }
+}
+
+void pd_gl_renderer_get_framebuffer_size(const pd_GLRenderer *rd, int *fbw, int *fbh)
+{
+    if (rd) { *fbw = rd->fb_w; *fbh = rd->fb_h; }
+    else { *fbw = 0; *fbh = 0; }
 }
 
 void pd_gl_renderer_destroy(pd_GLRenderer *rd)
@@ -1061,5 +1124,6 @@ void pd_gl_renderer_destroy(pd_GLRenderer *rd)
     for (int i = 0; i < REN_MAX_LOCS; i++) free(rd->u_name[i]);
     free(rd->verts);
     free(rd->tris);
+    if (rd->owns_ctx && rd->osc) pd_gl_offscreen_destroy(rd->osc);
     free(rd);
 }

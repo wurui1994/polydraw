@@ -17,6 +17,17 @@ int pd_jit_available(void) {
 #endif
 }
 
+const char *pd_jit_backend_name(void) {
+#if defined(PD_HAVE_LLVM)
+    if (pd_llvm_available()) return "llvm";
+#elif defined(PD_HAVE_SLJIT)
+    if (pd_sljit_available()) return "sljit";
+#else
+    (void)0;
+#endif
+    return "none";
+}
+
 void pd_jit_set_enabled(int on) {
 #if defined(PD_HAVE_LLVM)
     pd_llvm_set_enabled(on);

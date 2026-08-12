@@ -122,14 +122,30 @@ static GLCmdBuf glcmd_copy(const GLCmdBuf *src) {
                 memcpy(cp, src->cmds[i].s, (size_t)n * sizeof(float));
                 dst.cmds[i].s = (const char*)cp;
             }
+        } else if (src->cmds[i].op == GLCMD_SETTEXDATA && src->cmds[i].s) {
+            /* deep-copy: the source pixels live in the shared pd_tex[] table
+             * which a later pd_tex_free_all() (between the two differential
+             * runs) frees. Keep a private copy so the snapshot stays valid. */
+            size_t px = (size_t)src->cmds[i].b * (size_t)src->cmds[i].c *
+                        (size_t)src->cmds[i].d;
+            double *cp = (double*)malloc(px * sizeof(double));
+            memcpy(cp, src->cmds[i].s, px * sizeof(double));
+            dst.cmds[i].s = (const char*)cp;
+        } else if (src->cmds[i].op == GLCMD_MULTMATRIX && src->cmds[i].s) {
+            double *cp = (double*)malloc(16 * sizeof(double));
+            memcpy(cp, src->cmds[i].s, 16 * sizeof(double));
+            dst.cmds[i].s = (const char*)cp;
         }
-        /* SETTEXDATA s points at shared texture data — keep as-is */
     }
     return dst;
 }
 static void glcmd_free_copy(GLCmdBuf *b) {
     for (size_t i = 0; i < b->n; i++)
         if (b->cmds[i].op == GLCMD_UNIFORM && b->cmds[i].s)
+            free((void*)(void*)b->cmds[i].s);
+        else if (b->cmds[i].op == GLCMD_SETTEXDATA && b->cmds[i].s)
+            free((void*)(void*)b->cmds[i].s);
+        else if (b->cmds[i].op == GLCMD_MULTMATRIX && b->cmds[i].s)
             free((void*)(void*)b->cmds[i].s);
     free(b->cmds);
 }
@@ -233,6 +249,69 @@ TEST(b_metaballs) { return render_cmp("/Users/wurui/Documents/polydraw/tigrou/me
 TEST(b_ballsk)    { return render_cmp("/Users/wurui/Documents/polydraw/tigrou/ballsk.pss"); }
 TEST(b_disco)     { return render_cmp("/Users/wurui/Documents/polydraw/tigrou/disco ball.pss"); }
 
+/* ---------- Part C: M5 three-way bit-exactness (interp vs LLVM vs sljit) ----------
+ * Forces each JIT backend independently (via the enable toggles) and asserts
+ * all three produce byte-identical results. Directly satisfies the roadmap
+ * M5 acceptance: "LLVM JIT vs 解释器 vs sljit 三方逐位一致". */
+static int cmp_three(const char *src) {
+    char err[256];
+    pd_Program prog;
+    if (!pd_compile(&prog, src, err, sizeof(err))) {
+        printf("  [compile error: %s] for [%s]\n", err, src);
+        return 0;
+    }
+    int r_llvm = pd_llvm_available(), r_sljit = pd_sljit_available();
+    size_t ng = prog.nGlobals ? prog.nGlobals : 1;
+    double *gi = (double*)calloc(ng, sizeof(double));
+    double *gj = (double*)calloc(ng, sizeof(double));
+    double *gk = (double*)calloc(ng, sizeof(double));
+
+    /* interpreter */
+    pd_srand(12345);
+    double ri = pd_run(&prog, NULL, gi, NULL);
+
+    /* LLVM only */
+    pd_llvm_set_enabled(1);
+    if (r_sljit) pd_sljit_set_enabled(0);
+    pd_srand(12345);
+    double rl = pd_run_jit(&prog, NULL, gj, NULL);
+
+    /* sljit only (restore) */
+    if (r_sljit) pd_sljit_set_enabled(1);
+    pd_llvm_set_enabled(0);
+    pd_srand(12345);
+    double rs = pd_run_jit(&prog, NULL, gk, NULL);
+
+    /* restore default (both enabled → LLVM preferred) */
+    pd_llvm_set_enabled(r_llvm);
+    if (r_sljit) pd_sljit_set_enabled(r_sljit);
+
+    int ok = 1;
+    if (memcmp(&ri, &rl, sizeof(double)) != 0 && !(isnan(ri) && isnan(rl))) {
+        printf("  [interp vs LLVM mismatch] %s interp=%.17g llvm=%.17g\n", src, ri, rl); ok = 0;
+    }
+    if (memcmp(&ri, &rs, sizeof(double)) != 0 && !(isnan(ri) && isnan(rs))) {
+        printf("  [interp vs sljit mismatch] %s interp=%.17g sljit=%.17g\n", src, ri, rs); ok = 0;
+    }
+    if (memcmp(gi, gj, ng * sizeof(double)) != 0) {
+        printf("  [globals interp vs LLVM mismatch] %s\n", src); ok = 0;
+    }
+    if (memcmp(gi, gk, ng * sizeof(double)) != 0) {
+        printf("  [globals interp vs sljit mismatch] %s\n", src); ok = 0;
+    }
+    free(gi); free(gj); free(gk);
+    pd_program_free(&prog);
+    return ok;
+}
+
+TEST(c_three_arith)  { return cmp_three("2+3*4 - 10/2 + 1"); }
+TEST(c_three_pow)    { return cmp_three("2^3^2"); }
+TEST(c_three_math)   { return cmp_three("a=1.5;b=2.5; sin(a)+cos(b)+sqrt(a*b)+exp(a-b)+log(a+b)+pow(a,b)+atan2(a,b)+fmod(a,b)"); }
+TEST(c_three_rnd)    { return cmp_three("srand(42); x=rnd(); y=nrnd(); x+y"); }
+TEST(c_three_while)  { return cmp_three("i=0;s=0; while(i<100){s+=i;i+=1}; s"); }
+TEST(c_three_func)   { return cmp_three("func f(n){ if(n<=1) return 1; return n*f(n-1) } f(10)"); }
+TEST(c_three_arr)    { return cmp_three("static a[4]; a[1]=9; a[5]+a[1]"); }
+
 static test_fn_t tests[] = {
     test_run_jit_available, test_run_jit_enabled_default,
     test_run_a_arith, test_run_a_parens, test_run_a_power, test_run_a_mod,
@@ -244,6 +323,9 @@ static test_fn_t tests[] = {
     test_run_a_func_fact, test_run_a_func_use, test_run_a_func_param,
     test_run_b_drawsph, test_run_b_balls2k, test_run_b_metaballs,
     test_run_b_ballsk, test_run_b_disco,
+    test_run_c_three_arith, test_run_c_three_pow, test_run_c_three_math,
+    test_run_c_three_rnd, test_run_c_three_while, test_run_c_three_func,
+    test_run_c_three_arr,
     NULL
 };
 

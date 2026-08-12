@@ -528,3 +528,49 @@ Function style:
  * Function parameters can be of type: double, double *, or char *.
 
 ------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------
+
+C Implementation (c_impl) — command-line tools
+------------------------------------------------------------------------------
+A from-scratch C reimplementation of the EVAL compiler + OpenGL renderer lives
+under c_impl/. It is source-compatible with the original .pss scripts and
+produces the same pixels. Two front-ends share one render pipeline:
+
+  polydraw-render  — headless offscreen renderer (writes a PNG)
+  polydraw-view    — interactive GLFW window viewer (and headless --once mode)
+
+Build (from c_impl/):
+  make                 # builds both tools, with JIT if LLVM/sljit are found
+  make POLYDRAW_JIT=off   # interpreter-only
+  make POLYDRAW_JIT=llvm  # LLVM backend only (core target)
+  make test            # full unit + differential test suite
+
+polydraw-render usage:
+  polydraw-render file.pss [--frame N] [--w W] [--h H] [--fovy DEG] [-o out.png]
+  polydraw-render file.pss --jit    ...   # force JIT (LLVM if available)
+  polydraw-render file.pss --no-jit  ...  # force interpreter
+
+polydraw-view usage:
+  polydraw-view file.pss [--w W] [--h H] [--fovy DEG]        # live window
+  polydraw-view file.pss --once FRAME -o out.png [--w W --h H]  # headless
+  polydraw-view [--once FRAME -o out.png]   # no script: reopens last (INI)
+  polydraw-view file.pss --jit | --no-jit   # JIT selection (see below)
+
+Window controls: SPACE pause/resume, R restart, LEFT/RIGHT step one frame
+(while paused), ESC or Q quit.
+
+JIT backend (performance):
+  By default both tools AUTO-select the JIT backend if it was compiled in:
+  LLVM (the core target) when present, else sljit (transitional). The JIT
+  compiles the whole host program to native code and is bit-identical to the
+  interpreter (verified by the differential test suite for every example).
+  Use --jit to force it on, --no-jit to force the interpreter. The selected
+  backend is printed to stderr when it starts.
+
+Configuration persistence (polydraw.ini):
+  polydraw-view remembers the last opened script and the window w/h/fovy in a
+  polydraw.ini file in the current directory. Launching with no script argument
+  reopens the last one. This satisfies the M8 "configuration persistence" item;
+  it does not yet write editor-side settings (error highlighting / ImGui editor
+  are not vendored and remain a deferred future item).

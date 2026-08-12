@@ -60,17 +60,21 @@ SRC_RENDER = src/render/glcmd.c src/render/pd_polyhost_render.c src/render/pd_po
 SRC_GL = src/render/gl_offscreen.c src/render/gl_renderer.c
 
 TESTS = build/test_interp build/test_lexer build/test_compile build/test_host build/test_fold build/test_section build/test_render build/test_jit
-TOOLS = build/polydraw-eval build/polydraw-render
+TOOLS = build/polydraw-eval build/polydraw-render build/polydraw-view
 
 # macOS uses .dylib, Linux .so
 ifeq ($(shell uname -s),Darwin)
   SHLIB = build/libpolydraw_eval.dylib
   SHARED = -dynamiclib
   GLLIBS = -framework OpenGL
+  GLFWLIB = -L/opt/homebrew/lib -lglfw
+  GLFWINC = -I/opt/homebrew/include
 else
   SHLIB = build/libpolydraw_eval.so
   SHARED = -shared
   GLLIBS = -lEGL -lGL
+  GLFWLIB = -lglfw
+  GLFWINC =
 endif
 
 all: $(TESTS) $(TOOLS) $(SHLIB)
@@ -121,6 +125,9 @@ build/test_jit: tests/test_jit.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) \
 $(SHLIB): $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) | build
 	$(CC) $(CFLAGS) $(SHARED) -o $@ $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(LDFLAGS)
 
+build/diag_disco: tests/diag_disco.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) | build
+	$(CC) $(CFLAGS) -o $@ tests/diag_disco.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(LDFLAGS)
+
 build/polydraw-eval: src/polydraw-eval.c $(SRC_EVAL) $(SRC_POLY) \
                      src/eval/pd_compile.h src/eval/pd_ir.h src/eval/pd_interp.h \
                      src/eval/pd_section.h src/pd_polyhost.h | build
@@ -133,6 +140,30 @@ build/polydraw-render: src/render_main.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $
                        third_party/stb_image_write.h | build
 	$(CC) $(CFLAGS) -Isrc/render -Ithird_party -o $@ src/render_main.c \
 	    $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) $(LDFLAGS) $(GLLIBS)
+
+# Interactive GLFW window viewer: same pipeline as polydraw-render but
+# driven live (M8: window GUI). Blits the offscreen FBO onto the window.
+build/polydraw-view: src/view_main.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) \
+                       src/render/glcmd.h src/render/pd_runlib.h src/render/gl_renderer.h \
+                       src/render/gl_offscreen.h src/eval/pd_section.h src/pd_polyhost.h | build
+	$(CC) $(CFLAGS) $(GLFWINC) -Isrc/render -Ithird_party -o $@ src/view_main.c \
+	    $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) $(LDFLAGS) $(GLLIBS) $(GLFWLIB)
+
+# Performance baseline (M8): interp vs LLVM vs sljit over N frames.
+build/bench: tools/bench.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) | build
+	$(CC) $(CFLAGS) -Isrc -Isrc/eval -Isrc/render -o $@ tools/bench.c \
+	    $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(LDFLAGS)
+
+# REAL end-to-end frame-rate baseline (M8): EVAL + GL replay + readback.
+build/framebench: tools/framebench.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) | build
+	$(CC) $(CFLAGS) $(GLFWINC) -Isrc -Isrc/eval -Isrc/render -o $@ tools/framebench.c \
+	    $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) $(LDFLAGS) $(GLLIBS) $(GLFWLIB)
+
+# REAL window probe: launch a GLFW window, render into its default FB, read
+# back the on-screen pixels. Definitive black-window check (M8).
+build/winprobe: tools/winprobe.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) | build
+	$(CC) $(CFLAGS) $(GLFWINC) -Isrc -Isrc/eval -Isrc/render -o $@ tools/winprobe.c \
+	    $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) $(LDFLAGS) $(GLLIBS) $(GLFWLIB)
 
 test: $(TESTS)
 	@for t in $(TESTS); do echo "=== $$t ==="; $$t || exit 1; done

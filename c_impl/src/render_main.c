@@ -14,6 +14,7 @@
 #include "render/gl_renderer.h"
 #include "render/pd_polyhost_tex.h"
 #include "eval/pd_section.h"
+#include "eval/pd_jit.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +43,7 @@ int main(int argc, char **argv) {
     const char *script = NULL;
     const char *outpath = NULL;
     int frame = 30, w = 640, h = 480, dump_shaders = 0;
+    int jit_mode = 2;   /* 2=auto, 1=force on, 0=force off */
     double fovy = 73.74;   /* setfov(90) effective, matches the reference */
 
     for (int i = 1; i < argc; i++) {
@@ -51,6 +53,8 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--fovy") == 0 && i+1 < argc)  fovy = atof(argv[++i]);
         else if (strcmp(argv[i], "-o") == 0 && i+1 < argc)      outpath = argv[++i];
         else if (strcmp(argv[i], "--dump-shaders") == 0)        dump_shaders = 1;
+        else if (strcmp(argv[i], "--jit") == 0)                 jit_mode = 1;
+        else if (strcmp(argv[i], "--no-jit") == 0)              jit_mode = 0;
         else if (argv[i][0] != '-')                             script = argv[i];
     }
     if (!script) {
@@ -138,8 +142,20 @@ int main(int argc, char **argv) {
         pdrl_free(ctx); free(src); return 1;
     }
     pd_gl_renderer_set_shaders(rd, vert_src, frag_src);
+
+    /* JIT selection: auto → use the JIT backend if any is compiled in
+     * (LLVM preferred, then sljit); --jit forces on, --no-jit forces the
+     * interpreter. The JIT compiles the whole host program up front and
+     * runs each frame through it, identical to the interpreter. */
+    int use_jit = (jit_mode == 1) ? 1 : (jit_mode == 2 ? pd_jit_available() : 0);
+    double (*run_frame)(pdrl_Ctx *, double) =
+        use_jit ? pdrl_run_frame_jit : pdrl_run_frame;
+    if (use_jit)
+        fprintf(stderr, "polydraw-render: using JIT backend (%s)\n",
+                pd_jit_backend_name());
+
     for (int f = 0; f <= frame; f++) {
-        pdrl_run_frame(ctx, (double)f);
+        run_frame(ctx, (double)f);
         pd_gl_renderer_render(rd, pdrl_glbuf(ctx));
     }
 
