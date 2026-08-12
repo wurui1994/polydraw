@@ -22,10 +22,21 @@ describe('compile: expressions', () => {
   it('pemdas', () => assert.equal(ev('2+3*4'), 14));
   it('parens', () => assert.equal(ev('(2+3)*4'), 20));
   it('power', () => assert.equal(ev('2^10'), 1024));
-  it('power right assoc', () => assert.equal(ev('2^3^2'), 512)); // 2^(3^2)
+  it('power left assoc', () => assert.equal(ev('2^3^2'), 64)); // (2^3)^2, matches original eval.c
   it('neg power', () => assert.equal(ev('-2^2'), -4)); // -(2^2)
   it('modulo', () => assert.equal(ev('10%3'), 1));
   it('unary chain', () => assert.equal(ev('--5'), 5));
+  // unary-sign rules matching original eval.c: leading sign = binary with
+  // implicit 0; mid-expression sign negates the immediate operand before ^.
+  it('mid unary times pow', () => assert.equal(ev('3*-2^2'), 12));
+  it('mid unary plus expr', () => assert.equal(ev('-2+3'), 1));
+  it('mid unary var pow', () => assert.equal(ev('2*-3^2'), 18));
+  it('mid unary paren', () => assert.equal(ev('2*-(3^2)'), -18));
+  it('double minus pow', () => assert.equal(ev('1--2^2'), -3));
+  it('plus then neg pow', () => assert.equal(ev('4+-2^2'), 8));
+  it('neg exp', () => assert.equal(ev('2^-3'), 0.125));
+  it('neg exp chain', () => assert.equal(ev('2^-3^2'), 0.015625));
+  it('double minus', () => assert.equal(ev('2--3'), 5));
 });
 
 describe('compile: builtins', () => {

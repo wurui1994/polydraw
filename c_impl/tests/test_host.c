@@ -8,15 +8,15 @@ extern void test_register_all(void);
 
 /* ---- test host functions ---- */
 /* double(double): e.g. a "square" function */
-static double hf_square(int n, const double *a) { (void)n; return a[0]*a[0]; }
+static double hf_square(pd_Host *h, int n, const double *a) { (void)h;(void)n; return a[0]*a[0]; }
 /* double(double,double): add */
-static double hf_add2(int n, const double *a) { (void)n; return a[0]+a[1]; }
+static double hf_add2(pd_Host *h, int n, const double *a) { (void)h;(void)n; return a[0]+a[1]; }
 /* void(double): emit (return 0) */
-static double hf_emit(int n, const double *a) { (void)n; (void)a; return 0; }
+static double hf_emit(pd_Host *h, int n, const double *a) { (void)h;(void)n; (void)a; return 0; }
 /* no-arg: return a constant */
-static double hf_answer(int n, const double *a) { (void)n; (void)a; return 42.0; }
+static double hf_answer(pd_Host *h, int n, const double *a) { (void)h;(void)n; (void)a; return 42.0; }
 /* variadic printf-like: just count args */
-static double hf_count(int n, const double *a) { (void)a; return (double)n; }
+static double hf_count(pd_Host *h, int n, const double *a) { (void)h;(void)a; return (double)n; }
 
 static double g_xres = 320.0, g_yres = 240.0;
 

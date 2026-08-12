@@ -90,6 +90,9 @@ export interface HostVar { name: string; get: () => number; set: (v: number) => 
 export interface Host {
   fns: HostFn[];
   vars: Map<string, HostVar>;
+  // string-literal table: slot index -> text. Populated by the parser when a
+  // string literal is used as a host-function argument (glsettex/printf/...).
+  strings?: Map<number, string>;
 }
 
 // ---- IR builder (used by the parser) ----

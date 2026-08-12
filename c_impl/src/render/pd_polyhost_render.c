@@ -17,55 +17,56 @@
 
 #include <string.h>
 
-/* the active command buffer (single-threaded, set at install) */
-static GLCmdBuf *g_glbuf = NULL;
-static pd_PolyState *g_rstate = NULL;
-
-/* current vertex attrib state (sticky between glVertex calls, like GL) */
-static double cur_color[4] = {1,1,1,1};
-static double cur_texcoord[4] = {0,0,0,1};
-static double cur_normal[3] = {0,0,1};
+/* the active command buffer and vertex state live in the per-ctx pd_Host
+ * (h->glbuf / h->cur_*), set at install — no process-global state, so several
+ * pd_Ctx instances can record independently within one process. */
 
 /* ---- recording host functions ---- */
-static double rh_glBegin(int n, const double *a) {
+static double rh_glBegin(pd_Host *h, int n, const double *a) {
     (void)n;
-    glcmd_begin(g_glbuf, (int)(n>=1 ? a[0] : 0));
+    glcmd_begin(h->glbuf, (int)(n>=1 ? a[0] : 0));
     return 0;
 }
-static double rh_glEnd(int n, const double *a) { (void)n; (void)a; glcmd_end(g_glbuf); return 0; }
+static double rh_glEnd(pd_Host *h, int n, const double *a) { (void)h;(void)n; (void)a; glcmd_end(h->glbuf); return 0; }
 
-static double rh_glVertex(int n, const double *a) {
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+static double rh_glVertex(pd_Host *h, int n, const double *a) {
     double x = n>=1 ? a[0] : 0;
     double y = n>=2 ? a[1] : 0;
     double z = n>=3 ? a[2] : 0;
     double w = n>=4 ? a[3] : 1;
-    glcmd_vertex(g_glbuf, x, y, z, w);
+    if (getenv("PD_DEBUG_VERT"))
+        fprintf(stderr, "glVertex(%.4f, %.4f, %.4f, %.4f)\n", x, y, z, w);
+    glcmd_vertex(h->glbuf, x, y, z, w);
     return 0;
 }
-static double rh_glColor(int n, const double *a) {
-    cur_color[0] = n>=1 ? a[0] : 0;
-    cur_color[1] = n>=2 ? a[1] : 0;
-    cur_color[2] = n>=3 ? a[2] : 0;
-    cur_color[3] = n>=4 ? a[3] : 1;
-    GLCmd *c=glcmd_push(g_glbuf); if(c){c->op=GLCMD_COLOR; c->a=cur_color[0]; c->b=cur_color[1]; c->c=cur_color[2]; c->d=cur_color[3];}
+static double rh_glColor(pd_Host *h, int n, const double *a) {
+    h->cur_color[0] = n>=1 ? a[0] : 0;
+    h->cur_color[1] = n>=2 ? a[1] : 0;
+    h->cur_color[2] = n>=3 ? a[2] : 0;
+    h->cur_color[3] = n>=4 ? a[3] : 1;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_COLOR; c->a=h->cur_color[0]; c->b=h->cur_color[1]; c->c=h->cur_color[2]; c->d=h->cur_color[3];}
     return 0;
 }
-static double rh_glTexCoord(int n, const double *a) {
-    cur_texcoord[0] = n>=1 ? a[0] : 0;
-    cur_texcoord[1] = n>=2 ? a[1] : 0;
-    cur_texcoord[2] = n>=3 ? a[2] : 0;
-    cur_texcoord[3] = n>=4 ? a[3] : 1;
-    GLCmd *c=glcmd_push(g_glbuf); if(c){c->op=GLCMD_TEXCOORD; c->a=cur_texcoord[0]; c->b=cur_texcoord[1]; c->c=cur_texcoord[2]; c->d=cur_texcoord[3];}
+static double rh_glTexCoord(pd_Host *h, int n, const double *a) {
+    h->cur_texcoord[0] = n>=1 ? a[0] : 0;
+    h->cur_texcoord[1] = n>=2 ? a[1] : 0;
+    h->cur_texcoord[2] = n>=3 ? a[2] : 0;
+    h->cur_texcoord[3] = n>=4 ? a[3] : 1;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_TEXCOORD; c->a=h->cur_texcoord[0]; c->b=h->cur_texcoord[1]; c->c=h->cur_texcoord[2]; c->d=h->cur_texcoord[3];}
     return 0;
 }
-static double rh_glNormal(int n, const double *a) {
-    cur_normal[0] = n>=1 ? a[0] : 0;
-    cur_normal[1] = n>=2 ? a[1] : 0;
-    cur_normal[2] = n>=3 ? a[2] : 0;
-    GLCmd *c=glcmd_push(g_glbuf); if(c){c->op=GLCMD_NORMAL; c->a=cur_normal[0]; c->b=cur_normal[1]; c->c=cur_normal[2];}
+static double rh_glNormal(pd_Host *h, int n, const double *a) {
+    h->cur_normal[0] = n>=1 ? a[0] : 0;
+    h->cur_normal[1] = n>=2 ? a[1] : 0;
+    h->cur_normal[2] = n>=3 ? a[2] : 0;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_NORMAL; c->a=h->cur_normal[0]; c->b=h->cur_normal[1]; c->c=h->cur_normal[2];}
     return 0;
 }
-static double rh_glClear(int n, const double *a) { (void)n; (void)a; glcmd_clear(g_glbuf); return 0; }
+static double rh_glClear(pd_Host *h, int n, const double *a) { (void)h;(void)n; (void)a; glcmd_clear(h->glbuf); return 0; }
 
 /* glVertex in immediate mode must stamp the current color/texcoord/normal
  * AT THE TIME OF THE VERTEX (GL semantics). But our buffer records events in
@@ -76,26 +77,26 @@ static double rh_glClear(int n, const double *a) { (void)n; (void)a; glcmd_clear
  * appear between glBegin and glEnd (per-vertex color), the replayer must
  * process COLOR records inline. That works because we emit them in order. */
 
-static double rh_glPushMatrix(int n, const double *a) { (void)n;(void)a;
-    GLCmd *c=glcmd_push(g_glbuf); if(c){c->op=GLCMD_PUSHMATRIX;} return 0; }
-static double rh_glPopMatrix(int n, const double *a) { (void)n;(void)a;
-    GLCmd *c=glcmd_push(g_glbuf); if(c){c->op=GLCMD_POPMATRIX;} return 0; }
-static double rh_glTranslate(int n, const double *a) { (void)n;
-    GLCmd *c=glcmd_push(g_glbuf); if(c){c->op=GLCMD_TRANSLATE; c->a=n>=1?a[0]:0; c->b=n>=2?a[1]:0; c->c=n>=3?a[2]:0;} return 0; }
-static double rh_glRotate(int n, const double *a) { (void)n;
-    GLCmd *c=glcmd_push(g_glbuf); if(c){c->op=GLCMD_ROTATE; c->a=n>=1?a[0]:0; c->b=n>=2?a[1]:0; c->c=n>=3?a[2]:0; c->d=n>=4?a[3]:0;} return 0; }
-static double rh_glScale(int n, const double *a) { (void)n;
-    GLCmd *c=glcmd_push(g_glbuf); if(c){c->op=GLCMD_SCALE; c->a=n>=1?a[0]:1; c->b=n>=2?a[1]:1; c->c=n>=3?a[2]:1;} return 0; }
-static double rh_glEnable(int n, const double *a) { (void)n;
-    GLCmd *c=glcmd_push(g_glbuf); if(c){c->op=GLCMD_ENABLE; c->mode=(int)(n>=1?a[0]:0);} return 0; }
-static double rh_glDisable(int n, const double *a) { (void)n;
-    GLCmd *c=glcmd_push(g_glbuf); if(c){c->op=GLCMD_DISABLE; c->mode=(int)(n>=1?a[0]:0);} return 0; }
-static double rh_glQuad(int n, const double *a) { (void)n;
-    GLCmd *c=glcmd_push(g_glbuf); if(c){c->op=GLCMD_QUAD; c->a=n>=1?a[0]:0;} return 0; }
-static double rh_glLineWidth(int n, const double *a) { (void)n;
-    GLCmd *c=glcmd_push(g_glbuf); if(c){c->op=GLCMD_LINEWIDTH; c->a=n>=1?a[0]:1;} return 0; }
-static double rh_glCullFace(int n, const double *a) { (void)n;
-    GLCmd *c=glcmd_push(g_glbuf); if(c){c->op=GLCMD_CULLFACE; c->mode=(int)(n>=1?a[0]:0);} return 0; }
+static double rh_glPushMatrix(pd_Host *h, int n, const double *a) { (void)h;(void)n;(void)a;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_PUSHMATRIX;} return 0; }
+static double rh_glPopMatrix(pd_Host *h, int n, const double *a) { (void)h;(void)n;(void)a;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_POPMATRIX;} return 0; }
+static double rh_glTranslate(pd_Host *h, int n, const double *a) { (void)h;(void)n;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_TRANSLATE; c->a=n>=1?a[0]:0; c->b=n>=2?a[1]:0; c->c=n>=3?a[2]:0;} return 0; }
+static double rh_glRotate(pd_Host *h, int n, const double *a) { (void)h;(void)n;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_ROTATE; c->a=n>=1?a[0]:0; c->b=n>=2?a[1]:0; c->c=n>=3?a[2]:0; c->d=n>=4?a[3]:0;} return 0; }
+static double rh_glScale(pd_Host *h, int n, const double *a) { (void)h;(void)n;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_SCALE; c->a=n>=1?a[0]:1; c->b=n>=2?a[1]:1; c->c=n>=3?a[2]:1;} return 0; }
+static double rh_glEnable(pd_Host *h, int n, const double *a) { (void)h;(void)n;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_ENABLE; c->mode=(int)(n>=1?a[0]:0);} return 0; }
+static double rh_glDisable(pd_Host *h, int n, const double *a) { (void)h;(void)n;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_DISABLE; c->mode=(int)(n>=1?a[0]:0);} return 0; }
+static double rh_glQuad(pd_Host *h, int n, const double *a) { (void)h;(void)n;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_QUAD; c->a=n>=1?a[0]:0;} return 0; }
+static double rh_glLineWidth(pd_Host *h, int n, const double *a) { (void)h;(void)n;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_LINEWIDTH; c->a=n>=1?a[0]:1;} return 0; }
+static double rh_glCullFace(pd_Host *h, int n, const double *a) { (void)h;(void)n;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_CULLFACE; c->mode=(int)(n>=1?a[0]:0);} return 0; }
 
 /* GL_ constants as static doubles (registered as host vars). */
 static double c_GL_POINTS = PDGL_POINTS;
@@ -115,10 +116,14 @@ static double c_GL_BACK = 0x0405;
 static double c_GL_FRONT_AND_BACK = 0x0408;
 
 void pd_polyhost_install_render(pd_Host *h, pd_PolyState *s, GLCmdBuf *glbuf) {
-    g_rstate = s;
-    g_glbuf = glbuf;
-    /* start from the base (non-gl) install */
+    /* start from the base (non-gl) install; it zeros the host then binds state */
     pd_polyhost_install(h, s);
+    /* these per-ctx fields must be set AFTER pd_host_init's memset */
+    h->glbuf = glbuf;
+    /* initialize per-ctx sticky vertex state */
+    h->cur_color[0]=h->cur_color[1]=h->cur_color[2]=h->cur_color[3]=1;
+    h->cur_texcoord[0]=h->cur_texcoord[1]=h->cur_texcoord[2]=0; h->cur_texcoord[3]=1;
+    h->cur_normal[0]=h->cur_normal[1]=0; h->cur_normal[2]=1;
     /* Now OVERWRITE the gl* entries. pd_host_add_fn appends a new entry; the
      * parser's pd_host_install threads overloads so the LAST same-name entry
      * wins in sym_find. To be safe we overwrite in-place: find each gl* slot

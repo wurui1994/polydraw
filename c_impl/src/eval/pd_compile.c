@@ -9,7 +9,8 @@
 #include <stdlib.h>
 #include <math.h>
 
-int pd_compile_host(pd_Program *prog, const char *src, const pd_Host *host, char *err, size_t errLen) {
+static int pd_compile_impl(pd_Program *prog, const char *src, const pd_Host *host,
+                           int useFold, char *err, size_t errLen) {
     pd_TokenStream ts; pd_lex_init(&ts);
     if (!pd_lex(&ts, src) || !ts.ok) {
         snprintf(err, errLen, "lex error: %s", ts.err);
@@ -18,6 +19,8 @@ int pd_compile_host(pd_Program *prog, const char *src, const pd_Host *host, char
     }
     pd_Builder b; pd_builder_init(&b);
     pd_Parser p; pd_parser_init(&p, &b, &ts);
+    p.host = host;
+    p.useFold = useFold;
     pd_parser_install_builtins(&p);
     if (host) pd_host_install(host, &p);
     pd_parse_program(&p);
@@ -41,6 +44,14 @@ int pd_compile_host(pd_Program *prog, const char *src, const pd_Host *host, char
     pd_lex_free(&ts);
     pd_builder_free(&b);
     return ok;
+}
+
+int pd_compile_host(pd_Program *prog, const char *src, const pd_Host *host, char *err, size_t errLen) {
+    return pd_compile_impl(prog, src, host, 0, err, errLen);
+}
+
+int pd_compile_fold_host(pd_Program *prog, const char *src, const pd_Host *host, char *err, size_t errLen) {
+    return pd_compile_impl(prog, src, host, 1, err, errLen);
 }
 
 int pd_compile(pd_Program *prog, const char *src, char *err, size_t errLen) {

@@ -5,7 +5,7 @@
  * loop. Statements use classic recursive descent.
  *
  * Operator precedence (lower number = binds tighter), from eval.c:7352:
- *    ^       : 1   (right-assoc)
+ *    ^       : 0   (left-assoc, matches original eval.c fold loop)
  *    * / %   : 2   (left)
  *    + -     : 3   (left)
  *    < <= > >= : 4 (left)
@@ -15,6 +15,7 @@
  *    = += ...: 8   (right, lowest, assignment)
  */
 #include "pd_parser.h"
+#include "pd_host.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -69,6 +70,7 @@ void pd_parser_init(pd_Parser *p, pd_Builder *b, pd_TokenStream *ts) {
     p->b = b; p->ts = ts; p->tok = 0;
     p->ok = 1;
     p->breakLabel = PD_NO_LOOP; p->contLabel = PD_NO_LOOP;
+    p->curScopeId = 0; p->nextScopeId = 1;
 }
 
 void pd_parser_free(pd_Parser *p) {
@@ -121,11 +123,25 @@ static void pd_error(pd_Parser *p, const char *msg) {
 }
 
 /* ---- symbol table ---- */
+/* A symbol is visible if it lives at file scope (0) or in the scope currently
+ * being parsed. This keeps one function's locals out of another's. */
+static int sym_visible(const pd_Parser *p, const pd_Sym *s) {
+    if (s->scopeId == p->curScopeId) return 1;
+    if (s->scopeId != 0) return 0;
+    /* File-scope symbol. Host symbols, builtins, functions, enums and statics
+     * are fine everywhere. But a VAR/PARAM created by bare top-level
+     * statements is frame-relative, so hide it inside function bodies. */
+    if (p->curScopeId != 0 && (s->kind == PD_SYM_VAR || s->kind == PD_SYM_PARAM))
+        return 0;
+    return 1;
+}
+
 static pd_Sym *sym_find(pd_Parser *p, const char *name, int nParams) {
     /* exact name+arity match (for functions); for non-funcs arity ignored */
     for (int i = p->nSyms - 1; i >= 0; i--) {
         pd_Sym *s = &p->syms[i];
         if (strncmp(s->name, name, sizeof(s->name)) != 0) continue;
+        if (!sym_visible(p, s)) continue;
         if (s->kind == PD_SYM_BUILTIN || s->kind == PD_SYM_EXT_FUNC || s->kind == PD_SYM_FUNC) {
             if (nParams >= 0 && s->nParams != nParams) {
                 /* try overload chain */
@@ -146,7 +162,8 @@ static pd_Sym *sym_find(pd_Parser *p, const char *name, int nParams) {
 /* find any symbol by name ignoring arity (first match) */
 static pd_Sym *sym_find_name(pd_Parser *p, const char *name) {
     for (int i = p->nSyms - 1; i >= 0; i--) {
-        if (strncmp(p->syms[i].name, name, sizeof(p->syms[i].name)) == 0)
+        if (strncmp(p->syms[i].name, name, sizeof(p->syms[i].name)) == 0 &&
+            sym_visible(p, &p->syms[i]))
             return &p->syms[i];
     }
     return NULL;
@@ -160,6 +177,7 @@ static pd_Sym *sym_add(pd_Parser *p, const char *name, pd_SymKind kind) {
     s->kind = kind;
     s->nextOverload = -1;
     s->funcIdx = -1;
+    s->scopeId = p->curScopeId;
     return s;
 }
 /* public wrappers for host.c */
@@ -247,15 +265,13 @@ static pd_Sym *declare_local(pd_Parser *p, const char *name) {
 
 /* ---- forward decls ---- */
 static pd_Reg parse_expr_prec(pd_Parser *p, int minPrec);
-static pd_Reg parse_primary(pd_Parser *p);
-static pd_Reg parse_unary(pd_Parser *p);
 
 /* precedence lookup for infix operators. Returns -1 if not an infix op. */
 typedef struct { const char *tok; int prec; int rightAssoc; pd_Op op; } BinOp;
 static const BinOp BINOPS[] = {
     /* prec: lower = tighter (matches eval.c numbering shifted so 1=lowest).
      * We invert: our "prec" means higher binds tighter. */
-    { "^",  7, 1, PD_POW   },
+    { "^",  7, 0, PD_POW   },
     { "*",  6, 0, PD_TIMES },
     { "/",  6, 0, PD_SLASH },
     { "%",  6, 0, PD_PERC  },
@@ -283,37 +299,41 @@ static const BinOp ASSIGNOPS[] = {
 };
 
 /* ---- Pratt core: parse_expr_prec ---- */
-/* Unary minus/plus handling: in EVAL, -2^2 must equal -(2^2) = -4, so unary
- * minus binds LOOSER than ^. We implement this by giving unary prefix a
- * right-binding-power just below ^ (which is prec 7), so any ^ to the right
- * of the unary op is consumed first. */
-#define UNARY_PREC 6   /* looser than ^(7), tighter than *(6)... actually we
-                        * want unary to be looser than ^ but tighter than *.
-                        * Using 6.5 isn't possible in int; use a scheme:
-                        * unary parses rhs at prec 7 (so ^ binds), but a
-                        * subsequent ^ at the unary level re-enters. Simpler:
-                        * handle unary INSIDE the pratt loop as a pseudo-op. */
-
+/* Unary +/- must match eval.c:parsefunc's two distinct sign rules:
+ *  - FRESH boundary (minPrec==0: statement / call arg / paren contents /
+ *    array index — each is an independent parsefunc call in the original):
+ *    a leading sign becomes a BINARY operator with an implicit 0 left operand
+ *    (the "-x^2" hack). So -2^2 = -(2^2) = -4, -2+3 = 1, --2 = 2.
+ *  - MID-expression (minPrec>0: we are an operator's right operand):
+ *    consecutive +/- toggle a negit that negates the IMMEDIATE operand
+ *    before ^ binds. So 3*-2^2 = 3*((-2)^2) = 12, 2^--3 = 2^3 = 8. */
 static pd_Reg parse_expr_prec(pd_Parser *p, int minPrec) {
-    /* Prefix: handle unary +/- here so precedence interacts correctly.
-     * Count consecutive +/- and remember if net-negate. */
-    int negate = 0;
-    while (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len == 1 &&
-           (pd_cur(p)->text[0] == '+' || pd_cur(p)->text[0] == '-')) {
-        if (pd_cur(p)->text[0] == '-') negate ^= 1;
-        pd_eat(p);
+    int fresh = (minPrec == 0);
+    pd_Reg left;
+    if (fresh && pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len == 1 &&
+        (pd_cur(p)->text[0] == '+' || pd_cur(p)->text[0] == '-')) {
+        /* insert an implicit 0 left operand; the pratt loop below consumes
+         * the sign as a binary operator */
+        pd_Reg z = pd_new_const(p->b, 0.0);
+        left = pd_new_local(p->b);
+        pd_emit1(p->b, PD_MOV, left, z);
+    } else {
+        /* mid-expression: collect consecutive +/- into negit and negate the
+         * immediate operand (^ to the right binds after the negation) */
+        int negit = 1;
+        while (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len == 1 &&
+               (pd_cur(p)->text[0] == '+' || pd_cur(p)->text[0] == '-')) {
+            if (pd_cur(p)->text[0] == '-') negit = -negit;
+            pd_eat(p);
+        }
+        left = pd_parse_primary(p);
+        if (!p->ok) return left;
+        if (negit < 0) {
+            pd_Reg out = pd_new_local(p->b);
+            pd_emit1(p->b, PD_NEGMOV, out, left);
+            left = out;
+        }
     }
-    pd_Reg left = parse_primary(p);
-    if (!p->ok) return left;
-    /* apply unary negate AFTER the whole rhs (including ^) is parsed,
-     * by deferring: we wrap at the end. But ^ must bind tighter than unary.
-     * Trick: parse the rhs at minPrec, but allow ^ to bind by giving the
-     * negation a binding power of UNARY_PREC. Since we already consumed
-     * the prefix, the pratt loop below will consume ^ at prec>=minPrec.
-     * To make -2^2 = -(2^2), we need the ^ to be consumed as part of `left`
-     * BEFORE applying negate. The pratt loop does that: it folds ^ into
-     * left. Then we negate the combined result. So just run the loop then
-     * negate at the end. */
     for (;;) {
         pd_Tok *t = pd_cur(p);
         if (t->kind != PD_TOK_PUNCT) break;
@@ -345,35 +365,89 @@ static pd_Reg parse_expr_prec(pd_Parser *p, int minPrec) {
         pd_emit2(p->b, bo->op, out, left, right);
         left = out;
     }
-    /* apply deferred unary negate now, after ^ has bound into `left` */
-    if (negate) {
-        pd_Reg out = pd_new_local(p->b);
-        pd_emit1(p->b, PD_NEGMOV, out, left);
-        left = out;
-    }
     return left;
 }
 
-/* public entry: parse full expression */
-pd_Reg pd_parse_expr(pd_Parser *p) { return parse_expr_prec(p, 0); }
-
-/* parse_unary folded into parse_expr_prec above (so unary minus has the
- * correct precedence relative to ^). */
+/* public entry: parse full expression (routes to the Plan B fold parser when
+ * p->useFold is set; both plans must produce identical results) */
+pd_Reg pd_parse_expr(pd_Parser *p) {
+    if (p->useFold) return pd_fold_parse_expr(p);
+    return parse_expr_prec(p, 0);
+}
 
 /* ---- primary: number, ident, (expr), call, array access ---- */
-static pd_Reg parse_primary(pd_Parser *p) {
+
+/* CALL argument. A bare array symbol (not followed by `[`) passes its
+ * base pointer — EVAL's `&`-typed host params (glsettex(0,buf,...),
+ * glUniform3fv(loc,n,arr), glMultMatrix(&m), ...) receive the array
+ * address, matching the original eval. Everything else is a normal
+ * expression (indexed reads, scalars, string literals, nested calls). */
+static pd_Reg parse_call_arg(pd_Parser *p) {
+    pd_Tok *t = pd_cur(p);
+    if (t->kind == PD_TOK_IDENT) {
+        /* peek the token after the name: must be , or ) (bare reference) */
+        const pd_Tok *nx = (p->tok + 1 < p->ts->nToks) ? &p->ts->toks[p->tok + 1] : NULL;
+        int bare = nx && !(nx->kind == PD_TOK_PUNCT && nx->len == 1 && nx->text[0] == '[');
+        if (bare) {
+            char nm[40];
+            size_t nl = t->len < sizeof(nm) ? t->len : sizeof(nm)-1;
+            memcpy(nm, t->text, nl); nm[nl] = 0;
+            pd_Sym *s = sym_find_name(p, nm);
+            if (s && s->kind == PD_SYM_ARRAY && s->arraySize > 0) {
+                pd_eat(p);
+                pd_Reg out = pd_new_local(p->b);
+                pd_emit1(p->b, PD_ADDR, out, s->reg);
+                return out;
+            }
+        }
+    }
+    return pd_parse_expr(p);
+}
+
+pd_Reg pd_parse_primary(pd_Parser *p) {
     pd_Tok *t = pd_eat(p);
     p->lastLValue = NULL;
     p->lastLValueIsArrayIndex = 0;
-    /* address-of prefix: &ident (EVAL pass-by-reference). For now, returns
-     * the variable's value; full pointer semantics come with host arrays. */
+    /* address-of prefix: &ident (EVAL pass-by-reference). Arrays resolve
+     * to a bit-cast base pointer (PD_ADDR); scalars pass their value. */
     if (t->kind == PD_TOK_PUNCT && t->len==1 && t->text[0]=='&') {
-        /* parse the following identifier as a normal primary */
-        return parse_primary(p);
+        if (pd_cur(p)->kind == PD_TOK_IDENT) {
+            pd_Tok *n = pd_cur(p);
+            char nm[40];
+            size_t nl = n->len < sizeof(nm) ? n->len : sizeof(nm)-1;
+            memcpy(nm, n->text, nl); nm[nl] = 0;
+            pd_Sym *s = sym_find_name(p, nm);
+            if (s && s->kind == PD_SYM_ARRAY && s->arraySize > 0) {
+                pd_eat(p);
+                pd_Reg out = pd_new_local(p->b);
+                pd_emit1(p->b, PD_ADDR, out, s->reg);
+                return out;
+            }
+            /* scalar pass-by-reference: pass the address of the variable's slot */
+            if (s && (s->kind == PD_SYM_VAR || s->kind == PD_SYM_PARAM ||
+                      s->kind == PD_SYM_EXT_VAR ||
+                      (s->kind == PD_SYM_ARRAY && s->arraySize == 0))) {
+                pd_eat(p);
+                pd_Reg out = pd_new_local(p->b);
+                pd_emit1(p->b, PD_ADDRSLOT, out, s->reg);
+                return out;
+            }
+        }
+        return pd_parse_primary(p);
     }
-    /* string-prefix dollar-ident or dollar-string: EVAL string arg. Return 0. */
+    /* dollar-prefixed string arg: $ident or $"str" (EVAL string var ref).
+     * The token after $ names a string; resolve to the STR reg. */
     if (t->kind == PD_TOK_PUNCT && t->len==1 && t->text[0] == 0x24) {
-        if (pd_cur(p)->kind == PD_TOK_IDENT || pd_cur(p)->kind == PD_TOK_STRING) pd_eat(p);
+        pd_Tok *n = pd_cur(p);
+        if (n->kind == PD_TOK_STRING) {
+            pd_eat(p);
+            return pd_new_string(p->b, n->text, n->len);
+        }
+        if (n->kind == PD_TOK_IDENT) {
+            /* $ident: look up the string variable (currently: empty) */
+            pd_eat(p);
+            return pd_new_string(p->b, "", 0);
+        }
         pd_Reg out = pd_new_local(p->b);
         pd_Reg z = pd_new_const(p->b, 0.0);
         pd_emit1(p->b, PD_MOV, out, z);
@@ -386,16 +460,13 @@ static pd_Reg parse_primary(pd_Parser *p) {
         return out;
     }
     if (t->kind == PD_TOK_STRING) {
-        /* string literal — store as STR reg. For now just returns a const=0
-         * placeholder; full string handling (printf args) comes later. */
-        pd_Reg out = pd_new_local(p->b);
-        pd_Reg zero = pd_new_const(p->b, 0.0);
-        pd_emit1(p->b, PD_MOV, out, zero);
-        (void)t;
-        return out;
+        /* string literal → STR reg (offset into the program's string
+         * table). CALL lowers STR args to bit-cast char* pointers for
+         * host functions (glsettex("file"), glGetUniformLoc("name"), ...). */
+        return pd_new_string(p->b, t->text, t->len);
     }
     if (t->kind == PD_TOK_PUNCT && t->len == 1 && t->text[0] == '(') {
-        pd_Reg r = parse_expr_prec(p, 0);
+        pd_Reg r = pd_parse_expr(p);
         if (!pd_expect_punct(p, ")")) return r;
         return r;
     }
@@ -418,6 +489,12 @@ static pd_Reg parse_primary(pd_Parser *p) {
 
         /* function call? look ahead for '(' */
         if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len == 1 && pd_cur(p)->text[0] == '(') {
+            /* callee's ref param mask (pass-by-reference => pass variable
+             * address): the & lives on the DEFINITION (rotate(&x,&y,r));
+             * EVAL call sites pass plain vars and the caller supplies the
+             * variable's slot address for ref params. */
+            pd_Sym *pre = sym_find_name(p, name);
+            int refMask = (pre && pre->kind == PD_SYM_FUNC) ? pre->refMask : 0;
             /* collect args */
             pd_eat(p); /* ( */
             pd_Reg args[16]; int nArgs = 0;
@@ -429,7 +506,37 @@ static pd_Reg parse_primary(pd_Parser *p) {
                         pd_eat(p);
                         continue;
                     }
-                    args[nArgs++] = parse_expr_prec(p, 0);
+                    if ((refMask & (1 << nArgs)) &&
+                        pd_cur(p)->kind == PD_TOK_IDENT) {
+                        /* ref param: pass the ADDRESS of the lvalue slot.
+                         * A bare array passes its base (ADDR); a scalar
+                         * variable passes its slot address (ADDRSLOT). */
+                        const pd_Tok *nx = (p->tok + 1 < p->ts->nToks) ? &p->ts->toks[p->tok + 1] : NULL;
+                        int indexed = nx && nx->kind == PD_TOK_PUNCT && nx->len == 1 && nx->text[0] == '[';
+                        char an[40]; size_t al = pd_cur(p)->len < sizeof(an)?pd_cur(p)->len:sizeof(an)-1;
+                        memcpy(an, pd_cur(p)->text, al); an[al] = 0;
+                        pd_Sym *as = sym_find_name(p, an);
+                        if (!indexed && as &&
+                            (as->kind == PD_SYM_VAR || as->kind == PD_SYM_PARAM ||
+                             as->kind == PD_SYM_EXT_VAR ||
+                             (as->kind == PD_SYM_ARRAY && as->arraySize == 0))) {
+                            pd_eat(p);
+                            pd_Reg ao = pd_new_local(p->b);
+                            pd_emit1(p->b, PD_ADDRSLOT, ao, as->reg);
+                            args[nArgs++] = ao;
+                            if (accept_punct(p, ",")) continue;
+                            break;
+                        }
+                        if (!indexed && as && as->kind == PD_SYM_ARRAY && as->arraySize > 0) {
+                            pd_eat(p);
+                            pd_Reg ao = pd_new_local(p->b);
+                            pd_emit1(p->b, PD_ADDR, ao, as->reg);
+                            args[nArgs++] = ao;
+                            if (accept_punct(p, ",")) continue;
+                            break;
+                        }
+                    }
+                    args[nArgs++] = parse_call_arg(p);
                     if (!p->ok) { return args[nArgs-1]; }
                     if (accept_punct(p, ",")) {
                         /* if next is ) it was a trailing comma - treat as blank */
@@ -495,7 +602,7 @@ static pd_Reg parse_primary(pd_Parser *p) {
             if (!s) s = declare_local(p, name);
             pd_Reg idxs[8]; int nd = 0;
             while (accept_punct(p, "[")) {
-                pd_Reg ix = parse_expr_prec(p, 0);
+                pd_Reg ix = pd_parse_expr(p);
                 if (!p->ok) return ix;
                 if (!pd_expect_punct(p, "]")) return ix;
                 if (nd < 8) idxs[nd++] = ix;
@@ -555,6 +662,14 @@ static pd_Reg parse_primary(pd_Parser *p) {
                 (s->kind == PD_SYM_ARRAY && s->arraySize == 0)) {
                 p->lastLValue = s;
                 p->lastLValueIsArrayIndex = 0;
+            }
+            if (s->kind == PD_SYM_PARAM && s->refParam) {
+                /* by-reference param: read through the pointer */
+                pd_Reg idx0 = pd_new_const(p->b, 0.0);
+                pd_Reg out = pd_new_local(p->b);
+                size_t ii = pd_emit2(p->b, PD_PEEK, out, s->reg, idx0);
+                p->b->instr[ii].aux = 0;
+                return out;
             }
             pd_Reg out = pd_new_local(p->b);
             pd_emit1(p->b, PD_MOV, out, s->reg);
@@ -647,6 +762,9 @@ static int parse_expr_stmt(pd_Parser *p) {
         p->lastLValue = NULL;
         pd_Reg left = pd_parse_expr(p);
         (void)left;
+        /* capture the LHS index NOW: parsing the RHS may read other arrays
+         * and clobber p->lastArrayIdx, so save it before the value parse */
+        pd_Reg lhsIdx = p->lastArrayIdx;
         /* consume assign op */
         pd_eat(p);
         pd_Reg value = pd_parse_expr(p);
@@ -658,9 +776,18 @@ static int parse_expr_stmt(pd_Parser *p) {
                         (assignOp==PD_MINUS)?PD_POKEMINUS:
                         (assignOp==PD_TIMES)?PD_POKETIMES:
                         (assignOp==PD_SLASH)?PD_POKESLASH:PD_POKEPERC;
-            /* we need the index reg; re-derive: lastArrayIdx was set by parse_primary */
-            size_t ii = pd_emit2(p->b, pop, lvSym->reg, value, p->lastArrayIdx);
+            size_t ii = pd_emit2(p->b, pop, lvSym->reg, value, lhsIdx);
             p->b->instr[ii].aux = lvSym->arraySize;
+        } else if (lvSym->kind == PD_SYM_PARAM && lvSym->refParam) {
+            /* by-reference param assignment: store through the pointer */
+            pd_Op pop = (assignOp==PD_MOV) ? PD_POKE :
+                        (assignOp==PD_PLUS)?PD_POKEPLUS:
+                        (assignOp==PD_MINUS)?PD_POKEMINUS:
+                        (assignOp==PD_TIMES)?PD_POKETIMES:
+                        (assignOp==PD_SLASH)?PD_POKESLASH:PD_POKEPERC;
+            pd_Reg idx0 = pd_new_const(p->b, 0.0);
+            size_t ii = pd_emit2(p->b, pop, lvSym->reg, value, idx0);
+            p->b->instr[ii].aux = 0;
         } else {
             if (assignOp == PD_MOV) {
                 pd_emit1(p->b, PD_MOV, lvSym->reg, value);
@@ -710,6 +837,12 @@ static int parse_expr_stmt(pd_Parser *p) {
                 pd_emit1(p->b, PD_MOV, cur, lv->reg);
                 pd_emit2(p->b, op, combined, cur, one);
                 pd_emit1(p->b, PD_MOV, lv->reg, combined);
+            } else if (lv->kind == PD_SYM_PARAM && lv->refParam) {
+                pd_Reg one = pd_new_const(p->b, 1.0);
+                pd_Reg idx0 = pd_new_const(p->b, 0.0);
+                pd_Op pop = (c1=='+') ? PD_POKEPLUS : PD_POKEMINUS;
+                size_t ii = pd_emit2(p->b, pop, lv->reg, one, idx0);
+                p->b->instr[ii].aux = 0;
             } else if (lv->kind == PD_SYM_ARRAY) {
                 /* array element increment not supported in postfix; ignore */
             }
@@ -878,10 +1011,11 @@ static void parse_block_or_stmt(pd_Parser *p) {
 
 /* Evaluate a constant expression: number, enum/const name, or simple
  * arithmetic on them (n*3, N+1, etc). Used for array sizes & enum values.
- * Supports: NUMBER, CONST_NAME, (expr), and + - * / between them. */
-static long eval_const_expr(pd_Parser *p) {
+ * Returns a double so fractional enum values (e.g. radius = 0.5) survive;
+ * array-dimension callers cast the result back to a long. */
+static double eval_const_expr(pd_Parser *p) {
     pd_Tok *t = pd_cur(p);
-    long v;
+    double v;
     if (t->kind == PD_TOK_PUNCT && t->len==1 && t->text[0]=='(') {
         pd_eat(p);
         v = eval_const_expr(p);
@@ -890,7 +1024,7 @@ static long eval_const_expr(pd_Parser *p) {
         t = pd_cur(p);
     } else if (t->kind == PD_TOK_NUMBER) {
         pd_eat(p);
-        v = (long)t->num;
+        v = t->num;
         t = pd_cur(p);
     } else if (t->kind == PD_TOK_IDENT) {
         char name[40]; size_t nl = t->len < sizeof(name) ? t->len : sizeof(name)-1;
@@ -898,7 +1032,7 @@ static long eval_const_expr(pd_Parser *p) {
         pd_Sym *s = sym_find_name(p, name);
         if (s && s->kind == PD_SYM_CONST) {
             pd_eat(p);
-            v = (long)p->b->consts[s->reg.off / 8];
+            v = p->b->consts[s->reg.off / 8];
         } else { pd_error(p, "expected constant"); return -1; }
         t = pd_cur(p);
     } else { pd_error(p, "expected constant"); return -1; }
@@ -906,11 +1040,11 @@ static long eval_const_expr(pd_Parser *p) {
      * Recurse for ^ so 2^3^2 = 2^9; the others fold left-to-right here. */
     if (t->kind == PD_TOK_PUNCT && t->len==1 && t->text[0]=='^') {
         pd_eat(p);
-        long r = eval_const_expr(p);
+        double r = eval_const_expr(p);
         if (!p->ok) return -1;
-        long base = v, acc = 1;
-        long e = r; if (e < 0) e = 0; /* const dim power can't be negative */
-        for (long i = 0; i < e; i++) acc *= base;
+        long e = (long)r; if (e < 0) e = 0; /* const dim power can't be negative */
+        double acc = 1.0;
+        for (long i = 0; i < e; i++) acc *= v;
         v = acc;
         t = pd_cur(p);
     }
@@ -918,7 +1052,7 @@ static long eval_const_expr(pd_Parser *p) {
            (t->text[0]=='*'||t->text[0]=='/'||t->text[0]=='+'||t->text[0]=='-')) {
         char op = t->text[0];
         pd_eat(p);
-        long r = eval_const_expr(p);
+        double r = eval_const_expr(p);
         if (!p->ok) return -1;
         if (op=='*') v *= r;
         else if (op=='/') v /= r;
@@ -933,7 +1067,7 @@ static long eval_const_expr(pd_Parser *p) {
  * Each NAME becomes a compile-time constant. Implicit value = prev+1, start 0. */
 static void parse_enum(pd_Parser *p) {
     if (!pd_expect_punct(p, "{")) return;
-    long nextVal = 0;
+    double nextVal = 0;
     for (;;) {
         pd_Tok *nt = pd_eat(p);
         if (nt->kind != PD_TOK_IDENT) { pd_error(p, "enum: expected name"); return; }
@@ -944,7 +1078,7 @@ static void parse_enum(pd_Parser *p) {
             if (!p->ok) return;
         }
         pd_Sym *s = sym_add(p, name, PD_SYM_CONST);
-        s->reg = pd_new_const(p->b, (double)nextVal);
+        s->reg = pd_new_const(p->b, nextVal);
         nextVal++;
         if (accept_punct(p, ",")) continue;
         break;
@@ -969,7 +1103,7 @@ static void parse_static(pd_Parser *p) {
         if (accept_punct(p, "[")) {
             isArr = 1;
             for (;;) {
-                long d = eval_const_expr(p);
+                long d = (long)eval_const_expr(p);
                 if (!p->ok) return;
                 if (d <= 0) { pd_error(p, "invalid array dimension"); return; }
                 arrSize *= d;
@@ -1085,17 +1219,48 @@ static int try_parse_function_def(pd_Parser *p) {
     pd_Builder fb; pd_builder_init(&fb);
     p->b = &fb;
 
-    /* save & reset symbol table scope: parameters are local to this function.
-     * Simplest: save nSyms, parse params (adding PARAM symbols), parse body,
-     * then restore nSyms. Locals declared inside still leak to the saved
-     * scope, but since each function is parsed fully before restoring, and
-     * we look up symbols innermost-first, this is acceptable. */
+    /* Enter a fresh symbol scope. Everything added from here on (re-installed
+     * host symbols, params, locals, statics, enums) belongs to THIS function
+     * only: their regs index this function's consts/frame, so they must not
+     * be reachable from any other function body. */
+    int savedScope = p->curScopeId;
+    int fnScope = p->nextScopeId++;
+    p->curScopeId = fnScope;
+
+    /* Builtins (PI) and host symbols (bstatus, glBegin, ...) were only
+     * installed into the MAIN builder at compile start. Each function gets
+     * its own builder/consts, so re-install them here: the symbol table
+     * favours the most-recently-added entry on lookup, correctly rebinding
+     * this function's PI/host-var register indices to ITS consts array. */
+    pd_parser_install_builtins(p);
+    if (p->host) pd_host_install(p->host, p);
+
+    /* File-scope enum consts (e.g. `enum {GOLDRAT=...}`) were added into the
+     * MAIN builder's const pool when encountered at top level. Each function
+     * body uses its OWN program/consts array, so those regs would read the
+     * wrong slot at runtime (garbage value). Re-bind every file-scope const
+     * into THIS function's const pool, preserving its value from the parent
+     * builder. ScopeId 0 == file scope (see sym_visible). */
+    for (int si = 0; si < p->nSyms; si++) {
+        pd_Sym *e = &p->syms[si];
+        if (e->kind != PD_SYM_CONST || e->scopeId != 0) continue;
+        if (e->reg.fam != PD_FAM_CONST) continue;
+        double v = savedB->consts[e->reg.off / 8];
+        pd_Sym *n = sym_add(p, e->name, PD_SYM_CONST);
+        n->reg = pd_new_const(p->b, v);
+    }
+
+    /* save the symbol-table high-water mark: params/locals/host re-installs
+     * added while parsing this body are popped again at `restore:`. The scope
+     * id above is what guarantees correctness; this just reclaims slots. */
     int savedNSyms = p->nSyms;
     int savedBreak = p->breakLabel, savedCont = p->contLabel;
     p->breakLabel = PD_NO_LOOP; p->contLabel = PD_NO_LOOP;
 
     /* pre-allocate function slot & register symbol (for recursion).
-     * If prescan_functions already registered this name, reuse its slot. */
+     * If prescan_functions already registered this name, reuse its slot.
+     * The function's own name lives at FILE scope so callers can see it. */
+    p->curScopeId = savedScope;
     pd_Sym *existing = name[0] ? sym_find_name(p, name) : NULL;
     int fidx;
     pd_Sym *fnSym = NULL;
@@ -1120,12 +1285,15 @@ static int try_parse_function_def(pd_Parser *p) {
             if (fnSym) { fnSym->funcIdx = fidx; fnSym->nParams = -1; }
         }
     }
+    p->curScopeId = fnScope;   /* params/locals belong to the function */
 
     /* parse parameter list */
     int nParams = 0;
+    int refFlag = 0;
     pd_Reg paramRegs[16];
     if (!(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]==')')) {
         for (;;) {
+            refFlag = 0;
             /* EVAL parameter forms (Plan section 4):
              *   a        double
              *   &a       pass-by-reference (double*)   -- prefix skipped, treated as double
@@ -1145,6 +1313,7 @@ static int try_parse_function_def(pd_Parser *p) {
             }
             if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 &&
                 (pd_cur(p)->text[0]=='&' || pd_cur(p)->text[0]=='$')) {
+                if (pd_cur(p)->text[0]=='&') refFlag = 1; /* pass-by-reference */
                 pd_eat(p); /* consume & or $ prefix */
             }
             pd_Tok *pt = pd_eat(p);
@@ -1169,10 +1338,22 @@ static int try_parse_function_def(pd_Parser *p) {
                     pd_eat(p);
                 } while (d>0 && !(pd_cur(p)->kind==PD_TOK_EOF));
             }
+            if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='&') {
+                if (getenv("PD_DEBUG_ADDR"))
+                    fprintf(stderr, "ref-param detected for '%s'\n", pname);
+                refFlag = 1;
+            }
             /* allocate a PARAM reg */
             paramRegs[nParams] = pdR(PD_FAM_PARAM, (uint32_t)(nParams * 8));
             pd_Sym *ps = sym_add(p, pname, PD_SYM_PARAM);
+            if (!ps) {
+                fprintf(stderr, "[parser] sym_add(NULL) for param '%s' nSyms=%d ok=%d\n",
+                        pname, p->nSyms, p->ok);
+                goto restore;
+            }
             ps->reg = paramRegs[nParams];
+            ps->refParam = refFlag;
+            if (refFlag && fnSym) fnSym->refMask |= (1 << nParams);
             nParams++;
             if (accept_punct(p, ",")) continue;
             break;
@@ -1194,6 +1375,7 @@ static int try_parse_function_def(pd_Parser *p) {
 
 restore:
     p->breakLabel = savedBreak; p->contLabel = savedCont;
+    p->curScopeId = savedScope;
     /* restore symbol scope but KEEP the function symbol (if newly added)
      * so the enclosing scope can call it. Parameters and locals are dropped.
      * If fnSym was pre-existing (from prescan), it's already in scope. */
@@ -1331,6 +1513,22 @@ static void prescan_functions(pd_Parser *p) {
                     }
                     /* if there's content between ( and ), it's nParams+1 */
                     if (s > afterName) nParams++;
+                    /* scan the param list for '&' prefixes (pass-by-reference)
+                     * so the call site can pass addresses even when the
+                     * function is defined AFTER the calling main body. */
+                    int refMask = 0;
+                    {
+                        int pi = 0, pdepth = 0, expectName = 1;
+                        for (size_t k = afterName + 1; k < s; k++) {
+                            const pd_Tok *st = pd_cur_at(k);
+                            if (st->kind==PD_TOK_PUNCT && st->len==1 && st->text[0]=='(') { pdepth++; continue; }
+                            if (st->kind==PD_TOK_PUNCT && st->len==1 && st->text[0]==')') { pdepth--; continue; }
+                            if (pdepth > 0) continue;
+                            if (st->kind==PD_TOK_PUNCT && st->len==1 && st->text[0]==',') { pi++; expectName = 1; continue; }
+                            if (st->kind==PD_TOK_PUNCT && st->len==1 && st->text[0]=='&') { if (expectName) refMask |= (1 << pi); continue; }
+                            if (st->kind==PD_TOK_IDENT && expectName) expectName = 0;
+                        }
+                    }
                     /* allocate slot */
                     if (!p->funcs) {
                         p->nFuncsAlloc = 16;
@@ -1349,7 +1547,7 @@ static void prescan_functions(pd_Parser *p) {
                     pd_Sym *existing = sym_find_name(p, name);
                     if (!existing) {
                         pd_Sym *fs = sym_add(p, name, PD_SYM_FUNC);
-                        if (fs) { fs->nParams = nParams; fs->funcIdx = fidx; }
+                        if (fs) { fs->nParams = nParams; fs->funcIdx = fidx; fs->refMask = refMask; }
                     }
                 }
             }
@@ -1375,12 +1573,20 @@ static int try_parse_anon_main(pd_Parser *p) {
     if (!hasParen && !hasBareBrace) return 0;
     if (hasParen) { pd_eat(p); /* ( */ pd_eat(p); /* ) */ }
     if (!pd_expect_punct(p, "{")) return 1;
+    /* The main block is a function too: its locals must not be visible to the
+     * named functions parsed after it. Without this, `x` inside drawsph()
+     * resolved to main's `x` symbol, whose LOCAL offset indexes a completely
+     * different frame slot in the callee. */
+    int savedScope = p->curScopeId, savedNSyms = p->nSyms;
+    p->curScopeId = p->nextScopeId++;
     while (p->ok && !(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='}')) {
         pd_parse_stmt(p);
         if (!p->ok) break;
     }
     pd_expect_punct(p, "}");
     pd_emit1(p->b, PD_RETURN, pdR(PD_FAM_VOID,0), p->lastValueReg);
+    p->curScopeId = savedScope;
+    p->nSyms = savedNSyms;
     return 1;
 }
 

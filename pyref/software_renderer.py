@@ -38,22 +38,26 @@ def mat_identity():
     return np.eye(4, dtype=np.float64)
 
 def mat_perspective(fovy_deg, aspect, near, far):
-    """gluPerspective-equivalent (writes the GL projection matrix)."""
+    """gluPerspective-equivalent (writes the GL projection matrix).
+
+    Column-major column-vector layout; the perspective divide sits in the
+    last ROW (index 3): w_clip = -z, so m[3][2] = -1.
+    """
     fovy = math.radians(fovy_deg)
     f = 1.0 / math.tan(fovy / 2.0)
     m = np.zeros((4,4), dtype=np.float64)
     m[0,0] = f / aspect
     m[1,1] = f
     m[2,2] = (far + near) / (near - far)
-    m[2,3] = -1.0
-    m[3,2] = (2*far*near) / (near - far)
+    m[2,3] = (2*far*near) / (near - far)
+    m[3,2] = -1.0
     return m
 
 def mat_ortho(l, r, b, t, n=-1, f=1):
     m = np.eye(4, dtype=np.float64)
-    m[0,0] = 2.0/(r-l); m[3,0] = -(r+l)/(r-l)
-    m[1,1] = 2.0/(t-b); m[3,1] = -(t+b)/(t-b)
-    m[2,2] = -2.0/(f-n); m[3,2] = -(f+n)/(f-n)
+    m[0,0] = 2.0/(r-l); m[0,3] = -(r+l)/(r-l)
+    m[1,1] = 2.0/(t-b); m[1,3] = -(t+b)/(t-b)
+    m[2,2] = -2.0/(f-n); m[2,3] = -(f+n)/(f-n)
     return m
 
 

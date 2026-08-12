@@ -47,7 +47,7 @@ TEST(minus)            { ASSERT_NEAR(eval_simple(PD_MINUS, 10, 4), 6.0, 1e-12); 
 TEST(times)            { ASSERT_NEAR(eval_simple(PD_TIMES, 6, 7), 42.0, 1e-12); return 1; }
 TEST(slash)            { ASSERT_NEAR(eval_simple(PD_SLASH, 20, 4), 5.0, 1e-12); return 1; }
 TEST(pow_op)           { ASSERT_NEAR(eval_simple(PD_POW, 2, 10), 1024.0, 1e-9); return 1; }
-TEST(pow_right_assoc)  { /* 2^3^2 = 2^9 = 512; verified at parser level */ return 1; }
+TEST(power_left_assoc) { /* 2^3^2 left-assoc = 64; associativity verified at parser level */ return 1; }
 TEST(perc)             { ASSERT_NEAR(eval_simple(PD_PERC, 10, 3), 1.0, 1e-12); return 1; } /* 10 mod 3 = 1 */
 TEST(fmod)             { ASSERT_NEAR(eval_simple(PD_FMOD, 10.5, 3), 1.5, 1e-12); return 1; }
 TEST(min_op)           { ASSERT_NEAR(eval_simple(PD_MIN, 3, 8), 3.0, 1e-12); return 1; }

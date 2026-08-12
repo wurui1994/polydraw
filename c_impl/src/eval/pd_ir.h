@@ -62,8 +62,11 @@ typedef enum {
     PD_ATAN2, PD_LOGB,
     /* memory: arrays.
      *   PEEK:    out=result, in[0]=array-base local, in[1]=index, aux=size
-     *   POKE family: out=array-base local, in[0]=value, in[1]=index, aux=size */
+     *   POKE family: out=array-base local, in[0]=value, in[1]=index, aux=size
+     *   ADDR:    out=bit-cast array base pointer (host & array args) */
     PD_PEEK,
+    PD_ADDR,
+    PD_ADDRSLOT,  /* address of a variable's storage slot (scalar by-ref) */
     PD_POKE,
     PD_POKETIMES, PD_POKESLASH, PD_POKEPERC,
     PD_POKEPLUS, PD_POKEMINUS,
@@ -131,8 +134,9 @@ struct pd_Program {
     size_t      nFuncs;
 
     /* external (host) function table — non-owning, set by pd_host_attach.
-     * PD_CALL with aux==-2 means "external": out.off is the host fn index. */
-    const struct pd_Host *host;
+     * PD_CALL with aux==-2 means "external": out.off is the host fn index.
+     * Non-const: host functions mutate per-ctx state (state/glbuf/attribs). */
+    struct pd_Host *host;
 
     /* error reporting */
     char      err[256];

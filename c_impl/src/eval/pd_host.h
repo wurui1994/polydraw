@@ -16,14 +16,23 @@
 #include "pd_ir.h"
 #include "pd_parser.h"
 
+/* forward declarations: struct pd_PolyState is defined in pd_polyhost.h,
+* which includes this header — declaring it opaque here avoids a circular
+* include. Must use the 'struct' tag in C. */
+struct pd_PolyState;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* A host function: receives count + an array of double args (each arg is the
- * raw double value; for pointer/array params the host casts the bits).
- * Returns a double result (0.0 for void functions). */
-typedef double (*pd_HostFn)(int nargs, const double *args);
+/* A host function: receives its owning host table, the arg count, and an array
+ * of double args (each arg is the raw double value; for pointer/array params
+ * the host casts the bits). Returns a double result (0.0 for void functions).
+ *
+ * The first parameter (h) carries per-context state (see pd_Host below) so the
+ * host layer is safe to use with multiple concurrent pd_Ctx instances. It is
+ * non-const because host functions mutate per-ctx state (glbuf/attribs/vars). */
+typedef double (*pd_HostFn)(pd_Host *h, int nargs, const double *args);
 
 typedef struct {
     char       name[40];   /* upper-case, includes prototype-less base name */
@@ -41,11 +50,23 @@ typedef struct {
 #define PD_MAX_HOST_FNS 256
 #define PD_MAX_HOST_VARS 64
 
+struct GLCmdBuf;  /* forward decl; defined in render/glcmd.h */
+
 typedef struct pd_Host {
     pd_HostFunc fns[PD_MAX_HOST_FNS];
     int         nFns;
     pd_HostVar  vars[PD_MAX_HOST_VARS];
     int         nVars;
+
+    /* Per-context state bound at install time. The host functions read/write
+     * these instead of any process-global, so several pd_Ctx instances can
+     * coexist in one process (M2 "multi-ctx safe"). */
+    struct pd_PolyState *state;               /* bound by pd_polyhost_install */
+    struct GLCmdBuf *glbuf;                    /* bound by install_render; NULL for non-recording hosts */
+    /* sticky GL vertex attrib state (GL immediate-mode semantics) */
+    double cur_color[4];
+    double cur_texcoord[4];
+    double cur_normal[3];
 } pd_Host;
 
 void pd_host_init(pd_Host *h);

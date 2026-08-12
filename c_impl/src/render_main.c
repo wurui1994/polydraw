@@ -12,6 +12,7 @@
  */
 #include "render/pd_runlib.h"
 #include "render/gl_renderer.h"
+#include "render/pd_polyhost_tex.h"
 #include "eval/pd_section.h"
 
 #include <stdio.h>
@@ -37,6 +38,7 @@ static char *read_file(const char *path, size_t *outLen) {
 }
 
 int main(int argc, char **argv) {
+    setbuf(stdout, NULL); setbuf(stderr, NULL);
     const char *script = NULL;
     const char *outpath = NULL;
     int frame = 30, w = 640, h = 480, dump_shaders = 0;
@@ -90,6 +92,29 @@ int main(int argc, char **argv) {
     const char *host_src = host_buf;
     const char *vert_src = vert_buf;
     const char *frag_src = frag_buf;
+
+    /* Build the full section block table (one null-terminated buffer per
+     * section) so scripts with multiple named @v/@f shaders work, and hand
+     * it to the host so recorded GLCMD_SETSHADER commands can resolve the
+     * GLSL source pointers (by name or per-type index). */
+    pdrl_Block *gblocks = calloc((size_t)sl.nSecs, sizeof(pdrl_Block));
+    int gnb = 0;
+    int idxByType[4] = {0, 0, 0, 0};
+    for (int i = 0; i < sl.nSecs; i++) {
+        const pd_Section *sec = &sl.secs[i];
+        size_t n = sec->end - sec->start;
+        char *b = malloc(n + 1);
+        if (!b) { fprintf(stderr, "out of memory\n"); free(src); return 1; }
+        memcpy(b, src + sec->start, n);
+        b[n] = 0;
+        pdrl_Block *bk = &gblocks[gnb++];
+        bk->src   = b;
+        strncpy(bk->name, sec->name, sizeof(bk->name) - 1);
+        bk->type  = (int)sec->type;
+        bk->index = idxByType[sec->type]++;
+    }
+    pdrl_install_tex_blocks(gblocks, gnb);
+
     if (dump_shaders) {
         fprintf(stderr, "hs=[%zu,%zu) vs=[%zu,%zu) fs=[%zu,%zu)\n",
                 hs->start, hs->end, vs ? vs->start : 0, vs ? vs->end : 0,
@@ -98,22 +123,25 @@ int main(int argc, char **argv) {
                 vert_src ? vert_src : "(none)", frag_src ? frag_src : "(none)");
     }
 
-    /* ---- compile host block, warm up frames sequentially ---- */
+    /* ---- compile host block ---- */
     char err[256];
     pdrl_Ctx *ctx = pdrl_compile(host_src, w, h, err, sizeof(err));
     if (!ctx) { fprintf(stderr, "compile error: %s\n", err); free(src); return 1; }
     pdrl_set_clock_scale(ctx, 1.0 / 60.0);   /* deterministic klock() */
-    for (int f = 0; f <= frame; f++)
-        pdrl_run_frame(ctx, (double)f);
 
-    /* ---- GL renderer ---- */
+    /* ---- GL renderer (created first so GL state persists across frames
+     * like the reference app: textures/captures uploaded on an early frame
+     * stay live for every later frame) ---- */
     pd_GLRenderer *rd = pd_gl_renderer_create(w, h, fovy);
     if (!rd) {
         fprintf(stderr, "polydraw-render: GL offscreen renderer failed\n");
         pdrl_free(ctx); free(src); return 1;
     }
     pd_gl_renderer_set_shaders(rd, vert_src, frag_src);
-    pd_gl_renderer_render(rd, pdrl_glbuf(ctx));
+    for (int f = 0; f <= frame; f++) {
+        pdrl_run_frame(ctx, (double)f);
+        pd_gl_renderer_render(rd, pdrl_glbuf(ctx));
+    }
 
     /* ---- read back + write PNG (flip: GL bottom-left → image top-left) ---- */
     unsigned char *rgba = malloc((size_t)w * h * 4);
@@ -145,6 +173,8 @@ int main(int argc, char **argv) {
     free(host_buf);
     free(vert_buf);
     free(frag_buf);
+    for (int i = 0; i < gnb; i++) free((void *)gblocks[i].src);
+    free(gblocks);
     free(src);
     return 0;
 }

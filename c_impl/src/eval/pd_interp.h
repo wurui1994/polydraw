@@ -29,13 +29,17 @@ typedef struct pd_Ctx {
 } pd_Ctx;
 
 /* Resolve a register to a double storage pointer (for value operands).
- * For LABEL, returns &instr-index (the out.off is the target). */
+ * For LABEL, returns &instr-index (the out.off is the target).
+ * STR regs have no double storage (they are string-table offsets resolved
+ * only by pd_call_arg); reading one elsewhere yields a safe zero slot. */
 static inline double *pd_slot(pd_Ctx *c, pd_Reg r) {
+    static double zero = 0.0;
     switch (r.fam) {
         case PD_FAM_LOCAL:  return &c->frame[r.off / 8];
         case PD_FAM_CONST:  return &c->prog->consts[r.off / 8];
         case PD_FAM_PARAM:  return (double*)&c->params[r.off / 8];
         case PD_FAM_GLOBAL: return &c->globals[r.off / 8];
+        case PD_FAM_STR:    return &zero;
         case PD_FAM_EXT: {
             /* the const slot holds a bit-cast double* to the host variable */
             double *slot = &c->prog->consts[r.off / 8];
@@ -57,6 +61,18 @@ double pd_run_ctx(pd_Ctx *c);
 
 /* Seed the EVAL RNG (affects RND/NRND ops). Matches original ksrand. */
 void pd_srand(unsigned long s);
+
+/* ---- Shared helpers used by both the interpreter and the sljit JIT ----
+ * These expose the exact CALL/PEEK/POKE/ADDR semantics and the RNG state so
+ * the JIT backend produces bit-identical results. */
+unsigned long pd_krand(void);
+double pd_nrnd(void);
+double pd_fact(double num);
+double pd_jit_addr(pd_Ctx *c, const pd_Instr *in);
+double pd_jit_addrslot(pd_Ctx *c, const pd_Instr *in);
+double pd_jit_peek(pd_Ctx *c, const pd_Instr *in);
+void   pd_jit_poke(pd_Ctx *c, const pd_Instr *in, pd_Op op);
+double pd_jit_call(pd_Ctx *c, const pd_Instr *in);
 
 #ifdef __cplusplus
 }

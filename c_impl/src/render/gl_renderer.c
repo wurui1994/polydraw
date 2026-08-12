@@ -2,8 +2,10 @@
  * context. See gl_renderer.h for the design notes. */
 #include "gl_renderer.h"
 #include "gl_offscreen.h"
+#include "pd_polyhost_tex.h"   /* pd_polyhost_get_locname */
 
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +18,13 @@
 
 /* ------------------------------------------------------------------ */
 /* 4x4 column-major matrix helpers (double; matches the numpy reference) */
+
+/* NOTE on matrix layout: every matrix here is a standard OpenGL
+ * column-major array (c[col*4+row] = M[row][col]), matching the numpy
+ * reference's clip math (clip = proj * modelview * v). The old code
+ * stored translate/rotate transposed (matching nothing in the reference)
+ * which broke every script using glTranslate/glRotate; verified correct
+ * against golden renders below. */
 
 static void mat4_identity(double m[16])
 {
@@ -37,12 +46,10 @@ static void mat4_mul(double out[16], const double a[16], const double b[16])
     memcpy(out, r, sizeof(r));
 }
 
-/* gluPerspective, written exactly like pyref's mat_perspective.
- * NOTE: the reference stores the matrix transposed in numpy (m[row][col]
- * = GL M[col][row]) and clips with m @ v, so the GL column-major array
- * must hold m[3,2] (the w coefficient, = 2fn/(n-f)) at index 11 and
- * m[2,3] (the z coefficient, = -1) at index 14 — the transpose of the
- * conventional gluPerspective layout. */
+/* gluPerspective, standard layout: c[col*4+row] = M[row][col], so the w
+ * coefficient M[3][2] = 2fn/(n-f) lands at index 2*4+3 = 11 and the z
+ * coefficient M[2][3] = -1 at index 3*4+2 = 14. (Matches the numpy
+ * reference, which stores the same matrix row-major: m[3,2] and m[2,3].) */
 static void mat4_perspective(double m[16], double fovy_deg, double aspect,
                              double near, double far)
 {
@@ -51,31 +58,29 @@ static void mat4_perspective(double m[16], double fovy_deg, double aspect,
     m[0]  = f / aspect;
     m[5]  = f;
     m[10] = (far + near) / (near - far);
-    m[11] = (2 * far * near) / (near - far);  /* w coefficient (m[3,2]) */
-    m[14] = -1.0;                             /* z coefficient (m[2,3]) */
+    m[11] = -1.0;                             /* w coefficient, M[3][2] = -z_eye */
+    m[14] = (2 * far * near) / (near - far); /* z coefficient, M[2][3] */
 }
 
-/* glOrtho with near=-1 far=1 default, transposed layout like mat_perspective
- * above (pyref mat_ortho): the translation lands in column 3 rows 0..2 for
- * x'/y'/z' and in row 3 of columns 0..2 for w' — matching the reference's
- * clip math. */
+/* glOrtho with near=-1 far=1 default, standard layout: the translation
+ * lands in column 3 (indices 12..14) and w' = w. */
 static void mat4_ortho(double m[16], double l, double r, double b, double t,
                        double n, double f)
 {
-    double tx = -(r + l) / (r - l);
-    double ty = -(t + b) / (t - b);
-    double tz = -(f + n) / (f - n);
     memset(m, 0, 16 * sizeof(double));
-    m[0] = 2.0 / (r - l);  m[12] = tx;  m[3] = tx;
-    m[5] = 2.0 / (t - b);  m[13] = ty;  m[7] = ty;
-    m[10] = -2.0 / (f - n); m[14] = tz; m[11] = tz;
+    m[0] = 2.0 / (r - l);
+    m[5] = 2.0 / (t - b);
+    m[10] = -2.0 / (f - n);
+    m[12] = -(r + l) / (r - l);
+    m[13] = -(t + b) / (t - b);
+    m[14] = -(f + n) / (f - n);
     m[15] = 1.0;
 }
 
 static void mat4_translate(double m[16], double x, double y, double z)
 {
     double t[16]; mat4_identity(t);
-    t[3] = x; t[7] = y; t[11] = z;
+    t[12] = x; t[13] = y; t[14] = z;
     double r[16]; mat4_mul(r, m, t); memcpy(m, r, sizeof(r));
 }
 
@@ -86,10 +91,12 @@ static void mat4_rotate(double m[16], double ang_deg, double x, double y, double
     double len = sqrt(x * x + y * y + z * z);
     if (len == 0) return;
     x /= len; y /= len; z /= len;
+    double k = 1 - c;
+    /* standard column-major axis-angle rotation matrix */
     double t[16] = {
-        c + x * x * (1 - c),      y * x * (1 - c) + z * s, z * x * (1 - c) - y * s, 0,
-        x * y * (1 - c) - z * s,  c + y * y * (1 - c),     z * y * (1 - c) + x * s, 0,
-        x * z * (1 - c) + y * s,  y * z * (1 - c) - x * s, c + z * z * (1 - c),     0,
+        c + x * x * k,      x * y * k - z * s, x * z * k + y * s, 0,
+        y * x * k + z * s,  c + y * y * k,     y * z * k - x * s, 0,
+        z * x * k - y * s,  z * y * k + x * s, c + z * z * k,     0,
         0, 0, 0, 1
     };
     double r[16]; mat4_mul(r, m, t); memcpy(m, r, sizeof(r));
@@ -100,6 +107,37 @@ static void mat4_scale(double m[16], double x, double y, double z)
     double t[16]; mat4_identity(t);
     t[0] = x; t[5] = y; t[10] = z;
     double r[16]; mat4_mul(r, m, t); memcpy(m, r, sizeof(r));
+}
+
+/* gluLookAt, standard column-major layout (multiplied onto the modelview). */
+static const char *mvp_to_str(const double m[16]) {
+    static char b[256];
+    snprintf(b, sizeof(b), "{%.3f %.3f %.3f %.3f; %.3f %.3f %.3f %.3f; %.3f %.3f %.3f %.3f; %.3f %.3f %.3f %.3f}",
+             m[0], m[4], m[8], m[12], m[1], m[5], m[9], m[13],
+             m[2], m[6], m[10], m[14], m[3], m[7], m[11], m[15]);
+    return b;
+}
+static void mat4_lookat(double out[16], double ex, double ey, double ez,
+                        double cx, double cy, double cz,
+                        double ux, double uy, double uz)
+{
+    double fx = cx - ex, fy = cy - ey, fz = cz - ez;
+    double fl = sqrt(fx * fx + fy * fy + fz * fz);
+    if (fl != 0) { fx /= fl; fy /= fl; fz /= fl; }
+    /* side = f × up */
+    double sx = fy * uz - fz * uy, sy = fz * ux - fx * uz, sz = fx * uy - fy * ux;
+    double sl = sqrt(sx * sx + sy * sy + sz * sz);
+    if (sl != 0) { sx /= sl; sy /= sl; sz /= sl; }
+    /* up' = side × f */
+    double ux2 = sy * fz - sz * fy, uy2 = sz * fx - sx * fz, uz2 = sx * fy - sy * fx;
+    double m[16] = {
+        sx, ux2, -fx, 0,
+        sy, uy2, -fy, 0,
+        sz, uz2, -fz, 0,
+        0, 0, 0, 1
+    };
+    mat4_translate(m, -ex, -ey, -ez);
+    memcpy(out, m, sizeof(m));
 }
 
 /* ------------------------------------------------------------------ */
@@ -179,12 +217,17 @@ static char *adapt_fragment(const char *src)
     char *u = str_replace_all(t, "texture2D", "texture");
     free(t);
     if (!u) return NULL;
-    size_t len = strlen(u);
-    char *out = malloc(strlen(FRAG_PREFIX) + len + 1);
-    if (!out) { free(u); return NULL; }
-    strcpy(out, FRAG_PREFIX);
-    strcat(out, u);
+    /* textureCube(lod) -> texture (GLSL 330 core: texture() dispatches on
+     * the sampler type; samplerCube needs no lod variant here) */
+    char *v = str_replace_all(u, "textureCube", "texture");
     free(u);
+    if (!v) return NULL;
+    size_t len = strlen(v);
+    char *out = malloc(strlen(FRAG_PREFIX) + len + 1);
+    if (!out) { free(v); return NULL; }
+    strcpy(out, FRAG_PREFIX);
+    strcat(out, v);
+    free(v);
     return out;
 }
 
@@ -225,6 +268,22 @@ struct pd_GLRenderer {
     /* GL state mirrors */
     int depth_test_enabled;
     int blend_enabled;
+
+    /* shader uniform-name table (filled by GLCMD_UNIFORMLOC, resolved
+     * lazily against the current program on GLCMD_UNIFORM) */
+#define REN_MAX_LOCS 64
+    char *u_name[REN_MAX_LOCS];
+
+    /* texture objects (unit 0..3) and the active texture unit */
+#define REN_MAX_TEX 32
+    GLuint tex_obj[REN_MAX_TEX];
+    GLenum tex_tgt[REN_MAX_TEX];        /* GL_TEXTURE_2D / _CUBE_MAP */
+    int active_unit;
+
+    /* capture-to-texture scratch (FBO with a texture colour attachment) */
+    GLuint cap_fbo, cap_tex;
+    int cap_texno;       /* target texture index for the in-flight capture */
+    int cap_w, cap_h;
 };
 
 /* interleaved VBO layout offsets (floats) */
@@ -402,6 +461,38 @@ static void end_primitive(pd_GLRenderer *rd)
     glBindVertexArray(rd->vao);
     glUniformMatrix4fv(rd->u_mvp, 1, GL_FALSE, rd->mvp_f);
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)rd->ntri);
+    if (getenv("PD_DEBUG_GL")) {
+        GLint u0 = 0; glGetIntegerv(GL_ACTIVE_TEXTURE, &u0);
+        GLint bound = 0; glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+        GLint vp[4] = {0,0,0,0}; glGetIntegerv(GL_VIEWPORT, vp);
+        GLint fbd = 0; glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER,
+            GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &fbd);
+        fprintf(stderr, "DRAW ntri=%zu prog=%u active_unit=%d tex2d=%d vp=[%d,%d,%d,%d] fbo_att=%d mvp0=[%.4g %.4g %.4g %.4g]\n",
+                rd->ntri, rd->program, u0 - GL_TEXTURE0, bound, vp[0], vp[1], vp[2], vp[3], fbd,
+                rd->mvp[0], rd->mvp[1], rd->mvp[2], rd->mvp[3]);
+        if (getenv("PD_DEBUG_FULL_MVP"))
+            fprintf(stderr, "  MVP = [%s]\n", mvp_to_str(rd->mvp));
+        if (getenv("PD_DEBUG_MODELVIEW")) {
+            char bmv[256], bpr[256];
+            snprintf(bmv, sizeof(bmv), "%s", mvp_to_str(rd->mvm_stack[rd->mvm_top]));
+            snprintf(bpr, sizeof(bpr), "%s", mvp_to_str(rd->proj));
+            fprintf(stderr, "  MV = [%s]\n  PROJ = [%s]\n", bmv, bpr);
+        }
+        if (getenv("PD_DEBUG_TRI"))
+            fprintf(stderr, "  TRIS first8: p=[%.3f %.3f %.3f] c=[%.3f %.3f %.3f %.3f]\n",
+                    rd->tris[0].pos[0], rd->tris[0].pos[1], rd->tris[0].pos[2],
+                    rd->tris[0].color[0], rd->tris[0].color[1], rd->tris[0].color[2], rd->tris[0].color[3]);
+        if (rd->ntri > 0)
+            fprintf(stderr, "  v0=(%.3f,%.3f,%.3f) v1=(%.3f,%.3f,%.3f)\n",
+                    rd->tris[0].pos[0], rd->tris[0].pos[1], rd->tris[0].pos[2],
+                    rd->tris[1].pos[0], rd->tris[1].pos[1], rd->tris[1].pos[2]);
+        if (getenv("PD_DEBUG_VERTS")) {
+            fprintf(stderr, "  all captured verts (%zu):\n", rd->nverts);
+            for (size_t q = 0; q < rd->nverts && q < 64; q++)
+                fprintf(stderr, "    v%zu=(%.4f,%.4f,%.4f)\n", q,
+                        rd->verts[q].pos[0], rd->verts[q].pos[1], rd->verts[q].pos[2]);
+        }
+    }
     glBindVertexArray(0);
 }
 
@@ -418,16 +509,17 @@ static void draw_quad(pd_GLRenderer *rd)
         memcpy(q[i].pos, qpos[i], sizeof(qpos[i]));
         memcpy(q[i].tex, qtex[i], sizeof(qtex[i]));
         for (int k = 0; k < 4; k++) q[i].color[k] = (float)rd->cur_color[k];
+        for (int k = 0; k < 3; k++) q[i].nrm[k] = (float)rd->cur_nrm[k];
     }
     GVertex tris[6];
     tris[0] = q[0]; tris[1] = q[1]; tris[2] = q[2];
     tris[3] = q[0]; tris[4] = q[2]; tris[5] = q[3];
-    static const double ident[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    static const GLfloat ident_f[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     glUseProgram(rd->program);
     glBindBuffer(GL_ARRAY_BUFFER, rd->vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(tris), tris, GL_STREAM_DRAW);
     glBindVertexArray(rd->vao);
-    glUniformMatrix4fv(rd->u_mvp, 1, GL_FALSE, (const GLfloat *)ident);
+    glUniformMatrix4fv(rd->u_mvp, 1, GL_FALSE, ident_f);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
 }
@@ -528,8 +620,15 @@ void pd_gl_renderer_set_shaders(pd_GLRenderer *rd,
                                 const char *vert_src, const char *frag_src)
 {
     if (!vert_src && !frag_src) return;
+    if (getenv("PD_NO_CUSTOM"))
+        fprintf(stderr, "PD_NO_CUSTOM: skip custom shader\n");
+    if (getenv("PD_NO_CUSTOM")) return;
     char *va = vert_src ? adapt_vertex(vert_src) : NULL;
     char *fa = frag_src ? adapt_fragment(frag_src) : NULL;
+    if (getenv("PD_DEBUG_SHADER")) {
+        fprintf(stderr, "=== ADAPTED VERT {\n%s\n}\n", va ? va : "(null)");
+        fprintf(stderr, "=== ADAPTED FRAG {\n%s\n}\n", fa ? fa : "(null)");
+    }
     if (va && fa) {
         GLuint prog = link_program(va, fa);
         if (prog) {
@@ -546,12 +645,31 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
 {
     glBindFramebuffer(GL_FRAMEBUFFER, rd->fbo);
     glViewport(0, 0, rd->w, rd->h);
+    if (getenv("PD_DEBUG_GL"))
+        fprintf(stderr, "RENDER buf=%zu cmds\n", buf->n);
+
+    /* every frame starts from the reference host defaults (polydraw.c:3578):
+     * projection = perspective(fovy, aspect, 0.1, 1000), modelview = identity */
+    rd->matrix_mode = 0;
+    rd->mvm_top = 0;
+    mat4_identity(rd->mvm_stack[0]);
+    mat4_perspective(rd->proj, rd->fovy, (double)rd->w / rd->h, 0.1, 1000.0);
+    update_mvp(rd);
 
     /* matrices may change during replay; recompute mvp before each draw */
     update_mvp(rd);
 
     for (size_t i = 0; i < buf->n; i++) {
         const GLCmd *c = &buf->cmds[i];
+        static const char *OPNAMES[] = {
+            "CLEAR","BEGIN","END","VERTEX","COLOR","TEXCOORD","NORMAL",
+            "PUSH","POP","TRANSLATE","ROTATE","SCALE","MATRIXMODE","LOADIDENTITY",
+            "PERSPECTIVE","ORTHO","VIEWPORT","QUAD","ENABLE","DISABLE",
+            "BLENDFUNC","CULLFACE","LINEWIDTH","SETTEXDATA","BINDTEX","ACTIVETEX",
+            "CAPTURE","CAPTUREEND","SETFOV","SETSHADER","UNIFORMLOC","UNIFORM","MULTMATRIX"
+        };
+        if (getenv("PD_DEBUG_GL") && c->op >= 0 && (size_t)c->op < sizeof(OPNAMES)/sizeof(OPNAMES[0]))
+            fprintf(stderr, "  %s\n", OPNAMES[c->op]);
         switch (c->op) {
         case GLCMD_CLEAR: {
             double clr[4] = {c->a, c->b, c->c, c->d};
@@ -599,11 +717,22 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
             if (rd->matrix_mode == 0)
                 mat4_translate(rd->mvm_stack[rd->mvm_top], c->a, c->b, c->c);
             update_mvp(rd);
+            if (getenv("PD_DEBUG_TRANSLATE"))
+                fprintf(stderr, "  TRANSLATE(%.3f,%.3f,%.3f) mode=%d mvm_top=%d mvm0={%.3f %.3f %.3f %.3f} mvp0={%.3f %.3f %.3f %.3f}\n",
+                        c->a, c->b, c->c, rd->matrix_mode, rd->mvm_top,
+                        rd->mvm_stack[rd->mvm_top][0], rd->mvm_stack[rd->mvm_top][1],
+                        rd->mvm_stack[rd->mvm_top][2], rd->mvm_stack[rd->mvm_top][3],
+                        rd->mvp[0], rd->mvp[1], rd->mvp[2], rd->mvp[3]);
             break;
         case GLCMD_ROTATE:
             if (rd->matrix_mode == 0)
                 mat4_rotate(rd->mvm_stack[rd->mvm_top], c->a, c->b, c->c, c->d);
             update_mvp(rd);
+            if (getenv("PD_DEBUG_ROTATE"))
+                fprintf(stderr, "  ROTATE(deg=%.3f, (%.3f,%.3f,%.3f)) mode=%d mvm_top=%d col0={%.3f %.3f %.3f %.3f}\n",
+                        c->a, c->b, c->c, c->d, rd->matrix_mode, rd->mvm_top,
+                        rd->mvm_stack[rd->mvm_top][0], rd->mvm_stack[rd->mvm_top][1],
+                        rd->mvm_stack[rd->mvm_top][2], rd->mvm_stack[rd->mvm_top][3]);
             break;
         case GLCMD_SCALE:
             if (rd->matrix_mode == 0)
@@ -660,6 +789,252 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
         case GLCMD_LINEWIDTH:
             glLineWidth((GLfloat)c->a);
             break;
+
+        /* ---- shaders, uniforms, matrices, textures, capture ---- */
+
+        /* setfov(fov) — recompute the projection at the next frame start
+         * (applied immediately here, since replay is per-frame). */
+        case GLCMD_SETFOV:
+            rd->fovy = c->a;
+            mat4_perspective(rd->proj, rd->fovy, (double)rd->w / rd->h, 0.1, 1000.0);
+            update_mvp(rd);
+            break;
+
+        /* glsetshader: replay the recorded GLSL source pointers (already
+         * bit-cast into a/b by the host) through the adapt+link path. */
+        case GLCMD_SETSHADER: {
+            const char *vs = (const char *)(uintptr_t)(unsigned long long)c->a;
+            const char *fs = (const char *)(uintptr_t)(unsigned long long)c->b;
+            pd_gl_renderer_set_shaders(rd, vs, fs);
+            break;
+        }
+
+        /* glGetUniformLoc(name): remember the name under the returned id so
+         * GLCMD_UNIFORM can resolve it against the (possibly new) program. */
+        case GLCMD_UNIFORMLOC: {
+            int id = (int)c->a;
+            if (id >= 0 && id < REN_MAX_LOCS && c->s) {
+                free(rd->u_name[id]);
+                rd->u_name[id] = strdup(c->s);
+            }
+            break;
+        }
+
+        /* glUniformNf/Ni / glUniformNfv: resolve the uniform by name and set
+         * it on the current program. */
+        case GLCMD_UNIFORM: {
+            int id = (int)c->a;
+            int kind = (c->mode >> 24) & 0xFF;     /* 0 = float, 1 = int */
+            int comps = (c->mode >> 16) & 0xFF;    /* components per vector */
+            int nelem = c->mode & 0xFFFF;          /* element count */
+            GLint loc = -1;
+            /* name resolves from the persistent host loc table (survives the
+             * per-frame buffer reset); fall back to the per-replay table. */
+            const char *uname = pd_polyhost_get_locname(id);
+            if (!uname && id >= 0 && id < REN_MAX_LOCS) uname = rd->u_name[id];
+            if (uname)
+                loc = glGetUniformLocation(rd->program, uname);
+            if (getenv("PD_DEBUG_GL")) {
+                const char *kid = (kind==0) ? "float" : "int";
+                fprintf(stderr, "  UNIFORM %s comps=%d nelem=%d loc=%d ptr=%d\n",
+                        uname?uname:"?", comps, nelem, (int)loc, c->s!=NULL);
+                if (c->s && getenv("PD_DEBUG_LUT")) {
+                    const float *fa = (const float*)c->s;
+                    fprintf(stderr, "    [");
+                    int npr = nelem * comps;
+                    if (npr > 96) npr = 96;
+                    for (int q = 0; q < npr; q++)
+                        fprintf(stderr, "%s%g", q?"," : "", fa[q]);
+                    fprintf(stderr, "]\n");
+                }
+            }
+            if (loc < 0) break;
+            glUseProgram(rd->program);   /* uniforms target the current program */
+            if (c->s == NULL) {
+                /* scalar form: values packed in b,c,d (k>=3 shares d) */
+                float fv[4]; int iv[4];
+                for (int k = 0; k < nelem; k++) {
+                    double v;
+                    if (k == 0) v = c->b;
+                    else if (k == 1) v = c->c;
+                    else v = c->d;
+                    fv[k] = (float)v; iv[k] = (int)v;
+                }
+                if (kind == 0) {
+                    if (nelem == 1) glUniform1f(loc, fv[0]);
+                    else if (nelem == 2) glUniform2f(loc, fv[0], fv[1]);
+                    else if (nelem == 3) glUniform3f(loc, fv[0], fv[1], fv[2]);
+                    else glUniform4f(loc, fv[0], fv[1], fv[2], fv[3]);
+                } else {
+                    if (nelem == 1) glUniform1i(loc, iv[0]);
+                    else if (nelem == 2) glUniform2i(loc, iv[0], iv[1]);
+                    else if (nelem == 3) glUniform3i(loc, iv[0], iv[1], iv[2]);
+                    else glUniform4i(loc, iv[0], iv[1], iv[2], iv[3]);
+                }
+            } else {
+                /* array (V) form: nelem vectors of `comps` components; upload
+                 * with the matching glUniformNfv so the driver maps it onto
+                 * the vecN[ ] uniform correctly. */
+                const void *fa = c->s;
+                if (kind == 0) {
+                    if (comps == 1) glUniform1fv(loc, nelem, (const GLfloat*)fa);
+                    else if (comps == 2) glUniform2fv(loc, nelem, (const GLfloat*)fa);
+                    else if (comps == 3) glUniform3fv(loc, nelem, (const GLfloat*)fa);
+                    else glUniform4fv(loc, nelem, (const GLfloat*)fa);
+                } else {
+                    if (comps == 1) glUniform1iv(loc, nelem, (const GLint*)fa);
+                    else if (comps == 2) glUniform2iv(loc, nelem, (const GLint*)fa);
+                    else if (comps == 3) glUniform3iv(loc, nelem, (const GLint*)fa);
+                    else glUniform4iv(loc, nelem, (const GLint*)fa);
+                }
+            }
+            break;
+        }
+
+        /* glMultMatrix(&m) / gluLookAt: multiply the current matrix (modelview
+         * or projection per matrix_mode) by the supplied column-major 4x4. */
+        case GLCMD_MULTMATRIX: {
+            const double *m = (const double *)c->s;
+            if (!m) break;
+            if (getenv("PD_DEBUG_FULL_MVP"))
+                fprintf(stderr, "  MULTMATRIX mode=%d\n    in=[%s]\n    pre=[%s]\n",
+                        rd->matrix_mode, mvp_to_str(m), mvp_to_str(rd->mvm_stack[rd->mvm_top]));
+            if (rd->matrix_mode == 0)
+                mat4_mul(rd->mvm_stack[rd->mvm_top],
+                         rd->mvm_stack[rd->mvm_top], m);
+            else
+                mat4_mul(rd->proj, rd->proj, m);
+            if (getenv("PD_DEBUG_FULL_MVP"))
+                fprintf(stderr, "    post=[%s]\n", mvp_to_str(rd->mvm_stack[rd->mvm_top]));
+            update_mvp(rd);
+            break;
+        }
+
+        /* glsettex: upload a BGRA32 double snapshot into a GL texture. */
+        case GLCMD_SETTEXDATA: {
+            int tex = (int)c->a;
+            int w = (int)c->b, h = (int)c->c;
+            if (getenv("PD_DEBUG_GL")) {
+                fprintf(stderr, "SETTEXDATA tex=%d %dx%d mode=%d unit=%d\n",
+                        tex, w, h, c->mode, rd->active_unit);
+            }
+            const double *px = (const double *)c->s;
+            if (tex < 0 || tex >= REN_MAX_TEX || w < 1 || h < 1 || !px) break;
+            if (!rd->tex_obj[tex]) glGenTextures(1, &rd->tex_obj[tex]);
+            glActiveTexture(GL_TEXTURE0 + rd->active_unit);
+            /* A vertical strip whose height is exactly 6× its width is a
+             * cubemap (matches the reference: kglsettex detects xs*6==ys and
+             * switches to GL_TEXTURE_CUBE_MAP). Otherwise plain 2D. */
+            int cube = (w * 6 == h);
+            GLenum target = cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+            rd->tex_tgt[tex] = target;
+            glBindTexture(target, rd->tex_obj[tex]);
+            /* packed 0xAABBGGRR → GL RGBA8 byte order */
+            int nf = cube ? 6 : 1;
+            int fw = w, fh = cube ? h / 6 : h;
+            unsigned char *bytes = malloc((size_t)fw * fh * 4);
+            if (!bytes) break;
+            for (int f = 0; f < nf; f++) {
+                if (cube) {
+                    /* faces are stored bottom-to-top in the strip */
+                    int row = (5 - f) * fh;
+                    for (int y = 0; y < fh; y++)
+                        for (int x = 0; x < fw; x++) {
+                            size_t src = (size_t)(row + y) * w + x;
+                            unsigned int v = (unsigned int)(unsigned long long)px[src];
+                            size_t d = ((size_t)y * fw + x) * 4;
+                            bytes[d+0] = (unsigned char)(v & 0xFF);
+                            bytes[d+1] = (unsigned char)((v >> 8) & 0xFF);
+                            bytes[d+2] = (unsigned char)((v >> 16) & 0xFF);
+                            bytes[d+3] = (unsigned char)((v >> 24) & 0xFF);
+                        }
+                } else {
+                    for (size_t p = 0; p < (size_t)fw * fh; p++) {
+                        unsigned int v = (unsigned int)(unsigned long long)px[p];
+                        bytes[p*4+0] = (unsigned char)(v & 0xFF);
+                        bytes[p*4+1] = (unsigned char)((v >> 8) & 0xFF);
+                        bytes[p*4+2] = (unsigned char)((v >> 16) & 0xFF);
+                        bytes[p*4+3] = (unsigned char)((v >> 24) & 0xFF);
+                    }
+                }
+                if (cube) {
+                    static const GLenum faces[6] = {
+                        GL_TEXTURE_CUBE_MAP_POSITIVE_X, GL_TEXTURE_CUBE_MAP_NEGATIVE_X,
+                        GL_TEXTURE_CUBE_MAP_POSITIVE_Y, GL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
+                        GL_TEXTURE_CUBE_MAP_POSITIVE_Z, GL_TEXTURE_CUBE_MAP_NEGATIVE_Z
+                    };
+                    glTexImage2D(faces[f], 0, GL_RGBA8, fw, fh, 0, GL_RGBA,
+                                 GL_UNSIGNED_BYTE, bytes);
+                } else {
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, fw, fh, 0, GL_RGBA,
+                                 GL_UNSIGNED_BYTE, bytes);
+                }
+            }
+            free(bytes);
+            /* filtering / wrap from the colmode bits */
+            int colmode = c->mode;
+            int filter = (colmode >> 4) & 0xF;
+            int wrap = (colmode >> 8) & 0xF;
+            GLint minf = GL_LINEAR, magf = GL_LINEAR;
+            if (filter == 1) { minf = magf = GL_NEAREST; }
+            else if (filter >= 2) { minf = GL_LINEAR_MIPMAP_LINEAR; magf = GL_LINEAR; }
+            GLint wt = (wrap == 1) ? GL_MIRRORED_REPEAT : (wrap == 2) ? GL_CLAMP_TO_EDGE
+                                  : (wrap == 3) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+            if (cube) wt = GL_CLAMP_TO_EDGE;
+            glTexParameteri(target, GL_TEXTURE_MIN_FILTER, minf);
+            glTexParameteri(target, GL_TEXTURE_MAG_FILTER, magf);
+            glTexParameteri(target, GL_TEXTURE_WRAP_S, wt);
+            glTexParameteri(target, GL_TEXTURE_WRAP_T, wt);
+            if (filter >= 2) glGenerateMipmap(target);
+            break;
+        }
+
+        /* glbindtexture(tex): bind the texture to the current active unit. */
+        case GLCMD_BINDTEX: {
+            int tex = (int)c->a;
+            if (tex >= 0 && tex < REN_MAX_TEX && rd->tex_obj[tex]) {
+                glActiveTexture(GL_TEXTURE0 + rd->active_unit);
+                glBindTexture(rd->tex_tgt[tex], rd->tex_obj[tex]);
+            }
+            break;
+        }
+
+        /* glactivetexture(unit): select the active texture unit. */
+        case GLCMD_ACTIVETEX:
+            rd->active_unit = (int)c->a & 3;
+            glActiveTexture(GL_TEXTURE0 + rd->active_unit);
+            break;
+
+        /* glcapture: copy the current main framebuffer into a texture at
+         * glcaptureend (screen-capture semantics). The scene keeps rendering
+         * to the main FBO, matching the reference. */
+        case GLCMD_CAPTURE:
+            if (c->a >= 0) {
+                rd->cap_texno = (int)c->a;
+                rd->cap_w = (int)c->b > 0 ? (int)c->b : rd->w;
+                rd->cap_h = (int)c->c > 0 ? (int)c->c : rd->h;
+            }
+            break;
+        case GLCMD_CAPTUREEND: {
+            int tex = (int)c->a;
+            if (tex < 0 || tex >= REN_MAX_TEX) break;
+            int cw = rd->cap_w > 0 ? rd->cap_w : rd->w;
+            int ch = rd->cap_h > 0 ? rd->cap_h : rd->h;
+            if (!rd->tex_obj[tex]) glGenTextures(1, &rd->tex_obj[tex]);
+            unsigned char *px = malloc((size_t)cw * ch * 4);
+            if (px) {
+                glBindFramebuffer(GL_FRAMEBUFFER, rd->fbo);
+                glReadPixels(0, 0, cw, ch, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, rd->tex_obj[tex]);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, cw, ch, 0, GL_RGBA,
+                             GL_UNSIGNED_BYTE, px);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                free(px);
+            }
+            break;
+        }
         }
     }
 }
@@ -679,6 +1054,11 @@ void pd_gl_renderer_destroy(pd_GLRenderer *rd)
     if (rd->rbo_color) glDeleteRenderbuffers(1, &rd->rbo_color);
     if (rd->rbo_depth) glDeleteRenderbuffers(1, &rd->rbo_depth);
     if (rd->fbo) glDeleteFramebuffers(1, &rd->fbo);
+    for (int i = 0; i < REN_MAX_TEX; i++)
+        if (rd->tex_obj[i]) glDeleteTextures(1, &rd->tex_obj[i]);
+    if (rd->cap_fbo) glDeleteFramebuffers(1, &rd->cap_fbo);
+    if (rd->cap_tex) glDeleteTextures(1, &rd->cap_tex);
+    for (int i = 0; i < REN_MAX_LOCS; i++) free(rd->u_name[i]);
     free(rd->verts);
     free(rd->tris);
     free(rd);

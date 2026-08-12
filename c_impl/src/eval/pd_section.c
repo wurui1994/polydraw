@@ -16,25 +16,31 @@ int pd_section_parse(pd_SectionList *sl, const char *src) {
     int curLine = 1;
     pd_SecType curType = PD_SEC_HOST;
 
-    /* Helper to push the current block. */
+    /* Name of the block currently being built (set when we see `@x:name`).
+     * It is applied to the block that starts at curStart when we push it. */
+    char pendingName[32];
+    pendingName[0] = 0;
+
+    /* Helper to push the current block (carrying pendingName). */
     #define PUSH_BLOCK(end_) do { \
         if (sl->nSecs >= PD_MAX_SECTIONS) { snprintf(sl->err,sizeof(sl->err),"too many sections"); return 0; } \
         pd_Section *s = &sl->secs[sl->nSecs++]; \
         memset(s, 0, sizeof(*s)); \
         s->type = curType; s->start = curStart; s->end = (end_); s->line = curLine; \
+        strncpy(s->name, pendingName, sizeof(s->name) - 1); \
+        pendingName[0] = 0; \
     } while(0)
 
     while (src[i]) {
         /* detect line start: are we at column 0 (or only whitespace so far)? */
-        /* We track "at line start" by checking if preceding char was \n or 0 */
         int atLineStart = (i == 0) || (src[i-1] == '\n');
         if (atLineStart) {
             /* skip leading whitespace */
             size_t j = i;
             while (src[j] == ' ' || src[j] == '\t') j++;
             if (src[j] == '@') {
-                /* section marker. Close current block (if non-empty). */
-                /* trim trailing whitespace/newline from current block end */
+                /* section marker. Close the current block (if non-empty),
+                 * then start a new one carrying the name parsed below. */
                 size_t blockEnd = i;
                 while (blockEnd > curStart && (src[blockEnd-1] == '\n' || src[blockEnd-1] == '\r')) blockEnd--;
                 if (blockEnd > curStart) {
@@ -49,25 +55,22 @@ int pd_section_parse(pd_SectionList *sl, const char *src) {
                 else if (m == 'f' || m == 'F') nt = PD_SEC_FRAGMENT;
                 /* default @ with no letter = same type as previous */
                 curType = nt;
-                /* skip to end of line, but capture name (after :) and geo args */
-                size_t k = j + 1;
-                /* skip letter */
-                if (src[k] && src[k] != ',' && src[k] != ':' && src[k] != '\n') k++;
-                /* geo args: @g,GL_IN,GL_OUT,N */
-                /* (simplified: skip to end of line) */
                 curLine = line;
-                while (src[k] && src[k] != '\n') {
-                    if (src[k] == ':' && sl->nSecs < PD_MAX_SECTIONS) {
-                        /* name follows */
-                        size_t ni = 0; k++;
-                        while (src[k] && src[k] != '\n' && src[k] != ' ' && src[k] != '\t' && ni < sizeof(sl->secs[sl->nSecs].name)-1) {
-                            /* store into the NEXT section we'll push (set later) */
-                            k++;
-                        }
-                        /* we'll capture the name when we push; record position */
-                    }
+                pendingName[0] = 0;
+                /* skip the marker letter (+ optional geometry args up to ':' / EOL) */
+                size_t k = j + 1;
+                while (src[k] && src[k] != '\n' && src[k] != ':') k++;
+                if (src[k] == ':') {
                     k++;
+                    size_t ni = 0;
+                    while (src[k] && src[k] != '\n' && src[k] != ' ' && src[k] != '\t' &&
+                           ni < sizeof(pendingName) - 1) {
+                        pendingName[ni++] = src[k]; k++;
+                    }
+                    pendingName[ni] = 0;
                 }
+                /* skip the rest of the marker line */
+                while (src[k] && src[k] != '\n') k++;
                 curStart = k;
                 i = k;
                 continue;

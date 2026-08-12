@@ -23,6 +23,7 @@ class GLCmd(ctypes.Structure):
         ("op", ctypes.c_int), ("mode", ctypes.c_int),
         ("a", ctypes.c_double), ("b", ctypes.c_double),
         ("c", ctypes.c_double), ("d", ctypes.c_double),
+        ("s", ctypes.c_char_p),
     ]
 
 class GLCmdBuf(ctypes.Structure):

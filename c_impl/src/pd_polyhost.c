@@ -19,6 +19,7 @@
 void pd_polystate_init(pd_PolyState *s) {
     memset(s, 0, sizeof(*s));
     s->xres = 640; s->yres = 480;
+    s->mousx = 640 / 2; s->mousy = 480 / 2;   /* original starts the cursor at window center */
     s->startTime = (double)clock() / CLOCKS_PER_SEC;
 }
 
@@ -37,15 +38,11 @@ static void poly_log(pd_PolyState *s, const char *str, size_t len) {
 }
 
 /* ---- host function implementations ----
- * Each takes (nargs, args[]) where args are raw doubles. For string args
- * (printf format), the host casts the double bits to char*.
- */
+ * Each takes (h, nargs, args[]) where h is the owning host (carries per-ctx
+ * state) and args are raw doubles. For string args (printf format), the host
+ * casts the double bits to char*. */
 
-static pd_PolyState *g_state; /* set by pd_polyhost_install via a closure trick.
-                                 For simplicity we use a single global; the host
-                                 app is single-threaded. */
-
-static double hf_printf(int n, const double *a) {
+static double hf_printf(pd_Host *h, int n, const double *a) {
     /* args[0] = char* format (bit-cast), rest = doubles */
     if (n < 1) return 0;
     const char *fmt; memcpy(&fmt, &a[0], sizeof(void*));
@@ -77,30 +74,32 @@ static double hf_printf(int n, const double *a) {
         }
     }
     buf[bi] = 0;
-    poly_log(g_state, buf, bi);
+    poly_log(h->state, buf, bi);
     return 0;
 }
 
-static double hf_printg(int n, const double *a) { (void)n; (void)a; return 0; } /* TODO: GPU text */
-static double hf_klock(int n, const double *a) {
+static double hf_printg(pd_Host *h, int n, const double *a) { (void)h;(void)n; (void)a; return 0; } /* TODO: GPU text */
+static double hf_klock(pd_Host *h, int n, const double *a) {
     /* Deterministic mode: if clockScale > 0, return numframes*clockScale
      * (so renders are reproducible across runs for golden diffing). */
     double now;
-    if (g_state->clockScale > 0.0) now = g_state->numframes * g_state->clockScale;
-    else                            now = (double)clock() / CLOCKS_PER_SEC - g_state->startTime;
+    if (h->state->clockScale > 0.0) now = h->state->numframes * h->state->clockScale;
+    else                            now = (double)clock() / CLOCKS_PER_SEC - h->state->startTime;
     if (n >= 1 && a[0] != 0.0) return now;  /* date/time components: approx */
     return now;
 }
-static double hf_srand(int n, const double *a) { if (n>=1) pd_srand((unsigned long)a[0]); return 0; }
-static double hf_sleep(int n, const double *a) { (void)n; (void)a; return 0; } /* no-op in headless */
-static double hf_rgb(int n, const double *a) {
+static double hf_srand(pd_Host *h, int n, const double *a) { (void)h; if (n>=1) pd_srand((unsigned long)a[0]); return 0; }
+static double hf_sleep(pd_Host *h, int n, const double *a) { (void)h;(void)n; (void)a; return 0; } /* no-op in headless */
+static double hf_rgb(pd_Host *h, int n, const double *a) {
+    (void)h;
     if (n < 3) return 0;
     int r = a[0]<0?0:a[0]>255?255:(int)a[0];
     int g = a[1]<0?0:a[1]>255?255:(int)a[1];
     int b = a[2]<0?0:a[2]>255?255:(int)a[2];
     return (double)((r<<16)|(g<<8)|b);
 }
-static double hf_rgba(int n, const double *a) {
+static double hf_rgba(pd_Host *h, int n, const double *a) {
+    (void)h;
     if (n < 4) return 0;
     int r=a[0]<0?0:a[0]>255?255:(int)a[0];
     int g=a[1]<0?0:a[1]>255?255:(int)a[1];
@@ -108,21 +107,22 @@ static double hf_rgba(int n, const double *a) {
     int al=a[3]<0?0:a[3]>255?255:(int)a[3];
     return (double)(((unsigned)al<<24)|(r<<16)|(g<<8)|b);
 }
-static double hf_noise(int n, const double *a) {
+static double hf_noise(pd_Host *h, int n, const double *a) {
+    (void)h;
     /* simple placeholder noise (not Tom's, but deterministic) */
     double s = 0;
     for (int i = 0; i < n; i++) s = s * 12.9898 + a[i] * 78.233;
     s = sin(s) * 43758.5453;
     return s - floor(s);
 }
-static double hf_playnote(int n, const double *a) { (void)n; (void)a; return 0; } /* no audio in headless */
+static double hf_playnote(pd_Host *h, int n, const double *a) { (void)h;(void)n; (void)a; return 0; } /* no audio in headless */
 
 /* GPU stubs — all no-ops returning 0 */
-static double hf_gl_noop(int n, const double *a) { (void)n; (void)a; return 0; }
+static double hf_gl_noop(pd_Host *h, int n, const double *a) { (void)h;(void)n; (void)a; return 0; }
 
 void pd_polyhost_install(pd_Host *h, pd_PolyState *s) {
-    g_state = s;
-    pd_host_init(h);
+    pd_host_init(h);   /* zeros fns/vars/state/glbuf/cur_* — safe to reset */
+    h->state = s;      /* re-bind state AFTER init so it survives the memset */
 
     /* state variables (host reads them like globals) */
     pd_host_add_var(h, "XRES",      &s->xres);

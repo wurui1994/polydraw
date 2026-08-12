@@ -15,7 +15,7 @@ extern "C" {
 
 /* State the host functions read/write. The host application updates these
  * each frame (xres/yres from window size, mousx/mousy from cursor, etc). */
-typedef struct {
+typedef struct pd_PolyState {
     double xres, yres;
     double mousx, mousy;
     double bstatus;

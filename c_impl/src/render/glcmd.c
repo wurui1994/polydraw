@@ -8,11 +8,19 @@ void glcmd_init(GLCmdBuf *buf) {
 }
 
 void glcmd_free(GLCmdBuf *buf) {
+    /* GLCMD_UNIFORM (array form) owns its float buffer (cmd->s); free it.
+     * Other ops keep host-/EVAL-owned pointers in s and must not be freed. */
+    for (size_t i = 0; i < buf->n; i++)
+        if (buf->cmds[i].op == GLCMD_UNIFORM && buf->cmds[i].s)
+            free((void *)buf->cmds[i].s);
     free(buf->cmds);
     buf->cmds = NULL; buf->n = 0; buf->cap = 0;
 }
 
 void glcmd_reset(GLCmdBuf *buf) {
+    for (size_t i = 0; i < buf->n; i++)
+        if (buf->cmds[i].op == GLCMD_UNIFORM && buf->cmds[i].s)
+            free((void *)buf->cmds[i].s);
     buf->n = 0; /* keep allocation */
 }
 
@@ -30,7 +38,13 @@ GLCmd *glcmd_push(GLCmdBuf *buf) {
     glcmd_reserve(buf, buf->n + 1);
     if (buf->n >= buf->cap) return NULL;
     GLCmd *c = &buf->cmds[buf->n++];
-    c->op = 0; c->mode = 0; c->a = c->b = c->c = c->d = 0;
+    /* Fully initialise every field. `s` in particular MUST be cleared: slots
+     * are recycled across frames by glcmd_reset (which keeps the allocation),
+     * so a stale `s` from a previous frame would otherwise leak into commands
+     * that never set it (VERTEX/COLOR/...). That both breaks bit-exact buffer
+     * comparison and risks glcmd_reset/free treating foreign bytes as an owned
+     * GLCMD_UNIFORM float array. */
+    c->op = 0; c->mode = 0; c->a = c->b = c->c = c->d = 0; c->s = NULL;
     return c;
 }
 

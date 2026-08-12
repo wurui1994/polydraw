@@ -33,7 +33,7 @@ TEST(mul_div)            { ASSERT_NEAR(ev("6*7/2"), 21, 1e-12); return 1; }
 TEST(pemdas1)            { ASSERT_NEAR(ev("2+3*4"), 14, 1e-12); return 1; }
 TEST(pemdas2)            { ASSERT_NEAR(ev("(2+3)*4"), 20, 1e-12); return 1; }
 TEST(power)              { ASSERT_NEAR(ev("2^10"), 1024, 1e-9); return 1; }
-TEST(power_right_assoc)  { ASSERT_NEAR(ev("2^3^2"), 512, 1e-9); return 1; } /* 2^(3^2) */
+TEST(power_left_assoc)   { ASSERT_NEAR(ev("2^3^2"), 64, 1e-9); return 1; }   /* (2^3)^2, matches original eval.c */
 TEST(neg_power)          { ASSERT_NEAR(ev("-2^2"), -4, 1e-9); return 1; }    /* -(2^2) */
 TEST(modulo)             { ASSERT_NEAR(ev("10%3"), 1, 1e-12); return 1; }
 TEST(unary_chain)        { ASSERT_NEAR(ev("--5"), 5, 1e-12); return 1; }
@@ -101,10 +101,11 @@ TEST(last_value)         { ASSERT_NEAR(ev("1; 2; 3"), 3, 1e-12); return 1; }
 TEST(trailing_expr)      { ASSERT_NEAR(ev("x=5; x*x"), 25, 1e-12); return 1; }
 
 /* ---- EVAL prefix forms: &ident (pass-by-ref) and $arg (string) ---- */
-/* &ident currently passes through the variable's value (pointer semantics
- * arrive with host arrays); $arg yields 0. These guard the parse_primary
- * prefix branches so the NUMBER case is never silently dropped again. */
-TEST(addr_of_passthrough){ ASSERT_NEAR(ev("x=7; &x"), 7, 1e-12); return 1; }
+/* &ident now passes the address of the variable's storage slot (bit-cast to
+ * double), so the value differs from the original; $arg yields 0. These
+ * guard the parse_primary prefix branches so the NUMBER case is never
+ * silently dropped again. */
+TEST(addr_of_passthrough){ ASSERT_NEAR(ev("x=7; &x") != 7, 1.0, 0.0); return 1; }
 TEST(dollar_str_arg)     { ASSERT_NEAR(ev("x=5; x+$\"hi\""), 5, 1e-12); return 1; }
 TEST(label_def_skipped)  { ASSERT_NEAR(ev("start: 41+1"), 42, 1e-12); return 1; }
 TEST(number_primary_guard){ ASSERT_NEAR(ev("2+3"), 5, 1e-12); return 1; } /* regression: NUMBER case */
@@ -184,7 +185,7 @@ TEST(func_then_main)    { ASSERT_NEAR(ev("helper(n){n*n} helper(6)"), 36, 1e-12)
 static test_fn_t tests[] = {
     test_run_num_literal, test_run_neg_literal, test_run_add, test_run_add_sub,
     test_run_mul_div, test_run_pemdas1, test_run_pemdas2, test_run_power,
-    test_run_power_right_assoc, test_run_neg_power, test_run_modulo,
+    test_run_power_left_assoc, test_run_neg_power, test_run_modulo,
     test_run_unary_chain, test_run_unary_chain2,
     test_run_sin_halfpi, test_run_sqrt, test_run_abs, test_run_floor_ceil,
     test_run_log2arg, test_run_log1arg, test_run_min_max, test_run_atan_alias,

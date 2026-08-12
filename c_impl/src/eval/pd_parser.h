@@ -13,6 +13,10 @@
 #include "pd_ir.h"
 #include "pd_lexer.h"
 
+/* Forward declaration so the parser can hold a host table pointer without
+ * pulling in the full pd_Host definition. */
+typedef struct pd_Host pd_Host;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -45,17 +49,36 @@ typedef struct {
     int        nextOverload;
     /* for user FUNC: index into program->funcs[] */
     int        funcIdx;
+    /* 1 for function params declared with an & prefix (pass-by-reference):
+     * the param slot holds a bit-cast pointer to the caller's storage, and
+     * reads/writes lower to PEEK/POKE through it. */
+    int        refParam;
+    /* for user FUNC: bit k set → param k is pass-by-reference; the call
+     * site must pass the ADDRESS of an lvalue (slot), not its value. */
+    int        refMask;
+    /* Scope the symbol was declared in. 0 = file scope (host symbols,
+     * builtins, named functions); >0 = the body of one particular function
+     * (including the anonymous main). A symbol from a different non-zero
+     * scope is invisible: locals of one function must never resolve inside
+     * another, because their LOCAL/GLOBAL regs index a different frame. */
+    int        scopeId;
 } pd_Sym;
 
-#define PD_MAX_SYMS 1024
+#define PD_MAX_SYMS 8192
 
 typedef struct {
     pd_Builder *b;
     pd_TokenStream *ts;
+    const pd_Host *host;    /* host table (for per-function re-install) */
     size_t    tok;          /* current token index */
 
     pd_Sym    syms[PD_MAX_SYMS];
     int       nSyms;
+
+    /* symbol scoping: curScopeId is stamped onto every symbol added; a fresh
+     * id is taken from nextScopeId when entering a function body. */
+    int       curScopeId;
+    int       nextScopeId;
 
     /* globals storage (shared across all functions in a script) */
     double   *globals;
@@ -84,6 +107,12 @@ typedef struct {
     int            lastLValueIsArrayIndex;  /* lvalue was name[idx] */
     pd_Reg         lastArrayIdx;            /* index reg if array-index lvalue */
     pd_Reg         lastValueReg;            /* last bare-expression result (for return) */
+
+    /* ---- Plan B: fold-based expression parser (parser-fold.c) ----
+     * When useFold is non-zero, all expressions (including nested ones
+     * inside parens / call args / array indices) are parsed by the
+     * faithful port of eval.c:parsefunc's linked-list fold algorithm. */
+    int            useFold;
 } pd_Parser;
 
 void pd_parser_init(pd_Parser *p, pd_Builder *b, pd_TokenStream *ts);
@@ -112,6 +141,14 @@ int pd_parse_program(pd_Parser *p);
 /* Parses an expression, returns the result Reg. minPrec is the minimum
  * operator precedence to consider (0 = accept everything). */
 pd_Reg pd_parse_expr(pd_Parser *p);
+
+/* Plan B fold-based expression parser (parser-fold.c). Faithful port of
+ * eval.c:parsefunc's linked-list fold loop. Used when p->useFold is set. */
+pd_Reg pd_fold_parse_expr(pd_Parser *p);
+
+/* Shared operand/primary parser, exposed so parser-fold.c can reuse the
+ * number/ident/call/array/prefix parsing without duplicating it. */
+pd_Reg pd_parse_primary(pd_Parser *p);
 
 /* Parse a single statement. Used by tests. */
 int pd_parse_stmt(pd_Parser *p);

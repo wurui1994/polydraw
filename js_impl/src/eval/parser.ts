@@ -2,7 +2,7 @@
 // c_impl/src/eval/pd_parser.c (Plan A). Behaviour matches the C implementation.
 //
 // Operator precedence (higher = binds tighter), from eval.c:7352:
-//   ^ : 7 (right-assoc)   * / % : 6   + - : 5   < <= > >= : 4
+//   ^ : 7 (left-assoc)   * / % : 6   + - : 5   < <= > >= : 4
 //   == != : 3   && : 2   || : 1   = += ... : 0 (assignment, right, lowest)
 
 import type { Reg, Program, Instr } from './ir.ts';
@@ -61,7 +61,7 @@ const BUILTINS: { name: string; op1: number; op2: number }[] = [
 
 interface BinOp { tok: string; prec: number; rightAssoc: number; op: number; }
 const BINOPS: BinOp[] = [
-  { tok: '^', prec: 7, rightAssoc: 1, op: Op.POW },
+  { tok: '^', prec: 7, rightAssoc: 0, op: Op.POW },
   { tok: '*', prec: 6, rightAssoc: 0, op: Op.TIMES },
   { tok: '/', prec: 6, rightAssoc: 0, op: Op.SLASH },
   { tok: '%', prec: 6, rightAssoc: 0, op: Op.PERC },
@@ -100,6 +100,7 @@ export class Parser {
   lastLValueIsArrayIndex = 0;
   lastArrayIdx: Reg = reg(Fam.VOID, 0);
   lastValueReg: Reg = reg(Fam.VOID, 0);
+  host: Host | null = null;
   ok = true;
   err = '';
   errLine = 0;
@@ -190,21 +191,71 @@ export class Parser {
     pi.reg = this.b.newConst(3.141592653589793);
   }
 
+  /* Register a host (external function table) so scripts calling glXxx(...)
+   * resolve to EXT_FUNC symbols. Mirrors c_impl pd_host_install: host
+   * variables become EXT vars (vi index into host.vars), host functions
+   * become EXT_FUNC with funcIdx = host fn index. The interpreter decodes
+   * CALL aux = -1000 - funcIdx and reads EXT vars via consts[off] = vi. */
+  installHost(host: Host): void {
+    let vi = 0;
+    for (const [name, v] of host.vars) {
+      const s = this.symAdd(name, SymKind.EXT_VAR);
+      // Store vi in a const slot and make the symbol's reg a Fam.EXT register
+      // whose off indexes that slot. The interpreter's EXT branch reads
+      // consts[off/8] as vi and looks up host.vars['_'+vi].
+      const slot = this.b.newConst(vi);
+      s.reg = reg(Fam.EXT, slot.off);
+      vi++;
+    }
+    // re-key the vars map with '_'+index to match the interp's lookup
+    const rekeyed = new Map<string, HostVar>();
+    let i = 0;
+    for (const [, v] of host.vars) { rekeyed.set('_' + i, v); i++; }
+    host.vars = rekeyed;
+    let fi = 0;
+    for (const f of host.fns) {
+      const s = this.symAdd(f.name, SymKind.EXT_FUNC);
+      s.nParams = f.nParams;
+      s.funcIdx = fi;
+      fi++;
+    }
+  }
+
   // ---- expression parser (Pratt) ----
   parseExpr(): Reg { return this.parseExprPrec(0); }
 
   parseExprPrec(minPrec: number): Reg {
-    // Prefix: handle unary +/- (count consecutive, track net negate).
-    let negate = false;
-    while (this.cur().kind === TokKind.PUNCT && this.cur().text === '+' || this.cur().text === '-') {
-      if (this.cur().kind !== TokKind.PUNCT || this.cur().len !== 1) break;
-      const ch = this.cur().text;
-      if (ch !== '+' && ch !== '-') break;
-      if (ch === '-') negate = !negate;
-      this.eat();
+    // Unary +/- must match eval.c:parsefunc's two distinct sign rules:
+    //  - FRESH boundary (minPrec===0: statement / call arg / paren contents /
+    //    array index — each is an independent parsefunc call in the original):
+    //    a leading sign becomes a BINARY operator with an implicit 0 left
+    //    operand (the "-x^2" hack): -2^2 = -(2^2) = -4, -2+3 = 1, --2 = 2.
+    //  - MID-expression (minPrec>0: an operator's right operand): consecutive
+    //    +/- toggle negit that negates the IMMEDIATE operand before ^ binds:
+    //    3*-2^2 = 3*((-2)^2) = 12, 2^--3 = 2^3 = 8.
+    const fresh = minPrec === 0;
+    let left: Reg;
+    if (fresh && this.cur().kind === TokKind.PUNCT && this.cur().len === 1 &&
+        (this.cur().text === '+' || this.cur().text === '-')) {
+      // implicit 0 left operand; the pratt loop consumes the sign as a binary op
+      const z = this.b.newConst(0);
+      left = this.b.newLocal();
+      this.b.emit1(Op.MOV, left, z);
+    } else {
+      let negit = 1;
+      while (this.cur().kind === TokKind.PUNCT && this.cur().len === 1 &&
+             (this.cur().text === '+' || this.cur().text === '-')) {
+        if (this.cur().text === '-') negit = -negit;
+        this.eat();
+      }
+      left = this.parsePrimary();
+      if (!this.ok) return left;
+      if (negit < 0) {
+        const out = this.b.newLocal();
+        this.b.emit1(NEGMOV, out, left);
+        left = out;
+      }
     }
-    let left = this.parsePrimary();
-    if (!this.ok) return left;
     for (;;) {
       const t = this.cur();
       if (t.kind !== TokKind.PUNCT) break;
@@ -222,12 +273,6 @@ export class Parser {
       if (!this.ok) return left;
       const out = this.b.newLocal();
       this.b.emit2(bo.op, out, left, right);
-      left = out;
-    }
-    // apply deferred unary negate after ^ bound into left
-    if (negate) {
-      const out = this.b.newLocal();
-      this.b.emit1(NEGMOV, out, left);
       left = out;
     }
     return left;
@@ -257,6 +302,17 @@ export class Parser {
       return out;
     }
     if (t.kind === TokKind.STRING) {
+      if (this.host && this.host.strings) {
+        // register the literal and pass its slot index to host fns
+        const text = t.text;
+        let slot = -1;
+        for (const [k, v] of this.host.strings) if (v === text) { slot = k; break; }
+        if (slot < 0) { slot = this.host.strings.size; this.host.strings.set(slot, text); }
+        const out = this.b.newLocal();
+        const c = this.b.newConst(slot);
+        this.b.emit1(Op.MOV, out, c);
+        return out;
+      }
       const out = this.b.newLocal();
       const zero = this.b.newConst(0);
       this.b.emit1(Op.MOV, out, zero);
@@ -934,6 +990,10 @@ export class Parser {
 
   parseProgram(): boolean {
     this.lastValueReg = this.b.newConst(0);
+    // Pre-declare all top-level function names so forward references resolve
+    // (mirrors the original kasm87's two-pass behavior). Indices match the
+    // order parseProgram later creates them (anon main first, then defs).
+    this.preDeclareFunctions();
     let sawMain = false;
     while (this.ok && this.cur().kind !== TokKind.EOF) {
       if (!sawMain && this.tryParseAnonMain()) { sawMain = true; continue; }
@@ -945,12 +1005,57 @@ export class Parser {
     }
     return this.ok;
   }
+
+  /* Scan the whole token stream for top-level `name(...) {` definitions and
+   * register each as a FUNC symbol with funcIdx = its ordinal position.
+   * Anon main `(){` has no name (skipped here; parsed separately). */
+  private preDeclareFunctions(): void {
+    const ts = this.ts;
+    // Named function defs occupy this.funcs indices 0,1,2,... in source order.
+    // The (optional) anon main is compiled into the main builder and is NOT
+    // pushed to this.funcs, so no index offset is needed here.
+    let idx = 0;
+    let i = 0;
+    while (i < ts.length) {
+      if (ts[i].kind === TokKind.IDENT) {
+        // Skip control-flow / declaration keywords: at parse time these are
+        // consumed by parseStmt before a function def is attempted, so a
+        // `for (...) {` / `if (...) {` must not be mistaken for a function.
+        const kw = ts[i].text.toUpperCase();
+        if (kw === 'IF' || kw === 'WHILE' || kw === 'FOR' || kw === 'DO' ||
+            kw === 'ENUM' || kw === 'STATIC' || kw === 'RETURN' || kw === 'ELSE') {
+          i++; continue;
+        }
+        const after = i + 1;
+        if (after < ts.length && ts[after].kind === TokKind.PUNCT && ts[after].text === '(') {
+          let depth = 0, s = after;
+          while (s < ts.length) {
+            if (ts[s].kind === TokKind.PUNCT && ts[s].text === '(') depth++;
+            else if (ts[s].kind === TokKind.PUNCT && ts[s].text === ')') { depth--; if (depth === 0) break; }
+            s++;
+          }
+          if (s < ts.length && ts[s + 1]?.kind === TokKind.PUNCT && ts[s + 1].text === '{') {
+            const s2 = this.symFindName(ts[i].text);
+            if (!(s2 && s2.kind === SymKind.FUNC)) {
+              const sym = this.symAdd(ts[i].text, SymKind.FUNC);
+              sym.funcIdx = idx;
+              sym.nParams = -1;
+            }
+            idx++;
+            i = s + 2;
+            continue;
+          }
+        }
+      }
+      i++;
+    }
+  }
 }
 
 // ---- top-level compile ----
 export interface CompileResult { ok: boolean; program: Program; err: string; }
 
-export function compile(src: string): CompileResult {
+export function compile(src: string, host?: Host): CompileResult {
   const lexRes = lex(src);
   if (!lexRes.ok) {
     return { ok: false, program: emptyProgram(), err: `lex error: ${lexRes.err}` };
@@ -958,6 +1063,7 @@ export function compile(src: string): CompileResult {
   const b = new Builder();
   const p = new Parser(b, lexRes.toks);
   p.installBuiltins();
+  if (host) { p.host = host; p.installHost(host); }
   p.parseProgram();
   if (!p.ok) {
     return { ok: false, program: emptyProgram(), err: p.err };
@@ -965,7 +1071,7 @@ export function compile(src: string): CompileResult {
   const prog = b.finish();
   prog.globals = p.globals.subarray(0, p.nGlobals).slice();
   prog.funcs = p.funcs;
-  prog.host = null;
+  prog.host = host ?? null;
   return { ok: true, program: prog, err: '' };
 }
 

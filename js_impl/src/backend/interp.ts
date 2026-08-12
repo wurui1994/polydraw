@@ -34,11 +34,12 @@ function nrnd(): number {
     y = ((krand() - 1073741824) >>> 0) * (oneover2_31 * 2.0);
     r = x * x + y * y;
   } while (r >= 1);
-  // Box-Muller (Good & fast) — matches the original.
-  const f = Math.sqrt(-2.0 * Math.log(r + 1e-20) / (r + 1e-20));
-  g_srand2 = y * f;
+  // Box-Muller (Good & fast) — matches the original: f=sqrt(-2*log(r)/r),
+  // the CURRENT pair returns y*f and caches x*f for the next call.
+  const f = Math.sqrt(-2.0 * Math.log(r) / r);
+  g_srand2 = x * f;
   g_normstat = true;
-  return x * f;
+  return y * f;
 }
 
 // factorial via log-gamma (Lanczos), mirrors the original pd_fact.

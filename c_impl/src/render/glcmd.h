@@ -53,14 +53,37 @@ typedef enum {
     GLCMD_DISABLE,       /* mode = cap */
     GLCMD_BLENDFUNC,     /* mode = sf<<16|df (encoded) */
     GLCMD_CULLFACE,      /* mode = face */
-    GLCMD_LINEWIDTH      /* a = width */
+    GLCMD_LINEWIDTH,     /* a = width */
+
+    /* textures & capture (added in the texture milestone) */
+    GLCMD_SETTEXDATA,    /* a=tex, b=w, c=h, d=z, mode=colmode, s=pixels */
+    GLCMD_BINDTEX,       /* a=tex (bind to the current active unit) */
+    GLCMD_ACTIVETEX,     /* a=unit (0..3; GL_TEXTURE0+N encoded the same) */
+    GLCMD_CAPTURE,       /* a=tex(>=0: render into tex; <0: screen), b=w, c=h, mode=coltype */
+    GLCMD_CAPTUREEND,    /* a=tex (screen-capture copy target) */
+
+    /* shaders, uniforms, misc (added in the shader milestone) */
+    GLCMD_SETFOV,        /* a = fovy degrees (applies at next frame start) */
+    GLCMD_SETSHADER,     /* a = bit-cast vertex src ptr, b = bit-cast frag src ptr */
+    GLCMD_UNIFORMLOC,    /* a = loc id, s = uniform name */
+    GLCMD_UNIFORM,       /* a = loc id, b..d = values, mode = kind<<8|count,
+                          * s = float array values (count>4: FV/IV forms) */
+    GLCMD_MULTMATRIX     /* s = 16-double column-major matrix, premultiplied
+                          * onto the current modelview (glMultMatrix/gluLookAt) */
 } GLCmdOp;
 
-/* One recorded command. Fixed 48 bytes for easy ctypes mapping. */
+/* kind codes for GLCMD_UNIFORM's mode field (low 8 bits = count) */
+#define PD_UNI_F 0
+#define PD_UNI_I 1
+
+/* One recorded command. 56 bytes (ctypes mapping mirrors this exactly).
+ * `s` is op-dependent: for GLCMD_SETTEXDATA it points at the texture
+ * pixel array owned by the host's texture table (valid until pdrl_free). */
 typedef struct {
-    int    op;       /* GLCmdOp */
-    int    mode;     /* primitive type / cap / etc (op-dependent) */
-    double a, b, c, d;
+    int         op;       /* GLCmdOp */
+    int         mode;     /* primitive type / cap / colmode / etc */
+    double      a, b, c, d;
+    const char *s;        /* texture pixels (SETTEXDATA) */
 } GLCmd;
 
 typedef struct GLCmdBuf {

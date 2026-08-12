@@ -10,6 +10,7 @@
 #define PD_RUNLIB_H
 
 #include "glcmd.h"
+#include "pd_polyhost_tex.h"
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -29,6 +30,10 @@ pdrl_Ctx *pdrl_compile(const char *hostSrc, int xres, int yres, char *err, size_
  * EVAL result (usually 0 for gl-drawing scripts). */
 double pdrl_run_frame(pdrl_Ctx *ctx, double numframes);
 
+/* Like pdrl_run_frame but runs the EVAL via the sljit JIT when enabled.
+ * Falls back to the interpreter if the JIT is unavailable. */
+double pdrl_run_frame_jit(pdrl_Ctx *ctx, double numframes);
+
 /* Access the recorded gl command buffer (valid until next pdrl_run_frame). */
 const GLCmdBuf *pdrl_glbuf(const pdrl_Ctx *ctx);
 
@@ -40,6 +45,12 @@ void pdrl_set_resolution(pdrl_Ctx *ctx, int xres, int yres);
 void pdrl_set_clock_scale(pdrl_Ctx *ctx, double scale);
 
 void pdrl_free(pdrl_Ctx *ctx);
+
+/* Provide the .pss section block table (GLSL sources) so the recorded
+ * GLCMD_SETSHADER commands can resolve shader source pointers. Call after
+ * pdrl_compile and before running frames. The table is owned by the caller
+ * until pdrl_free. */
+void pdrl_install_tex_blocks(const pdrl_Block *blocks, int nblocks);
 
 #ifdef __cplusplus
 }

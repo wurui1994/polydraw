@@ -20,6 +20,9 @@ int pd_compile(pd_Program *prog, const char *src, char *err, size_t errLen);
 /* Compile with a host function/variable table attached. */
 int pd_compile_host(pd_Program *prog, const char *src, const pd_Host *host, char *err, size_t errLen);
 
+/* Same, but with the Plan B fold parser (p.useFold) enabled. */
+int pd_compile_fold_host(pd_Program *prog, const char *src, const pd_Host *host, char *err, size_t errLen);
+
 /* Compile and run in one call (no params, no globals). Returns the
  * result, or NaN on compile error (err filled). */
 double pd_eval(const char *src, char *err, size_t errLen);
