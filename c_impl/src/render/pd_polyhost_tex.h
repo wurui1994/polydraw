@@ -69,6 +69,13 @@ void pd_polyhost_set_blocks(const pdrl_Block *blocks, int nblocks);
 /* free all snapshot pixel buffers (call from pdrl_free) */
 void pd_tex_free_all(void);
 
+/* Set the directory searched first when a glsettex(tex, "file") is resolved.
+ * Matches the original polydraw, which resolves texture files relative to the
+ * script's own directory. Without this, textures only load when the viewer is
+ * launched from the script's folder (otherwise the file is "not found" and the
+ * script renders black/broken). Pass NULL/"" to clear. */
+void pd_set_texture_search_dir(const char *dir);
+
 /* resolve a cached glGetUniformLoc id to its name (persists across the
  * per-frame GLCmdBuf reset, unlike GLCMD_UNIFORMLOC). Returns NULL if the
  * id was never registered. Used by the renderer to map uniforms to names. */

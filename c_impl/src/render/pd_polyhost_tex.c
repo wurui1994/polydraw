@@ -35,6 +35,16 @@ static int g_nblocks = 0;
 
 pd_Tex pd_tex[PD_MAX_TEX];
 
+/* texture file search directory (set from the script's dir by the renderers) */
+static char g_tex_search_dir[1024];
+void pd_set_texture_search_dir(const char *dir)
+{
+    if (dir && dir[0])
+        snprintf(g_tex_search_dir, sizeof(g_tex_search_dir), "%s", dir);
+    else
+        g_tex_search_dir[0] = 0;
+}
+
 /* glGetUniformLoc id table: names live in the program's string table */
 #define PD_MAX_LOCS 64
 static const char *g_locnames[PD_MAX_LOCS];
@@ -112,6 +122,28 @@ static int decode_file(const char *file, int *w, int *h, double **out)
 {
     int ch = 0;
     unsigned char *px = stbi_load(file, w, h, &ch, 4);
+    if (!px) {
+        /* Resolve relative to the script directory, then walk UP parent
+         * directories (the original polydraw searches the .pss folder and its
+         * ancestors — textures like kensky.jpg live at the project root while
+         * scripts live in ken/ or tigrou/). */
+        char path[1100];
+        char dir[1024];
+        strncpy(dir, g_tex_search_dir, sizeof(dir) - 1);
+        dir[sizeof(dir) - 1] = 0;
+        for (;;) {
+            if (dir[0]) {
+                snprintf(path, sizeof(path), "%s/%s", dir, file);
+                px = stbi_load(path, w, h, &ch, 4);
+                if (px) break;
+            }
+            /* strip trailing path component to move up one level */
+            char *slash = strrchr(dir, '/');
+            if (!slash) break;
+            if (slash == dir) { dir[0] = 0; break; }
+            *slash = 0;
+        }
+    }
     if (!px) return 0;
     size_t n = (size_t)(*w) * (*h);
     double *pix = malloc(n * sizeof(double));
@@ -338,14 +370,14 @@ static double rh_glSetShader(pd_Host *h, int n, const double *a)
         }
         return 0;
     }
-    vi = blk_clamp(PD_SEC_VERTEX, vi);
-    fi = blk_clamp(PD_SEC_FRAGMENT, fi);
-    GLCmd *cmd = glcmd_push(h->glbuf);
-    if (cmd) {
-        cmd->op = GLCMD_SETSHADER;
-        cmd->a = (double)(uintptr_t)(vi >= 0 ? g_blocks[vi].src : NULL);
-        cmd->b = (double)(uintptr_t)(fi >= 0 ? g_blocks[fi].src : NULL);
-    }
+        vi = blk_clamp(PD_SEC_VERTEX, vi);
+        fi = blk_clamp(PD_SEC_FRAGMENT, fi);
+        GLCmd *cmd = glcmd_push(h->glbuf);
+        if (cmd) {
+            cmd->op = GLCMD_SETSHADER;
+            cmd->a = (double)(uintptr_t)(vi >= 0 ? g_blocks[vi].src : NULL);
+            cmd->b = (double)(uintptr_t)(fi >= 0 ? g_blocks[fi].src : NULL);
+        }
     return 0;
 }
 
@@ -516,11 +548,15 @@ static double c_GL_TEXTURE_3D = 0x806F, c_GL_TEXTURE_CUBE_MAP = 0x8513;
 static double c_KGL[12];
 
 void pd_polyhost_install_tex(pd_Host *h, GLCmdBuf *glbuf,
-                             const pdrl_Block *blocks, int nblocks)
+                              const pdrl_Block *blocks, int nblocks)
 {
     h->glbuf = glbuf;
-    g_blocks = blocks;
-    g_nblocks = nblocks;
+    /* NOTE: the section block table (g_blocks/g_nblocks) is owned by
+     * pd_polyhost_set_blocks() and must NOT be cleared here. This function is
+     * called at ctx creation with (NULL,0), which previously wiped the table
+     * that pdrl_install_tex_blocks() installed *before* pdrl_compile(),
+     * leaving glsetshader() unable to resolve any @v/@f block (so multi-shader
+     * scripts like gears/funky fell back to the default program). */
     memset(pd_tex, 0, sizeof(pd_tex));
     g_nlocs = 0;
 

@@ -88,6 +88,19 @@ pd_Reg pd_new_const(pd_Builder *b, double v) {
     return pdR(PD_FAM_CONST, (uint32_t)(b->nConst++ * 8));
 }
 
+/* Like pd_new_const but NEVER deduplicates. Used to store bit-cast host
+ * variable/function pointers: those bit patterns can coincidentally equal a
+ * numeric literal (e.g. a NULL pointer bit-casts to 0.0), which would make
+ * the dedupe return a *number* const instead of the pointer slot, corrupting
+ * the EXT reg and crashing at runtime. */
+pd_Reg pd_new_const_ptr(pd_Builder *b, double v) {
+    if (!grow((void**)&b->consts, &b->capConst, b->nConst + 1, sizeof(double))) {
+        b->ok = 0; return pdR(PD_FAM_VOID, 0);
+    }
+    b->consts[b->nConst] = v;
+    return pdR(PD_FAM_CONST, (uint32_t)(b->nConst++ * 8));
+}
+
 pd_Reg pd_new_string(pd_Builder *b, const char *s, size_t len) {
     /* store: bytes + NUL terminator */
     if (!grow((void**)&b->strings, &b->capStrings, b->nStrings + len + 1, 1)) {

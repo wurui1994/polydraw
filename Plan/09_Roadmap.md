@@ -53,6 +53,7 @@
       3. **逐帧全量重放 O(N²)**：实时循环里每显示一帧都把 `0..frame` 全部 `run_frame` 重跑一遍，到帧 300 时每显示帧要做 300 次 EVAL，整体 O(N²) 退化到 ~1fps。修复：**增量播放**——`prog.globals` 跨 `run_frame` 调用持久（仅绘制缓冲被 `glcmd_reset`），故每显示帧只 `run` 新增的那一帧（`last_rendered+1..frame`）；仅在后退/重启时全量重放。另修正了步进循环“每显示帧最多进 1 帧”的 break 条件错误（原 `if(acc<SEC) break` 实际会一口气连进 ~15 帧）。
     - **验证**：GLFW-direct 窗口（pre-swap 回读）对 balls(65536)/heightmap(~15000)/disco(31000)/drawsph(65531)/ballsk(4794)/interference(65536) 均非黑；`polydraw-view --once 30` 对全部 40 个 `ken/`+`tigrou/` 脚本逐像素对比 `polydraw-render`，**全 40 个 ≤2/255 差异**（位级一致），满足成功标准 #3。
     - **实测帧率（GLFW-direct，640×480，LLVM JIT 默认开）**：interference **60fps**（vsync 封顶）/ heightmap **60fps** / drawsph≈53 / ballsk≈168（见基准）/ balls **~13fps**——最后者是该脚本每帧绘制数百个细分球体的真实 GL 光栅开销（与 JIT 无关；EVAL 部分已被 LLVM 提速 ~1.5×）。相较之前的 <1fps 已是数量级提升，窗口真正可用。
+    - **HiDPI 视口修复（本会话）**：GLFW 窗口实际绘制缓冲是逻辑尺寸的 2×（`glfwGetFramebufferSize`），原先 `glViewport(0,0,w,h)` 把场景塞进左下四分之一。新增 `pd_gl_renderer_set_framebuffer_size`/resize 回调，GLFW-direct 路径改用真实像素尺寸做视口，窗口现已铺满（实测 800×600 帧缓冲、四角均非黑）。
     - 交互：空格暂停/继续、R 重启、←/→ 单帧步进、Esc/Q 退出。
   - **全示例**：✅ 53/53 `ken/`+`tigrou/` 脚本 @128×128 帧30 均出非平凡 PNG（含纹理/shader/capture 类）。
   - **性能基准（已完成，详见 `Plan/10_Performance.md`）**：新增 `tools/bench`（纯 EVAL）与 `tools/framebench`（真实整帧 EVAL+GL 回读）两套基准，对比 interp / LLVM / sljit。关键结论：

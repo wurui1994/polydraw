@@ -245,7 +245,7 @@ int pd_parser_add_ext(pd_Parser *p, const char *proto, void *ptr) {
      * For simplicity here, store the pointer's low bits as the EXT index in
      * a side table on the program. We punt: store as a CONST-encoded double. */
     double dptr; memcpy(&dptr, &ptr, sizeof(void*));
-    s->reg = pd_new_const(p->b, dptr);
+    s->reg = pd_new_const_ptr(p->b, dptr);
     s->reg.fam = PD_FAM_EXT;
     s->arraySize = hasArray ? 1 : 0; /* caller sets real size elsewhere if needed */
     if (prev && prev->kind == kind) {

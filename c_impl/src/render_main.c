@@ -129,6 +129,14 @@ int main(int argc, char **argv) {
 
     /* ---- compile host block ---- */
     char err[256];
+    /* resolve texture files (glsettex "x.jpg") relative to the script dir */
+    {
+        char sdir[1024];
+        const char *slash = strrchr(script, '/');
+        if (slash) { size_t n = (size_t)(slash - script);
+            if (n < sizeof(sdir)) { memcpy(sdir, script, n); sdir[n] = 0;
+                                    pd_set_texture_search_dir(sdir); } }
+    }
     pdrl_Ctx *ctx = pdrl_compile(host_src, w, h, err, sizeof(err));
     if (!ctx) { fprintf(stderr, "compile error: %s\n", err); free(src); return 1; }
     pdrl_set_clock_scale(ctx, 1.0 / 60.0);   /* deterministic klock() */

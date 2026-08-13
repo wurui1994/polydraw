@@ -170,6 +170,7 @@ pd_Reg pd_new_local(pd_Builder *b);
 
 /* intern a constant; returns CONST reg */
 pd_Reg pd_new_const(pd_Builder *b, double v);
+pd_Reg pd_new_const_ptr(pd_Builder *b, double v);
 
 /* intern a string literal; returns STR reg (offset into strings[]) */
 pd_Reg pd_new_string(pd_Builder *b, const char *s, size_t len);

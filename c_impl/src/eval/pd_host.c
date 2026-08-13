@@ -77,14 +77,31 @@ int pd_host_find_var(const pd_Host *h, const char *name) {
 }
 
 void pd_host_install(const pd_Host *h, pd_Parser *p) {
-    /* host variables: store double* bit-cast in a const slot, fam=EXT */
+    /* host variables: store double* bit-cast in a const slot, fam=EXT.
+     * Variables are stored uppercased by pd_host_add_var, but scripts often
+     * reference them in lowercase (e.g. `xres`/`yres`). Register both the
+     * stored (uppercase) name and a lowercased alias pointing at the SAME
+     * const slot, so lookups are case-insensitive. The alias SHARES the
+     * uppercase symbol's EXT reg (no second const slot) to avoid the
+     * pd_new_const dedupe corrupting the pointer into a numeric literal. */
     for (int i = 0; i < h->nVars; i++) {
-        pd_Sym *s = pd_parser_sym_add(p, h->vars[i].name, PD_SYM_EXT_VAR);
+        const char *nm = h->vars[i].name;
+        pd_Sym *s = pd_parser_sym_add(p, nm, PD_SYM_EXT_VAR);
         if (!s) continue;
         double dptr; void *pp = (void*)h->vars[i].pVal;
         memcpy(&dptr, &pp, sizeof(void*));
-        s->reg = pd_new_const(p->b, dptr);
+        s->reg = pd_new_const_ptr(p->b, dptr);
         s->reg.fam = PD_FAM_EXT;
+        /* lowercased alias shares the same reg */
+        char low[64];
+        int k = 0;
+        for (; nm[k] && k < 63; k++)
+            low[k] = (nm[k]>='A'&&nm[k]<='Z') ? nm[k]+32 : nm[k];
+        low[k] = 0;
+        if (strcmp(low, nm) != 0 && !pd_parser_sym_find(p, low)) {
+            pd_Sym *sa = pd_parser_sym_add(p, low, PD_SYM_EXT_VAR);
+            if (sa) sa->reg = s->reg;
+        }
     }
     /* host functions: register as EXT_FUNC with funcIdx = host fn index */
     for (int i = 0; i < h->nFns; i++) {
