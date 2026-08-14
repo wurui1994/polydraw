@@ -324,8 +324,9 @@ int main(int argc, char **argv) {
     }
 
     int paused = 0, quit = 0, step = 0, restart = 0;
-    double frame = 0;
-    double last_rendered = -1.0;   /* last frame actually run (incremental playback) */
+    double play_sec = 0.0;          /* wall-clock seconds of playback time */
+    double frame = 0.0;            /* virtual script frame == play_sec * 60 */
+    long last_rendered = -1;       /* last integer frame actually run */
     /* Scripts seed their one-time state (particle positions, palettes,
      * uploaded textures) inside `if (numframes == 0)`. The render loop below
      * skips frame 0 on its very first iteration (dt>0 advances `frame` before
@@ -338,23 +339,29 @@ int main(int argc, char **argv) {
     {
         run_frame(ctx, 0.0);
         pd_gl_renderer_render(rd, pdrl_glbuf(ctx));
-        last_rendered = 0.0;
+        last_rendered = 0;
     }
-    /* Fixed real-time playback: the script advances at its native rate
-     * (pdrl_set_clock_scale(1/60) above ⇒ klock() advances 1/60 s per script
-     * frame). We accumulate wall-clock time and step the script one frame at
-     * a time so animation plays at the correct speed regardless of how fast
-     * the machine renders, while never skipping more than one script frame
-     * per displayed frame (avoids time-jumps on a slow GPU). */
-    const double SEC_PER_FRAME = 1.0 / 60.0;
+    /* Real-time playback decoupled from the display frame rate.
+     *
+     * We accumulate the REAL elapsed playback time (play_sec) and derive the
+     * virtual script frame as frame = play_sec * 60.0. klock() (which, under
+     * the deterministic clock scale of 1/60, returns numframes/60) therefore
+     * returns exactly play_sec — the true wall-clock seconds since playback
+     * started — regardless of how many display frames per second the machine
+     * can push. Animations therefore run at their native speed and move
+     * smoothly/continuously whether the window runs at 30, 60 or 144 fps.
+     *
+     * This is the correct fix for "klock-driven motion crawls on a slow GPU":
+     * the previous per-display-frame +1 stepping made frame advance no faster
+     * than the display rate, so the clock lagged behind real time and the
+     * motion was slow and non-continuous. */
     double wall_prev = glfwGetTime();
-    double acc = 0.0;
     int advanced = 1;            /* whether 'frame' changed since last render */
     /* fps accounting */
     int fps_frames = 0; double fps_t0 = wall_prev, last_key_space = 0;
 
     while (!glfwWindowShouldClose(win) && !quit) {
-        if (restart) { frame = 0; acc = 0; restart = 0; last_rendered = -1.0; }
+        if (restart) { play_sec = 0; frame = 0; restart = 0; last_rendered = -1; }
 
         double wall = glfwGetTime();
         double dt = wall - wall_prev;
@@ -362,17 +369,11 @@ int main(int argc, char **argv) {
         wall_prev = wall;
 
         if (paused) {
-            if (step) { frame += 1.0; step = 0; advanced = 1; }
+            if (step) { frame += 1.0; play_sec = frame / 60.0; step = 0; advanced = 1; }
         } else {
-            acc += dt;
-            /* Advance at most ONE script frame per displayed frame so playback
-             * speed is correct and we never fast-forward through animation when
-             * the machine is slow (we just fall behind in real time). */
-            if (acc >= SEC_PER_FRAME) {
-                frame += 1.0; acc -= SEC_PER_FRAME; advanced = 1;
-            } else {
-                advanced = 0;
-            }
+            play_sec += dt;
+            frame = play_sec * 60.0;
+            if (frame > last_rendered) advanced = 1;
         }
 
         if (advanced) {
@@ -389,18 +390,19 @@ int main(int argc, char **argv) {
              * restart (last_rendered > frame). This avoids the O(N^2) cost of
              * replaying 0..frame every displayed frame. */
             double tA = getenv("PD_VIEW_TIMING") ? glfwGetTime() : 0;
-            if (frame <= last_rendered) {
-                for (int f = 0; f <= (int)frame; f++)
+            long fc = (long)frame;
+            if (fc <= last_rendered) {
+                for (long f = 0; f <= fc; f++)
                     run_frame(ctx, (double)f);
-                if (getenv("PD_VIEW_TIMING")) fprintf(stderr, "[run-count] full replay 0..%.0f\n", frame);
+                if (getenv("PD_VIEW_TIMING")) fprintf(stderr, "[run-count] full replay 0..%ld\n", fc);
             } else {
                 if (getenv("PD_VIEW_TIMING"))
-                    fprintf(stderr, "[run-range] %.0f..%.0f (%d frames) acc=%.2f\n",
-                            last_rendered+1, frame, (int)frame - (int)last_rendered, acc);
-                for (int f = (int)last_rendered + 1; f <= (int)frame; f++)
+                    fprintf(stderr, "[run-range] %ld..%ld (%ld frames)\n",
+                            last_rendered+1, fc, fc - last_rendered);
+                for (long f = last_rendered + 1; f <= fc; f++)
                     run_frame(ctx, (double)f);
             }
-            last_rendered = frame;
+            last_rendered = fc;
             pd_gl_renderer_render(rd, pdrl_glbuf(ctx));
             if (getenv("PD_VIEW_TIMING")) {
                 double tB = glfwGetTime();

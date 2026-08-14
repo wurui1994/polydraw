@@ -10,11 +10,11 @@
 // NOTE: glColor() must be set BEFORE each glBegin() (polydraw ignores color
 // changes inside a primitive), so each quad gets its own solid color.
 
-t = klock() / 30;
+t = klock();
 
 for (i = 0; i < 6; i++)
 {
-    a = t + i * (PI * 2 / 6);
+    a = t * 2 + i * (PI * 2 / 6);
     glPushMatrix();
     glTranslate(cos(a) * 0.6, sin(a) * 0.6, 0);
 

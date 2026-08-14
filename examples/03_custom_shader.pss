@@ -10,10 +10,10 @@
 //
 // NOTE: like the fixed pipeline, glColor() must be called BEFORE glBegin().
 
-t = klock() / 40;
+t = klock();
 
 glPushMatrix();
-glRotate(t * 25, 0, 0, 1);
+glRotate(t * 60, 0, 0, 1);
 glsetshader(0);
 glColor(0.2, 0.6, 1.0);  // color BEFORE glBegin
 glBegin(GL_QUADS);

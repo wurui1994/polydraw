@@ -475,14 +475,20 @@ static double rh_setfov(pd_Host *h, int n, const double *a)
     return n >= 1 ? a[0] : 0;
 }
 
-/* gluPerspective: projection mode + identity + perspective (original
- * kgluPerspective leaves the matrix mode set to PROJECTION) */
+/* gluPerspective: projection mode + identity + perspective, then restore the
+ * matrix mode back to MODELVIEW (GL_MODEVIEW is the default for subsequent
+ * glRotate/glTranslate/glScale calls). The original kgluPerspective left the
+ * mode at PROJECTION, which silently swallowed every later modelview
+ * transform — so a script that set the fov and then rotated a quad saw no
+ * rotation at all (the rotate hit the projection matrix and was dropped).
+ * Restoring here matches real OpenGL/polydraw behaviour. */
 static double rh_gluPerspective(pd_Host *h, int n, const double *a)
 {
     emit(h, GLCMD_MATRIXMODE, 1, 0, 0, 0, 0);
     emit(h, GLCMD_LOADIDENTITY, 0, 0, 0, 0, 0);
     emit(h, GLCMD_PERSPECTIVE, 0, n >= 1 ? a[0] : 0, n >= 2 ? a[1] : 1,
          n >= 3 ? a[2] : 0.1, n >= 4 ? a[3] : 1000);
+    emit(h, GLCMD_MATRIXMODE, 0, 0, 0, 0, 0);  /* back to MODELVIEW */
     return 0;
 }
 

@@ -9,12 +9,12 @@
 //
 // The triangles sit at negative Z (in front of the default camera); no camera.
 
-t = klock() / 50;
+t = klock();
 
 glsetshader(0);                 // REQUIRED: custom shader drives output
 glPushMatrix();
-glRotate(t * 30, 1, 0, 0);
-glRotate(t * 20, 0, 1, 0);
+glRotate(t * 60, 1, 0, 0);
+glRotate(t * 40, 0, 1, 0);
 
 // two triangles forming a spinning diamond, colored on the GPU
 glBegin(GL_TRIANGLES);

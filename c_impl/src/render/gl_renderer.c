@@ -298,6 +298,11 @@ struct pd_GLRenderer {
      * hot path; resolve the debug switches once at creation instead */
     int dbg_gl;
 
+    /* background colour used for the implicit per-frame clear (see
+     * pd_gl_renderer_render). Defaults to opaque black; scripts may still
+     * issue an explicit glClear() which takes precedence. */
+    float clear_color[4];
+
     /* mvp_bake: when 1, the active vertex shader computes gl_Position purely
      * from ftransform() (u_mvp * a_vertex) and never references gl_Vertex as an
      * object-space value (e.g. for lighting/procedural UVs). In that case the
@@ -729,6 +734,8 @@ pd_GLRenderer *pd_gl_renderer_create_ex(int w, int h, double fovy, int own_offsc
     rd->batch_prim = -1;
     rd->mvp_bake = 0;
     rd->dbg_gl = getenv("PD_DEBUG_GL") ? 1 : 0;
+    rd->clear_color[0] = rd->clear_color[1] = rd->clear_color[2] = 0.0f;
+    rd->clear_color[3] = 1.0f;   /* opaque black background */
     rd->mvm_top = 0;
     mat4_identity(rd->mvm_stack[0]);
     mat4_perspective(rd->proj, fovy, (double)w / h, 0.1, 1000.0);
@@ -850,6 +857,25 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
     if (rd->dbg_gl)
         fprintf(stderr, "RENDER buf=%zu cmds\n", buf->n);
     rd->stat_draws = 0;
+
+    /* Auto-clear fallback: if the script did not issue an explicit glClear()
+     * this frame, clear the (background) to the configured clear colour at
+     * frame start. Without this, scripts that transform the scene (e.g. rotate
+     * a quad) leave the previous frame's pixels on screen and accumulate a
+     * smeared trail. An explicit GLCMD_CLEAR later in the buffer takes
+     * precedence (we simply don't pre-clear when one is present). */
+    int has_explicit_clear = 0;
+    for (size_t i = 0; i < buf->n; i++) {
+        if (buf->cmds[i].op == GLCMD_CLEAR) { has_explicit_clear = 1; break; }
+    }
+    if (!has_explicit_clear) {
+        flush_batch(rd);
+        GLbitfield bits = GL_COLOR_BUFFER_BIT;
+        glClearColor(rd->clear_color[0], rd->clear_color[1],
+                     rd->clear_color[2], rd->clear_color[3]);
+        if (rd->depth_test_enabled) bits |= GL_DEPTH_BUFFER_BIT;
+        glClear(bits);
+    }
 
     /* every frame starts from the reference host defaults (polydraw.c:3578):
      * projection = perspective(fovy, aspect, 0.1, 1000), modelview = identity */
