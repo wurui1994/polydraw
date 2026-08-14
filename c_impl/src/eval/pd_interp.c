@@ -229,9 +229,22 @@ double pd_run(const pd_Program *prog, const double *params,
  * These replicate the exact CALL/PEEK/POKE/ADDR semantics so the JIT and
  * interpreter produce bit-identical results. Exported via pd_interp.h. */
 
+/* These helpers sit in the innermost loops (pd_jit_call runs once per host
+ * call — ~115k times/frame for ken/balls.pss, pd_jit_peek once per array
+ * read), so the debug switches are resolved once rather than calling
+ * getenv() — a locking, string-scanning libc call — on every single one. */
+static int dbg_flag(const char *name, int *cache) {
+    if (*cache < 0) *cache = getenv(name) ? 1 : 0;
+    return *cache;
+}
+static int g_dbg_addr = -1, g_dbg_peek = -1, g_dbg_call = -1;
+#define DBG_ADDR() dbg_flag("PD_DEBUG_ADDR", &g_dbg_addr)
+#define DBG_PEEK() dbg_flag("PD_DEBUG_PEEK", &g_dbg_peek)
+#define DBG_CALL() dbg_flag("PD_DEBUG_CALL", &g_dbg_call)
+
 double pd_jit_addr(pd_Ctx *c, const pd_Instr *in) {
     double *base = pd_array_base(c, in->in[0]);
-    if (getenv("PD_DEBUG_ADDR"))
+    if (DBG_ADDR())
         fprintf(stderr, "ADDR fam=%d off=%u val=%.0f base=%p\n",
                 in->in[0].fam, in->in[0].off, *pd_slot(c, in->in[0]), (void*)(uintptr_t)base);
     void *pp = base;
@@ -244,7 +257,7 @@ double pd_jit_addr(pd_Ctx *c, const pd_Instr *in) {
  * For EXT vars, pd_slot already yields the host variable's address. */
 double pd_jit_addrslot(pd_Ctx *c, const pd_Instr *in) {
     double *slot = pd_slot(c, in->in[0]);
-    if (getenv("PD_DEBUG_ADDR"))
+    if (DBG_ADDR())
         fprintf(stderr, "ADDRSLOT fam=%d off=%u slot=%p\n",
                 in->in[0].fam, in->in[0].off, (void*)(uintptr_t)slot);
     void *pp = slot;
@@ -256,7 +269,7 @@ double pd_jit_addrslot(pd_Ctx *c, const pd_Instr *in) {
 double pd_jit_peek(pd_Ctx *c, const pd_Instr *in) {
     double *base = pd_array_base(c, in->in[0]);
     long j = pd_bounds((long)*pd_slot(c, in->in[1]), in->aux);
-    if (getenv("PD_DEBUG_PEEK")) {
+    if (DBG_PEEK()) {
         double idx = *pd_slot(c, in->in[1]);
         fprintf(stderr, "PEEK base=%p j=%ld idx=%g dbl0=%g fam0=%d off0=%ld fam1=%d off1=%ld aux=%d\n",
                 (void*)base, j, idx, *pd_slot(c, in->in[0]),
@@ -284,7 +297,7 @@ void pd_jit_poke(pd_Ctx *c, const pd_Instr *in, pd_Op op) {
 }
 
 double pd_jit_call(pd_Ctx *c, const pd_Instr *in) {
-    if (getenv("PD_DEBUG_CALL"))
+    if (DBG_CALL())
         fprintf(stderr, "[CALL] aux=%d nIn=%d in0(fam=%d off=%u) extraIdx=%d @%p prog=%p\n",
                 in->aux, in->nIn, in->in[0].fam, in->in[0].off, in->extraIdx,
                 (void*)in, (void*)c->prog);
@@ -296,7 +309,7 @@ double pd_jit_call(pd_Ctx *c, const pd_Instr *in) {
     if (na > 1) argbuf[1] = pd_call_arg(c, p, in->in[1]);
     for (int k = 2; k < na && k < 16; k++)
         argbuf[k] = pd_call_arg(c, p, p->extra[in->extraIdx + k - 2]);
-    if (getenv("PD_DEBUG_ADDR") && in->aux <= -1000) {
+    if (in->aux <= -1000 && DBG_ADDR()) {
         fprintf(stderr, "CALL na=%d aux=%d in0(fam=%d off=%u)=%g in1(fam=%d off=%u)=%g args=[%p,%p]\n",
                 na, in->aux, in->in[0].fam, in->in[0].off, argbuf[0],
                 in->in[1].fam, in->in[1].off, argbuf[1],

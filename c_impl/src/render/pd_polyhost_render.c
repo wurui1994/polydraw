@@ -38,7 +38,11 @@ static double rh_glVertex(pd_Host *h, int n, const double *a) {
     double y = n>=2 ? a[1] : 0;
     double z = n>=3 ? a[2] : 0;
     double w = n>=4 ? a[3] : 1;
-    if (getenv("PD_DEBUG_VERT"))
+    /* This is the single hottest host call (ken/balls.pss: ~49k calls/frame),
+     * so the debug switch is resolved once instead of a getenv() per vertex. */
+    static int dbg_vert = -1;
+    if (dbg_vert < 0) dbg_vert = getenv("PD_DEBUG_VERT") ? 1 : 0;
+    if (dbg_vert)
         fprintf(stderr, "glVertex(%.4f, %.4f, %.4f, %.4f)\n", x, y, z, w);
     glcmd_vertex(h->glbuf, x, y, z, w);
     return 0;

@@ -159,6 +159,11 @@ build/framebench: tools/framebench.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC
 	$(CC) $(CFLAGS) $(GLFWINC) -Isrc -Isrc/eval -Isrc/render -o $@ tools/framebench.c \
 	    $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) $(LDFLAGS) $(GLLIBS) $(GLFWLIB)
 
+# Per-phase profiler (M8): EVAL vs GL replay vs readback, split.
+build/phaseprof: tools/phaseprof.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) | build
+	$(CC) $(CFLAGS) $(GLFWINC) -Isrc -Isrc/eval -Isrc/render -Ithird_party -o $@ tools/phaseprof.c \
+	    $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) $(LDFLAGS) $(GLLIBS) $(GLFWLIB)
+
 # REAL window probe: launch a GLFW window, render into its default FB, read
 # back the on-screen pixels. Definitive black-window check (M8).
 build/winprobe: tools/winprobe.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) | build

@@ -277,6 +277,38 @@ struct pd_GLRenderer {
     /* tessellation scratch buffer (per-renderer) */
     GVertex *tris; size_t ntri, captri;
 
+    /* ---- draw-call batching ------------------------------------------
+     * end_primitive() used to do a glBufferData + glDrawArrays for every
+     * single glEnd(), which for scripts that emit thousands of tiny
+     * primitives per frame (ken/balls.pss: 16k quads) meant 16k draw
+     * calls/frame and made the GL replay the dominant cost.
+     *
+     * Instead tessellated triangles accumulate into `batch` and are
+     * flushed with ONE draw call, either when a piece of state that the
+     * draw depends on actually changes (MVP, blend/depth toggles,
+     * program, texture binding, render target, ...) or at end of frame.
+     * The MVP is folded into the vertices on the CPU at append time so a
+     * matrix change alone does not have to break the batch. */
+    GVertex *batch; size_t nbatch, batch_cap;
+    int batch_prim;           /* GL_TRIANGLES / GL_LINES, or -1 when empty */
+    float batch_mvp_f[16];    /* MVP the pending batch was built under */
+    size_t stat_draws;        /* draw calls issued this frame (diagnostics) */
+
+    /* getenv() was being called several times per primitive in the replay
+     * hot path; resolve the debug switches once at creation instead */
+    int dbg_gl;
+
+    /* mvp_bake: when 1, the active vertex shader computes gl_Position purely
+     * from ftransform() (u_mvp * a_vertex) and never references gl_Vertex as an
+     * object-space value (e.g. for lighting/procedural UVs). In that case the
+     * MVP can be folded into the vertex positions on the CPU, letting geometry
+     * emitted under *different* MVP matrices share a single batched draw call
+     * (the shader sees clip-space coords and a fixed identity MVP). This collapses
+     * thousands of per-object-matrix draws (tree.pss: 3644, ...) into a few.
+     * When 0, the legacy behaviour is kept: vertices stay in object space and a
+     * matrix change flushes the batch (custom shaders may depend on gl_Vertex). */
+    int mvp_bake;
+
     /* GL state mirrors */
     int depth_test_enabled;
     int blend_enabled;
@@ -457,45 +489,19 @@ static void update_mvp(pd_GLRenderer *rd)
         rd->mvp_f[i] = (float)rd->mvp[i];
 }
 
-/* end the open primitive: tessellate + upload + draw */
-static void end_primitive(pd_GLRenderer *rd)
+/* Issue the accumulated batch as a single draw call.
+ *
+ * The batch is built under a fixed MVP (batch_mvp): vertex positions stay in
+ * OBJECT space and the matrix is still passed as the u_mvp uniform, because
+ * custom shaders are free to use a_vertex/gl_Vertex as an object-space value
+ * (lighting, procedural texturing). Pre-transforming on the CPU would change
+ * what those shaders see, so instead a matrix change simply ends the batch. */
+static void flush_batch(pd_GLRenderer *rd)
 {
-    if (rd->mode < 0 || rd->nverts == 0) {
-        rd->mode = -1;
-        rd->nverts = 0;
-        return;
-    }
-    /* Lines/line-strips are drawn directly as GL primitives (not tessellated
-     * to triangles); the reference renders them as actual GL lines. */
-    if (rd->mode == PDGL_LINES || rd->mode == PDGL_LINE_STRIP) {
-        GLenum lmode = (rd->mode == PDGL_LINES) ? GL_LINES : GL_LINE_STRIP;
-        size_t n = rd->nverts;
-        rd->mode = -1;
-        rd->nverts = 0;
-        if (n == 0) return;
-        glUseProgram(rd->program);
-        if (rd->tex_obj[rd->active_unit]) {
-            glActiveTexture(GL_TEXTURE0 + rd->active_unit);
-            glBindTexture(rd->tex_tgt[rd->active_unit], rd->tex_obj[rd->active_unit]);
-        }
-        glBindBuffer(GL_ARRAY_BUFFER, rd->vbo);
-        glBufferData(GL_ARRAY_BUFFER, n * sizeof(GVertex), rd->verts, GL_STREAM_DRAW);
-        glBindVertexArray(rd->vao);
-        glUniformMatrix4fv(rd->u_mvp, 1, GL_FALSE, rd->mvp_f);
-        glDrawArrays(lmode, 0, (GLsizei)n);
-        return;
-    }
+    if (rd->nbatch == 0) return;
+    size_t n = rd->nbatch;
+    rd->nbatch = 0;              /* clear first: errors must not re-enter */
 
-    /* single-primitive path: tessellate into the per-renderer scratch */
-    rd->ntri = 0;
-    rd->tris = tessellate(rd->tris, &rd->ntri, &rd->captri,
-                          rd->mode, rd->verts, rd->nverts);
-    rd->mode = -1;
-    rd->nverts = 0;
-    if (rd->ntri == 0) return;
-
-    /* per-primitive VBO upload (immediate mode is inherently dynamic;
-     * fine at this scale, mirrors the reference's per-tri loop) */
     glUseProgram(rd->program);
     /* Some scripts (e.g. gears/funky post-process) draw a quad that samples
      * a texture left bound by glcaptureend without an explicit glbindtexture;
@@ -507,12 +513,126 @@ static void end_primitive(pd_GLRenderer *rd)
         glBindTexture(rd->tex_tgt[rd->active_unit], rd->tex_obj[rd->active_unit]);
     }
     glBindBuffer(GL_ARRAY_BUFFER, rd->vbo);
-    glBufferData(GL_ARRAY_BUFFER, rd->ntri * sizeof(GVertex), rd->tris,
+    /* orphan-then-fill: lets the driver hand us a fresh block instead of
+     * stalling until the previous draw from this VBO has retired */
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * sizeof(GVertex)), NULL,
                  GL_STREAM_DRAW);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(n * sizeof(GVertex)),
+                    rd->batch);
     glBindVertexArray(rd->vao);
-    glUniformMatrix4fv(rd->u_mvp, 1, GL_FALSE, rd->mvp_f);
-    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)rd->ntri);
-    if (getenv("PD_DEBUG_GL")) {
+    /* In mvp_bake mode the vertex positions are already in clip space (the MVP
+     * was folded into each vertex on the CPU in batch_append), so the shader
+     * must see an identity matrix. Otherwise pass the batch's MVP. */
+    if (rd->mvp_bake) {
+        static const float I[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+        glUniformMatrix4fv(rd->u_mvp, 1, GL_FALSE, I);
+    } else {
+        glUniformMatrix4fv(rd->u_mvp, 1, GL_FALSE, rd->batch_mvp_f);
+    }
+    glDrawArrays((GLenum)rd->batch_prim, 0, (GLsizei)n);
+    rd->stat_draws++;
+    rd->batch_prim = -1;
+}
+
+size_t pd_gl_renderer_draw_calls(const pd_GLRenderer *rd)
+{
+    return rd ? rd->stat_draws : 0;
+}
+
+/* Append `n` vertices to the batch under primitive type `prim`.
+ * Flushes first if the primitive type differs (a draw call has one mode) or
+ * if the MVP changed since the batch was started.
+ *
+ * In mvp_bake mode the MVP is instead folded into every vertex position on the
+ * CPU, so a matrix change does NOT flush; all geometry emitted under differing
+ * MVPs collapses into the same batch (the shader receives an identity matrix).
+ * This is what collapses tree.pss / similar scenes from thousands of draw calls
+ * to a handful. */
+static void batch_append(pd_GLRenderer *rd, int prim, const GVertex *src, size_t n)
+{
+    if (n == 0) return;
+    if (rd->batch_prim != prim) {
+        flush_batch(rd);
+        rd->batch_prim = prim;
+    }
+    if (!rd->mvp_bake &&
+        memcmp(rd->batch_mvp_f, rd->mvp_f, sizeof(rd->mvp_f)) != 0) {
+        flush_batch(rd);
+        memcpy(rd->batch_mvp_f, rd->mvp_f, sizeof(rd->mvp_f));
+    }
+    if (rd->nbatch + n > rd->batch_cap) {
+        size_t nc = rd->batch_cap ? rd->batch_cap * 2 : 4096;
+        while (nc < rd->nbatch + n) nc *= 2;
+        GVertex *nb = (GVertex *)realloc(rd->batch, nc * sizeof(GVertex));
+        if (!nb) { flush_batch(rd); return; }
+        rd->batch = nb; rd->batch_cap = nc;
+    }
+    if (rd->mvp_bake) {
+        /* fold MVP into positions: out = mvp * pos. m is column-major. */
+        const float *m = rd->mvp_f;
+        GVertex *dst = rd->batch + rd->nbatch;
+        for (size_t i = 0; i < n; i++) {
+            const GVertex *s = &src[i];
+            float x = s->pos[0], y = s->pos[1], z = s->pos[2];
+            float o[4];
+            o[0] = m[0]*x + m[4]*y + m[8] *z + m[12];
+            o[1] = m[1]*x + m[5]*y + m[9] *z + m[13];
+            o[2] = m[2]*x + m[6]*y + m[10]*z + m[14];
+            o[3] = m[3]*x + m[7]*y + m[11]*z + m[15];
+            dst[i] = *s;
+            if (o[3] != 0.0f && o[3] != 1.0f) {
+                dst[i].pos[0] = o[0] / o[3];
+                dst[i].pos[1] = o[1] / o[3];
+                dst[i].pos[2] = o[2] / o[3];
+            } else {
+                dst[i].pos[0] = o[0];
+                dst[i].pos[1] = o[1];
+                dst[i].pos[2] = o[2];
+            }
+        }
+    } else {
+        memcpy(rd->batch + rd->nbatch, src, n * sizeof(GVertex));
+    }
+    rd->nbatch += n;
+}
+
+/* end the open primitive: tessellate and append to the pending batch */
+static void end_primitive(pd_GLRenderer *rd)
+{
+    if (rd->mode < 0 || rd->nverts == 0) {
+        rd->mode = -1;
+        rd->nverts = 0;
+        return;
+    }
+    /* Lines/line-strips are drawn as real GL lines (not tessellated), to
+     * match the reference. LINE_STRIP is expanded to independent LINES so
+     * consecutive strips can share one batched draw call. */
+    if (rd->mode == PDGL_LINES || rd->mode == PDGL_LINE_STRIP) {
+        int strip = (rd->mode == PDGL_LINE_STRIP);
+        size_t n = rd->nverts;
+        rd->mode = -1;
+        rd->nverts = 0;
+        if (n == 0) return;
+        if (!strip) {
+            batch_append(rd, GL_LINES, rd->verts, n & ~(size_t)1);
+        } else {
+            for (size_t k = 0; k + 1 < n; k++)
+                batch_append(rd, GL_LINES, rd->verts + k, 2);
+        }
+        return;
+    }
+
+    /* tessellate into the per-renderer scratch, then hand to the batch */
+    rd->ntri = 0;
+    rd->tris = tessellate(rd->tris, &rd->ntri, &rd->captri,
+                          rd->mode, rd->verts, rd->nverts);
+    rd->mode = -1;
+    rd->nverts = 0;
+    if (rd->ntri == 0) return;
+
+    batch_append(rd, GL_TRIANGLES, rd->tris, rd->ntri);
+
+    if (rd->dbg_gl) {
         GLint u0 = 0; glGetIntegerv(GL_ACTIVE_TEXTURE, &u0);
         GLint bound = 0; glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
         GLint vp[4] = {0,0,0,0}; glGetIntegerv(GL_VIEWPORT, vp);
@@ -544,7 +664,6 @@ static void end_primitive(pd_GLRenderer *rd)
                         rd->verts[q].pos[0], rd->verts[q].pos[1], rd->verts[q].pos[2]);
         }
     }
-    glBindVertexArray(0);
 }
 
 /* fullscreen quad (GLCMD_QUAD): emits 2 triangles in NDC space.
@@ -552,6 +671,9 @@ static void end_primitive(pd_GLRenderer *rd)
  * identity matrix — matching the reference which does not project QUADs. */
 static void draw_quad(pd_GLRenderer *rd)
 {
+    /* draws immediately with its own identity MVP: preserve draw order by
+     * emitting any queued geometry first */
+    flush_batch(rd);
     GVertex q[4];
     float qpos[4][3] = {{-1,-1,0},{1,-1,0},{1,1,0},{-1,1,0}};
     float qtex[4][4] = {{0,0,0,1},{1,0,0,1},{1,1,0,1},{0,1,0,1}};
@@ -604,6 +726,9 @@ pd_GLRenderer *pd_gl_renderer_create_ex(int w, int h, double fovy, int own_offsc
     rd->w = w; rd->h = h; rd->fb_w = w; rd->fb_h = h; rd->fovy = fovy; rd->owns_ctx = own_offscreen ? 1 : 0;
     rd->osc = osc;
     rd->mode = -1;
+    rd->batch_prim = -1;
+    rd->mvp_bake = 0;
+    rd->dbg_gl = getenv("PD_DEBUG_GL") ? 1 : 0;
     rd->mvm_top = 0;
     mat4_identity(rd->mvm_stack[0]);
     mat4_perspective(rd->proj, fovy, (double)w / h, 0.1, 1000.0);
@@ -702,6 +827,13 @@ void pd_gl_renderer_set_shaders(pd_GLRenderer *rd,
             rd->u_mvp = glGetUniformLocation(rd->program, "u_mvp");
         }
     }
+    /* Enable CPU MVP-baking only for shaders that never touch gl_Vertex as an
+     * object-space value. Such shaders compute gl_Position purely via
+     * ftransform() (adapted to u_mvp * a_vertex), so folding the MVP into the
+     * vertex positions on the CPU is bit-exact. Shaders that reference
+     * gl_Vertex for lighting/UVs must keep object-space vertices. */
+    rd->mvp_bake = (vert_src && strstr(vert_src, "gl_Vertex") == NULL) ? 1 : 0;
+    if (rd->mvp_bake && getenv("PD_NO_MVP_BAKE")) rd->mvp_bake = 0;
     free(va);
     free(fa);
 }
@@ -715,8 +847,9 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
      * in a quarter of it. For the offscreen FBO, fb_w==w. */
     if (rd->render_to_default) glViewport(0, 0, rd->fb_w, rd->fb_h);
     else                        glViewport(0, 0, rd->w, rd->h);
-    if (getenv("PD_DEBUG_GL"))
+    if (rd->dbg_gl)
         fprintf(stderr, "RENDER buf=%zu cmds\n", buf->n);
+    rd->stat_draws = 0;
 
     /* every frame starts from the reference host defaults (polydraw.c:3578):
      * projection = perspective(fovy, aspect, 0.1, 1000), modelview = identity */
@@ -738,10 +871,11 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
             "BLENDFUNC","CULLFACE","LINEWIDTH","SETTEXDATA","BINDTEX","ACTIVETEX",
             "CAPTURE","CAPTUREEND","SETFOV","SETSHADER","UNIFORMLOC","UNIFORM","MULTMATRIX"
         };
-        if (getenv("PD_DEBUG_GL") && c->op >= 0 && (size_t)c->op < sizeof(OPNAMES)/sizeof(OPNAMES[0]))
+        if (rd->dbg_gl && c->op >= 0 && (size_t)c->op < sizeof(OPNAMES)/sizeof(OPNAMES[0]))
             fprintf(stderr, "  %s\n", OPNAMES[c->op]);
         switch (c->op) {
         case GLCMD_CLEAR: {
+            flush_batch(rd);   /* pending geometry must land before the clear */
             double clr[4] = {c->a, c->b, c->c, c->d};
             GLbitfield bits = GL_COLOR_BUFFER_BIT;
             glClearColor((GLfloat)clr[0], (GLfloat)clr[1],
@@ -836,12 +970,14 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
             break;
         case GLCMD_ENABLE:
             if (c->mode == 0x0B71) { /* GL_DEPTH_TEST */
+                if (!rd->depth_test_enabled) flush_batch(rd);
                 glEnable(GL_DEPTH_TEST);
                 rd->depth_test_enabled = 1;
             }
             break;
         case GLCMD_DISABLE:
             if (c->mode == 0x0B71) {
+                if (rd->depth_test_enabled) flush_batch(rd);
                 glDisable(GL_DEPTH_TEST);
                 rd->depth_test_enabled = 0;
             }
@@ -849,14 +985,17 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
         case GLCMD_BLENDFUNC: {
             int sf = (c->mode >> 16) & 0xFFFF;
             int df = c->mode & 0xFFFF;
+            flush_batch(rd);
             glBlendFunc((GLenum)sf, (GLenum)df);
             break;
         }
         case GLCMD_CULLFACE:
+            flush_batch(rd);
             glEnable(GL_CULL_FACE);
             glCullFace((GLenum)c->mode);
             break;
         case GLCMD_LINEWIDTH:
+            flush_batch(rd);
             glLineWidth((GLfloat)c->a);
             break;
 
@@ -873,6 +1012,7 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
         /* glsetshader: replay the recorded GLSL source pointers (already
          * bit-cast into a/b by the host) through the adapt+link path. */
         case GLCMD_SETSHADER: {
+            flush_batch(rd);   /* pending geometry belongs to the old program */
             const char *vs = (const char *)(uintptr_t)(unsigned long long)c->a;
             const char *fs = (const char *)(uintptr_t)(unsigned long long)c->b;
             pd_gl_renderer_set_shaders(rd, vs, fs);
@@ -919,6 +1059,9 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
                 }
             }
             if (loc < 0) break;
+            /* geometry already queued was meant to be drawn with the OLD
+             * uniform value — emit it before overwriting the uniform */
+            flush_batch(rd);
             glUseProgram(rd->program);   /* uniforms target the current program */
             if (c->s == NULL) {
                 /* scalar form: values packed in b,c,d (k>=3 shares d) */
@@ -982,6 +1125,7 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
 
         /* glsettex: upload a BGRA32 double snapshot into a GL texture. */
         case GLCMD_SETTEXDATA: {
+            flush_batch(rd);   /* re-uploading a texture changes what samples */
             int tex = (int)c->a;
             int w = (int)c->b, h = (int)c->c;
             if (getenv("PD_DEBUG_GL")) {
@@ -1063,6 +1207,7 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
         case GLCMD_BINDTEX: {
             int tex = (int)c->a;
             if (tex >= 0 && tex < REN_MAX_TEX && rd->tex_obj[tex]) {
+                flush_batch(rd);   /* queued tris sample the OLD binding */
                 glActiveTexture(GL_TEXTURE0 + rd->active_unit);
                 glBindTexture(rd->tex_tgt[tex], rd->tex_obj[tex]);
             }
@@ -1071,6 +1216,7 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
 
         /* glactivetexture(unit): select the active texture unit. */
         case GLCMD_ACTIVETEX:
+            if (rd->active_unit != ((int)c->a & 3)) flush_batch(rd);
             rd->active_unit = (int)c->a & 3;
             glActiveTexture(GL_TEXTURE0 + rd->active_unit);
             break;
@@ -1087,6 +1233,9 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
          * stale/blank data on the offline (headless) GL context and made every
          * capture-based script (gears, funky, ...) come out blank/white. */
         case GLCMD_CAPTURE: {
+            /* switching render target: anything still queued belongs to the
+             * PREVIOUS target and must be drawn there first */
+            flush_batch(rd);
             /* glcapture() (no args) and glcapture(tex,w,h,col) both begin a
              * screen capture: switch the active render target to the capture
              * texture so the scene is drawn into it directly. */
@@ -1127,6 +1276,9 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
             break;
         }
         case GLCMD_CAPTUREEND: {
+            /* the captured scene must be fully drawn into cap_fbo before it
+             * is copied out into the sampled texture */
+            flush_batch(rd);
             int tex = (int)c->a;
             if (tex < 0 || tex >= REN_MAX_TEX) break;
             if (rd->cap_fbo) {
@@ -1164,10 +1316,15 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
         }
         }
     }
+    /* end of the command stream: emit whatever is still queued */
+    flush_batch(rd);
+    glBindVertexArray(0);
 }
 
 void pd_gl_renderer_read_rgba(pd_GLRenderer *rd, unsigned char *out)
 {
+    /* a read must see the finished frame */
+    flush_batch(rd);
     /* When rendering directly into the window's default framebuffer
      * (render_to_default), the pixels live in FB 0, not rd->fbo. Read from the
      * one we actually drew into. */
@@ -1221,6 +1378,7 @@ void pd_gl_renderer_destroy(pd_GLRenderer *rd)
     for (int i = 0; i < REN_MAX_LOCS; i++) free(rd->u_name[i]);
     free(rd->verts);
     free(rd->tris);
+    free(rd->batch);
     if (rd->owns_ctx && rd->osc) pd_gl_offscreen_destroy(rd->osc);
     free(rd);
 }

@@ -71,6 +71,11 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf);
  * (GL convention). Caller flips for image output. */
 void pd_gl_renderer_read_rgba(pd_GLRenderer *rd, unsigned char *out);
 
+/* Number of glDrawArrays calls issued by the last replayed frame.
+ * Primitives are batched, so this is far below the primitive count; useful
+ * for spotting state changes that are needlessly breaking batches. */
+size_t pd_gl_renderer_draw_calls(const pd_GLRenderer *rd);
+
 /* Compile + link a GLSL program (used by the window viewer for its display
  * quad). Returns a GL program object, or 0 on failure. */
 GLuint pd_gl_link_program(const char *vert_src, const char *frag_src);

@@ -13,6 +13,11 @@
 #include "eval/pd_jit.h"
 #include "eval/pd_section.h"
 
+/* gl_renderer.c references stbi_write_png (PD_DEBUG_CAP dump); provide the
+ * implementation here like view_main.c does. */
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
