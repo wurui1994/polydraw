@@ -1558,11 +1558,12 @@ static void prescan_functions(pd_Parser *p) {
 }
 
 /* ---- top-level program parse ---- */
-/* Detect & parse the program's main body. EVAL allows two main shapes:
- *   (a) anonymous main:  () { body }     (explicit, may follow decls)
- *   (b) bare block:      { body }        (original EVAL treats a script whose
- *       first '(' lies inside the block as an implicit "()" main — i.e. a bare
- *       block IS the main. We accept this form directly.)
+/* Detect & parse the program's main body. EVAL allows three main shapes:
+ *   (a) named modern main:  main() { body }   <- RECOMMENDED sugar for (b)
+ *   (b) anonymous main:     () { body }       (explicit, may follow decls)
+ *   (c) bare block:         { body }          (original EVAL treats a script
+ *       whose first '(' lies inside the block as an implicit "()" main — i.e.
+ *       a bare block IS the main. We accept this form directly.)
  * Returns 1 if a main body was parsed. */
 static int try_parse_anon_main(pd_Parser *p) {
     /* pd_cur_at takes an ABSOLUTE token index, so peek at tok+1 / tok+2. */
@@ -1591,10 +1592,14 @@ static int try_parse_anon_main(pd_Parser *p) {
 }
 
 int pd_parse_program(pd_Parser *p) {
-    /* The entry point. EVAL allows either:
-     *   (a) bare statements at top level (implicit main), or
-     *   (b) an anonymous main: () { ... }  optionally followed by named funcs.
-     * The last bare expression (no trailing assignment) is the return value. */
+    /* The entry point. EVAL allows three ways to write the program body:
+     *   (a) bare statements at top level  -> implicit main,
+     *   (b) an anonymous main: () { ... } (or a bare { ... }),
+     *   (c) a named main: main() { ... }  (modern, explicit).
+     * The parser itself does NOT treat `main` specially: `main(){}` is parsed
+     * exactly like any other user function (a function named MAIN, registered
+     * as PD_SYM_FUNC). Which body becomes the entry point is decided later by
+     * the compile / link stage (see pd_compile.c), not here. */
     pd_Reg zero = pd_new_const(p->b, 0.0);
     p->lastValueReg = zero;
 
@@ -1618,4 +1623,14 @@ int pd_parse_program(pd_Parser *p) {
         pd_emit1(p->b, PD_RETURN, pdR(PD_FAM_VOID,0), p->lastValueReg);
     }
     return p->ok;
+}
+
+int pd_parser_find_func(pd_Parser *p, const char *name) {
+    for (int i = 0; i < p->nSyms; i++) {
+        pd_Sym *s = &p->syms[i];
+        if (s->kind != PD_SYM_FUNC) continue;
+        if (s->funcIdx < 0) continue;
+        if (strcmp(s->name, name) == 0) return s->funcIdx;
+    }
+    return -1;
 }

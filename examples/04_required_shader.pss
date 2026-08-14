@@ -1,0 +1,46 @@
+// Example: no default shader path.
+// This scene does NOT rely on the fixed-function pipeline at all: it only draws
+// after activating a custom shader via glsetshader(0). Remove the glsetshader()
+// call (or the @v/@f blocks) and nothing would be visible -- the geometry is
+// only meaningful through the custom vertex/fragment program below.
+//
+// DEFAULT STYLE: top-level statements form an implicit main() — no wrapper
+// (main(){} / (){}) is required.
+//
+// The triangles sit at negative Z (in front of the default camera); no camera.
+
+t = klock() / 50;
+
+glsetshader(0);                 // REQUIRED: custom shader drives output
+glPushMatrix();
+glRotate(t * 30, 1, 0, 0);
+glRotate(t * 20, 0, 1, 0);
+
+// two triangles forming a spinning diamond, colored on the GPU
+glBegin(GL_TRIANGLES);
+glVertex(-0.7,  0.0, -3.0);
+glVertex( 0.0,  0.7, -3.0);
+glVertex( 0.0,  0.0, -3.7);
+glVertex( 0.7,  0.0, -3.0);
+glVertex( 0.0, -0.7, -3.0);
+glVertex( 0.0,  0.0, -3.7);
+glEnd();
+
+glPopMatrix();
+
+@v:
+    varying vec4 v_color;
+    void main(void)
+    {
+        // position via the standard transform
+        gl_Position = ftransform();
+        // pass object-space position as a color so the GPU can shade it
+        v_color = vec4(gl_Vertex.xyz * 0.5 + 0.5, 1.0);
+    }
+
+@f:
+    varying vec4 v_color;
+    void main(void)
+    {
+        gl_FragColor = v_color;
+    }

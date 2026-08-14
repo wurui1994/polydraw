@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 
 /* RNG — exact copy of original krand/nrnd (eval.c:497, 503) so that
  * srand()/RND/NRND produce identical sequences to the original. */
@@ -319,11 +320,20 @@ double pd_jit_call(pd_Ctx *c, const pd_Instr *in) {
         int hidx = -1000 - in->aux;
         if (root->host && hidx >= 0 && hidx < root->host->nFns)
             return root->host->fns[hidx].fn(root->host, na, argbuf);
-        return 0.0;
+        snprintf(((pd_Program*)root)->err, sizeof(((pd_Program*)root)->err),
+                 "call to undefined host function (aux=%d)", in->aux);
+        fprintf(stderr, "[pd_interp] error: call to undefined host function (aux=%d)\n", in->aux);
+        return NAN;
     }
     pd_Program *fn = (in->aux >= 0 && (size_t)in->aux < root->nFuncs)
                      ? &root->funcs[in->aux] : NULL;
-    if (!fn) return 0.0;
+    if (!fn) {
+        snprintf(((pd_Program*)root)->err, sizeof(((pd_Program*)root)->err),
+                 "call to undefined function (aux=%d, nFuncs=%zu)", in->aux, root->nFuncs);
+        fprintf(stderr, "[pd_interp] error: call to undefined function (aux=%d, nFuncs=%zu)\n",
+                in->aux, root->nFuncs);
+        return NAN;
+    }
     pd_Ctx child;
     child.prog = fn;
     child.frame = calloc(fn->nLocals ? fn->nLocals : 1, sizeof(double));

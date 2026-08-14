@@ -1,0 +1,93 @@
+// Example: EXPLICIT entry point + multiple user-defined functions.
+//
+// The DEFAULT PSS style needs NO wrapper — top-level statements are an implicit
+// main() (see 01-04). You only reach for an explicit form when you actually
+// need it, e.g. to factor the scene into named, recursive, call-by-value
+// functions. This example shows that form:
+//
+//   * main() { ... }  — the explicit entry point (modern sugar for () { ... }).
+//   * user functions: name(params) { body }  — call by value, may be recursive
+//     and call each other.
+//
+// PSS supports user functions:  name(params) { body }   (call by value).
+// This script draws a recursively branching "tree" of colored cubes, reusing a
+// `cube(a)` helper from within the recursive `branch(level, ang, t)`.
+
+main()
+{
+    t = klock() / 20;
+
+    glsetshader(0);
+    glPushMatrix();
+    glTranslate(0, -0.5, -3);     // sit in front of the default camera
+    glRotate(t * 10, 0, 1, 0);
+    branch(6, 0, t);              // recursive draw
+    glPopMatrix();
+}
+
+// Draw one colored unit cube as `a`-typed primitives (GL_QUADS / GL_LINE_STRIP).
+cube(a)
+{
+    glBegin(a);
+        glColor(0.0, 0.9, 0.0);
+        glVertex( 1.0,  1.0, -1.0);
+        glVertex(-1.0,  1.0, -1.0);
+        glVertex(-1.0,  1.0,  1.0);
+        glVertex( 1.0,  1.0,  1.0);
+    glEnd();
+    glBegin(a);
+        glColor(1.0, 0.5, 0.0);
+        glVertex( 1.0, -1.0,  1.0);
+        glVertex(-1.0, -1.0,  1.0);
+        glVertex(-1.0, -1.0, -1.0);
+        glVertex( 1.0, -1.0, -1.0);
+    glEnd();
+    glBegin(a);
+        glColor(1.0, 0.0, 0.0);
+        glVertex( 1.0,  1.0,  1.0);
+        glVertex(-1.0,  1.0,  1.0);
+        glVertex(-1.0, -1.0,  1.0);
+        glVertex( 1.0, -1.0,  1.0);
+    glEnd();
+}
+
+// Recursively draw smaller branches, each spawning three sub-branches.
+branch(level, ang, t)
+{
+    glPushMatrix();
+        glScale(0.7, 0.7, 0.7);
+        glTranslate(0, 1, 0);
+        r = ang * level * 0.3;
+        glRotate(r, 1, 0, 0);
+        glRotate(r, 0, 1, 0);
+        glRotate(t * 10, 0, 1, 0);
+        glTranslate(0, 1, 0);
+
+        glPushMatrix();
+            glScale(0.2, 1, 0.2);
+            cube(GL_QUADS);
+        glPopMatrix();
+
+        if (level > 0)
+        {
+            branch(level - 1,  40, t);
+            branch(level - 1, -60, t);
+            branch(level - 1, -10, t);
+        }
+    glPopMatrix();
+}
+
+@v:
+    varying vec4 v_color;
+    void main(void)
+    {
+        gl_Position = ftransform();
+        v_color = gl_Color;
+    }
+
+@f:
+    varying vec4 v_color;
+    void main(void)
+    {
+        gl_FragColor = v_color;
+    }

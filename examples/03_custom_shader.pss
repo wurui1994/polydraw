@@ -1,0 +1,40 @@
+// Example: custom shader.
+// A vertex + fragment shader is defined with @v:/@f: and activated with
+// glsetshader(0). The vertex stage passes the per-vertex color through to the
+// fragment stage via a varying.
+//
+// DEFAULT STYLE: top-level statements form an implicit main() — no wrapper
+// (main(){} / (){}) is required.
+//
+// The quad sits at negative Z (in front of the default camera); no camera setup.
+//
+// NOTE: like the fixed pipeline, glColor() must be called BEFORE glBegin().
+
+t = klock() / 40;
+
+glPushMatrix();
+glRotate(t * 25, 0, 0, 1);
+glsetshader(0);
+glColor(0.2, 0.6, 1.0);  // color BEFORE glBegin
+glBegin(GL_QUADS);
+glVertex(-0.6, -0.6, -3);
+glVertex( 0.6, -0.6, -3);
+glVertex( 0.6,  0.6, -3);
+glVertex(-0.6,  0.6, -3);
+glEnd();
+glPopMatrix();
+
+@v:
+    varying vec4 v_color;
+    void main(void)
+    {
+        gl_Position = ftransform();
+        v_color = gl_Color;   // gl_Color -> a_color attribute
+    }
+
+@f:
+    varying vec4 v_color;
+    void main(void)
+    {
+        gl_FragColor = v_color;   // gl_FragColor -> fragColor
+    }

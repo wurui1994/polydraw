@@ -137,6 +137,13 @@ int pd_parser_add_ext(pd_Parser *p, const char *proto, void *ptr);
 /* Parses the entry function body. Returns 1 on success, 0 on error. */
 int pd_parse_program(pd_Parser *p);
 
+/* Compile/link-stage helper: find a user-defined function by (upper-cased)
+ * name and return its index into the program's funcs[] array, or -1 if no
+ * such function was defined. This is how the entry point is selected AFTER
+ * parsing: e.g. an explicit `main(){}` becomes a function named MAIN, and the
+ * linker promotes it to the entry when the top-level body is empty. */
+int pd_parser_find_func(pd_Parser *p, const char *name);
+
 /* ---- expression parser ---- */
 /* Parses an expression, returns the result Reg. minPrec is the minimum
  * operator precedence to consider (0 = accept everything). */

@@ -1,0 +1,19 @@
+// Minimal example: no custom shader, no glsetshader() call.
+// Uses only the fixed-function pipeline (glBegin/glColor/glVertex).
+//
+// DEFAULT STYLE: a PSS script needs NO wrapper at all — top-level statements
+// form an implicit main(). You do NOT write main(){} or (){} here. (Show the
+// explicit main(){} / multi-function forms only when you actually need them.)
+//
+// No camera setup is needed: vertices sit at negative Z, in front of the
+// default camera.
+//
+// NOTE (polydraw immediate-mode quirk): glColor must be called BEFORE
+// glBegin() — a glColor() issued between glBegin/glEnd is ignored.
+
+glColor(1, 0, 0);        // set color BEFORE glBegin
+glBegin(GL_TRIANGLES);
+glVertex(-0.8, -0.8, -3);
+glVertex( 0.8, -0.8, -3);
+glVertex( 0.0,  0.8, -3);
+glEnd();

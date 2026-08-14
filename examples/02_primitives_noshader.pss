@@ -1,0 +1,30 @@
+// Example: fixed-function primitives, no shader.
+// Draws a ring of colored quads using only glBegin/glVertex/glColor.
+// No glsetshader() and no @v/@f blocks -> the default fixed pipeline is used.
+//
+// DEFAULT STYLE: top-level statements form an implicit main() — no wrapper
+// (main(){} / (){}) is required.
+//
+// Quads sit at negative Z (in front of the default camera); no camera setup.
+//
+// NOTE: glColor() must be set BEFORE each glBegin() (polydraw ignores color
+// changes inside a primitive), so each quad gets its own solid color.
+
+t = klock() / 30;
+
+for (i = 0; i < 6; i++)
+{
+    a = t + i * (PI * 2 / 6);
+    glPushMatrix();
+    glTranslate(cos(a) * 0.6, sin(a) * 0.6, 0);
+
+    glColor(i / 6.0, 0.5, 1 - i / 6.0);   // color BEFORE glBegin
+    glBegin(GL_QUADS);
+    glVertex(-0.18, -0.18, -3);
+    glVertex( 0.18, -0.18, -3);
+    glVertex( 0.18,  0.18, -3);
+    glVertex(-0.18,  0.18, -3);
+    glEnd();
+
+    glPopMatrix();
+}
