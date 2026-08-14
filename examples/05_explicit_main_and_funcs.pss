@@ -15,12 +15,12 @@
 
 main()
 {
-    t = klock() / 20;
+    t = klock();
 
     glsetshader(0);
     glPushMatrix();
     glTranslate(0, -0.5, -3);     // sit in front of the default camera
-    glRotate(t * 10, 0, 1, 0);
+    glRotate(t * 40, 0, 1, 0);
     branch(6, 0, t);              // recursive draw
     glPopMatrix();
 }
@@ -60,7 +60,7 @@ branch(level, ang, t)
         r = ang * level * 0.3;
         glRotate(r, 1, 0, 0);
         glRotate(r, 0, 1, 0);
-        glRotate(t * 10, 0, 1, 0);
+        glRotate(t * 40, 0, 1, 0);
         glTranslate(0, 1, 0);
 
         glPushMatrix();

@@ -324,8 +324,7 @@ int main(int argc, char **argv) {
     }
 
     int paused = 0, quit = 0, step = 0, restart = 0;
-    double play_sec = 0.0;          /* wall-clock seconds of playback time */
-    double frame = 0.0;            /* virtual script frame == play_sec * 60 */
+    double frame = 0.0;            /* script frame, advanced one at a time */
     long last_rendered = -1;       /* last integer frame actually run */
     /* Scripts seed their one-time state (particle positions, palettes,
      * uploaded textures) inside `if (numframes == 0)`. The render loop below
@@ -341,27 +340,26 @@ int main(int argc, char **argv) {
         pd_gl_renderer_render(rd, pdrl_glbuf(ctx));
         last_rendered = 0;
     }
-    /* Real-time playback decoupled from the display frame rate.
-     *
-     * We accumulate the REAL elapsed playback time (play_sec) and derive the
-     * virtual script frame as frame = play_sec * 60.0. klock() (which, under
-     * the deterministic clock scale of 1/60, returns numframes/60) therefore
-     * returns exactly play_sec — the true wall-clock seconds since playback
-     * started — regardless of how many display frames per second the machine
-     * can push. Animations therefore run at their native speed and move
-     * smoothly/continuously whether the window runs at 30, 60 or 144 fps.
-     *
-     * This is the correct fix for "klock-driven motion crawls on a slow GPU":
-     * the previous per-display-frame +1 stepping made frame advance no faster
-     * than the display rate, so the clock lagged behind real time and the
-     * motion was slow and non-continuous. */
+    /* Fixed real-time playback: the script advances at its native rate
+     * (pdrl_set_clock_scale(1/60) above ⇒ klock() advances 1/60 s per script
+     * frame). We accumulate wall-clock time and step the script ONE frame at a
+     * time so the animation plays at the correct speed regardless of how fast
+     * the machine renders, while NEVER stepping more than one script frame per
+     * displayed frame. This avoids the O(N) catch-up trap: if we ever derived
+     * frame from absolute wall-clock time (frame = play_sec*60), a slow GPU
+     * that drops to 10 fps would make the virtual frame jump by 6 each display
+     * frame, forcing 6 full EVALs per frame and spiralling into an even slower
+     * loop. Stepping at most +1 per display frame keeps the cost bounded at one
+     * EVAL per displayed frame. */
+    const double SEC_PER_FRAME = 1.0 / 60.0;
     double wall_prev = glfwGetTime();
+    double acc = 0.0;
     int advanced = 1;            /* whether 'frame' changed since last render */
     /* fps accounting */
     int fps_frames = 0; double fps_t0 = wall_prev, last_key_space = 0;
 
     while (!glfwWindowShouldClose(win) && !quit) {
-        if (restart) { play_sec = 0; frame = 0; restart = 0; last_rendered = -1; }
+        if (restart) { frame = 0; acc = 0; restart = 0; last_rendered = -1; }
 
         double wall = glfwGetTime();
         double dt = wall - wall_prev;
@@ -369,11 +367,16 @@ int main(int argc, char **argv) {
         wall_prev = wall;
 
         if (paused) {
-            if (step) { frame += 1.0; play_sec = frame / 60.0; step = 0; advanced = 1; }
+            if (step) { frame += 1.0; step = 0; advanced = 1; }
         } else {
-            play_sec += dt;
-            frame = play_sec * 60.0;
-            if (frame > last_rendered) advanced = 1;
+            acc += dt;
+            /* Advance at most ONE script frame per displayed frame. Slow GPU ⇒
+             * we fall behind real time but never fast-forward or pile up EVALs. */
+            if (acc >= SEC_PER_FRAME) {
+                frame += 1.0; acc -= SEC_PER_FRAME; advanced = 1;
+            } else {
+                advanced = 0;
+            }
         }
 
         if (advanced) {
