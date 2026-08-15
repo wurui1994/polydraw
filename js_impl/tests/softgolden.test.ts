@@ -46,7 +46,7 @@ function renderBalls(frame: number, w: number, h: number): Uint8Array {
   const batches = ff.replay(ph.glbuf);
   assert.strictEqual(batches.length, 16384, 'one batch per ball polygon');
   const sr = new SoftRenderer({ width: w, height: h, fragment: ballsFragment });
-  sr.render(batches);
+  sr.render({ batches, captures: ff.captures, texData: ff.texData });
   return sr.toRGB8();
 }
 

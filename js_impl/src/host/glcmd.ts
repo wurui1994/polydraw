@@ -41,16 +41,17 @@ export const GLCMD = {
   BLENDFUNC: 20,
   CULLFACE: 21,
   LINEWIDTH: 22,
-  SETTEXDATA: 23,
-  BINDTEX: 24,
-  ACTIVETEX: 25,
-  CAPTURE: 26,
-  CAPTUREEND: 27,
-  SETFOV: 28,
-  SETSHADER: 29,
-  UNIFORMLOC: 30,
-  UNIFORM: 31,
-  MULTMATRIX: 32,
+  POINTSIZE: 23,
+  SETTEXDATA: 24,
+  BINDTEX: 25,
+  ACTIVETEX: 26,
+  CAPTURE: 27,
+  CAPTUREEND: 28,
+  SETFOV: 29,
+  SETSHADER: 30,
+  UNIFORMLOC: 31,
+  UNIFORM: 32,
+  MULTMATRIX: 33,
 } as const;
 export type GLCMD = (typeof GLCMD)[keyof typeof GLCMD];
 
@@ -65,6 +66,7 @@ export interface GLCmd {
   c: number;
   d: number;
   s: number[] | string | null; // texture pixels / uniform floats / matrix
+  s2?: string | null;           // second string payload (e.g. fragment shader src)
 }
 
 export class GLCmdBuf {

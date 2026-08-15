@@ -38,6 +38,9 @@ export class PdrlCtx {
     this.hostImpl.state.numframes = numframes;
     this.glbuf.reset();
     this.hostImpl.srand(1); // deterministic across runs (matches C test harness)
+    // Make the interpreter global memory (where glsettex pixel buffers live)
+    // readable from host callbacks, mirroring C's pd_run attach step.
+    this.hostImpl.attachMemory(this.prog.globals);
     return run(this.prog, null, this.prog.globals, null);
   }
 }

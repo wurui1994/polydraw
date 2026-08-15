@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PolyDraw JS — Playground</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header class="bar">
+    <span class="logo">PolyDraw<span class="sub">/js</span></span>
+    <span class="spacer"></span>
+    <label>Res
+      <select id="res">
+        <option value="320x240">320×240</option>
+        <option value="640x480" selected>640×480</option>
+        <option value="800x600">800×600</option>
+        <option value="1024x768">1024×768</option>
+      </select>
+    </label>
+    <button id="run">Run ▶</button>
+    <button id="stop" disabled>Stop ■</button>
+    <button id="load">Load example…</button>
+  </header>
+  <main>
+    <section class="left">
+      <div class="pane-head">pss source</div>
+      <textarea id="src" spellcheck="false"></textarea>
+      <div class="pane-head">examples</div>
+      <select id="examples"></select>
+    </section>
+    <section class="right">
+      <div class="pane-head">output (WebGL2)</div>
+      <canvas id="gl"></canvas>
+      <div class="pane-head">log</div>
+      <pre id="log"></pre>
+    </section>
+  </main>
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>

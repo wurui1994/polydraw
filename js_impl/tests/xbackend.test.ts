@@ -32,6 +32,15 @@ const SCRIPTS = [
   'tigrou/beating heart.pss',
   'ken/plasma.pss',
   'tigrou/raymarch.pss',
+  // opengl examples (align JS recording to current C level)
+  'examples/opengl/03_point.pss',
+  'examples/opengl/05_rotate_points.pss',
+  'examples/opengl/12_mesh_surface.pss',
+  'examples/opengl/13_saddle.pss',
+  'examples/opengl/24_shader_hello.pss',
+  'examples/opengl/25_offscreen_capture.pss',
+  'examples/opengl/26_texture_procedural.pss',
+  'examples/opengl/28_peaks.pss',
 ];
 
 function ensureRefBin(): void {
@@ -73,6 +82,7 @@ function histogramJS(path: string): Hist {
   ph.srand(1);
   ph.state.numframes = 30;
   ph.state.clockScale = 1 / 60;
+  ph.attachMemory(r.program.globals);
   run(r.program, null, r.program.globals, null);
   const g = ph.glbuf as GLCmdBuf;
   const full0: Record<string, number> = {};
@@ -82,7 +92,7 @@ function histogramJS(path: string): Hist {
     switch (c.op) {
       case 1: begin++; break; case 2: end++; break; case 3: vert++; break;
       case 4: color++; break; case 5: texc++; break; case 6: norm++; break;
-      case 7: push++; break; case 8: pop++; break; case 23: settex++; break;
+      case 7: push++; break; case 8: pop++; break; case 24: settex++; break;
     }
   }
   return { total: g.cmds.length, begin, end, vert, push, pop, settex, color, texcoord: texc, normal: norm, full: full0 };

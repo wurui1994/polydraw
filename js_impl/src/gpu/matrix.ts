@@ -32,11 +32,17 @@ export function mat4Rotate(m: Mat4, angDeg: number, x: number, y: number, z: num
   x /= len; y /= len; z /= len;
   const a = (angDeg * Math.PI) / 180;
   const s = Math.sin(a), c = Math.cos(a), t = 1 - c;
-  // rotation matrix (column-major)
+  // Rotate exactly like c_impl/src/render/gl_renderer.c mat4_rotate: its
+  // literal is written row-major but applied through a column-major mat4_mul,
+  // which transposes the matrix — i.e. the effective rotation is by -angDeg
+  // around the given axis. Faithfully replicating that quirk keeps the JS
+  // software renderer pixel-identical to the C baseline for mvp_bake scripts
+  // (glRotate on the CPU; e.g. 28_peaks.pss, 12_mesh_surface.pss).
+  // Equivalent to the standard matrix transposed.
   const r = new Float64Array(16);
-  r[0] = x * x * t + c;       r[1] = y * x * t + z * s;   r[2] = z * x * t - y * s;   r[3] = 0;
-  r[4] = x * y * t - z * s;   r[5] = y * y * t + c;       r[6] = z * y * t + x * s;   r[7] = 0;
-  r[8] = x * z * t + y * s;   r[9] = y * z * t - x * s;   r[10] = z * z * t + c;      r[11] = 0;
+  r[0] = x * x * t + c;       r[1] = x * y * t - z * s;   r[2] = x * z * t + y * s;   r[3] = 0;
+  r[4] = y * x * t + z * s;   r[5] = y * y * t + c;       r[6] = y * z * t - x * s;   r[7] = 0;
+  r[8] = z * x * t - y * s;   r[9] = z * y * t + x * s;   r[10] = z * z * t + c;      r[11] = 0;
   r[12] = 0; r[13] = 0; r[14] = 0; r[15] = 1;
   mat4Mul(m, m, r);
 }

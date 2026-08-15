@@ -330,6 +330,10 @@ double pd_jit_call(pd_Ctx *c, const pd_Instr *in) {
     if (!fn) {
         snprintf(((pd_Program*)root)->err, sizeof(((pd_Program*)root)->err),
                  "call to undefined function (aux=%d, nFuncs=%zu)", in->aux, root->nFuncs);
+        if (getenv("PD_DEBUG_GL")) {
+            fprintf(stderr, "[pd_interp] undefined fn aux=%d nFuncs=%zu pc=%td\n",
+                    in->aux, root->nFuncs, (ptrdiff_t)(in - root->instr));
+        }
         fprintf(stderr, "[pd_interp] error: call to undefined function (aux=%d, nFuncs=%zu)\n",
                 in->aux, root->nFuncs);
         return NAN;

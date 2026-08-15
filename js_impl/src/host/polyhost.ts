@@ -4,7 +4,7 @@
 // same GLCmd stream is later replayed by gpu/replay.ts (WebGL2) — and must
 // match the C offscreen renderer's stream bit-for-bit (cross-backend test).
 
-import { srand as intSrand } from '../backend/interp.ts';
+import { srand as intSrand, ptrDeref } from '../backend/interp.ts';
 
 import { GLCmdBuf, GLCMD, PDGL, PD_UNI_F, PD_UNI_I } from './glcmd.ts';
 import type { GLCmd } from './glcmd.ts';
@@ -133,6 +133,15 @@ export class PolyHostImpl {
   logBuf = '';
   // string arg cache (bit-cast slot -> string)
   strSlots = new Map<number, string>();
+  // interpreter global memory; attached before run so host functions that read
+  // raw buffer pointers (e.g. glsettex array form) can fetch pixels from it.
+  globals: Float64Array | null = null;
+  attachMemory(g: Float64Array) { this.globals = g; }
+  // Injected by the CLI/host process. Decodes a texture file (relative to
+  // texSearchDir) into RGBA pixels (0..255). Keeps the core host free of any
+  // node fs / image-lib dependency. Mirrors C pd_polyhost_tex.c / stb_image.
+  imageLoader: ((file: string) => { w: number; h: number; rgb: number[] } | null) | null = null;
+  texSearchDir = '';
 
   srand(s: number) { g_holdrand = s >>> 0; g_normstat = false; intSrand(s); }
 
@@ -192,9 +201,11 @@ export class PolyHostImpl {
     addFn('GLDISABLE', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.DISABLE; c.mode = n >= 1 ? a[0] : 0; return 0; });
     addFn('GLQUAD', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.QUAD; c.a = n >= 1 ? a[0] : 0; return 0; });
     addFn('GLLINEWIDTH', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.LINEWIDTH; c.a = n >= 1 ? a[0] : 1; return 0; });
+    addFn('GLPOINTSIZE', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.POINTSIZE; c.a = n >= 1 ? a[0] : 1; return 0; });
     // C records GLCULLFACE via rh_glCullFace but its parser routes the call to
     // a base no-op extern, so the command never reaches the GLCmd buffer. Match
-    // that de-facto behavior for cross-backend parity.
+    // that de-facto behavior for cross-backend parity. (GLACTIVETEXTURE, by
+    // contrast, IS recorded by C's rh_glActiveTex — keep it.)
     addFn('GLCULLFACE', 0, () => 0);
     addFn('GLFRONTFACE', 0, () => 0);
     addFn('GLVIEWPORT', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.VIEWPORT; c.a = n >= 1 ? a[0] : 0; c.b = n >= 2 ? a[1] : 0; return 0; });
@@ -322,34 +333,78 @@ export class PolyHostImpl {
     const file = this.strArg(a, 1);
     if (file !== null) {
       const colmode = n >= 3 ? (a[2] | 0) : (8 + 32); // KGL_MIPMAP | KGL_REPEAT
+      if (this.imageLoader) {
+        // The loader resolves the path itself (search dir + parent walk),
+        // mirroring C decode_file().
+        const img = this.imageLoader(file);
+        if (img) {
+          this.tex[tex] = { valid: true, w: img.w, h: img.h, z: 1, colmode, pixels: img.rgb, nam: file };
+          const c = this.glbuf.push();
+          c.op = GLCMD.SETTEXDATA; c.mode = colmode; c.a = tex; c.b = img.w; c.c = img.h; c.d = 1; c.s = img.rgb;
+          return 0;
+        }
+        this.logBuf += `glsettex: texture load failed: ${file}\n`;
+      }
+      // Fallback placeholder if no loader / decode failed.
       this.tex[tex] = { valid: true, w: 32, h: 32, z: 1, colmode, pixels: null, nam: file };
       const c = this.glbuf.push();
       c.op = GLCMD.SETTEXDATA; c.mode = colmode; c.a = tex; c.b = 32; c.c = 32; c.d = 1; c.s = null;
       return 0;
     }
     // array form: glsettex(tex, &arr, w[, h[, z]], coltype)
-    const arr = a[1] as unknown as number[] | null;
-    if (arr) {
-      const w = a[2] | 0, h = n >= 4 ? (a[3] | 0) : 1, z = n >= 5 ? (a[4] | 0) : 1;
-      const colmode = a[n - 1] | 0;
+    // In pss, passing an array decays to its byte offset into interpreter
+    // global memory (a[1] is a number), exactly as C passes a raw pointer.
+    // Read the pixel bytes back from that memory (mirrors C rh_glSetTex).
+    const off = a[1];
+    if (off !== null && off !== undefined) {
+      // glsettex(tex, &arr, w, h, col) -> 5 args (col = last). Some forms add a
+      // z (depth) between h and col: glsettex(tex, &arr, w, h, z, col) -> 6 args.
+      const w = a[2] | 0, h = a[3] | 0;
+      const z = n >= 6 ? (a[4] | 0) : 1;
+      const colmode = (n >= 6 ? a[5] : a[4]) | 0;
       if (w < 1 || h < 1 || z < 1) return -1;
-      this.tex[tex] = { valid: true, w, h, z, colmode, pixels: arr.slice(), nam: '' };
+      // per C: elem = (coltype == KGL_VEC4) ? 4 : 1; count = w*h*z*elem.
+      const elem = (colmode & 15) === 5 ? 4 : 1; // KGL_VEC4
+      const flat = this.readPixelsFromMemory(off, w * h * z * elem);
+      this.tex[tex] = { valid: true, w, h, z, colmode, pixels: flat.slice(), nam: '' };
       const c = this.glbuf.push();
-      c.op = GLCMD.SETTEXDATA; c.mode = colmode; c.a = tex; c.b = w; c.c = h; c.d = z; c.s = null;
+      // copy the pixel bytes into the command buffer so the replayer can upload
+      // them (mirrors C rh_glSetTex which mallocs c->pixels).
+      c.op = GLCMD.SETTEXDATA; c.mode = colmode; c.a = tex; c.b = w; c.c = h; c.d = z; c.s = flat;
       return 0;
     }
     return -1;
   }
+  // Read `count` pixel values from the pss array whose ADDRESS was passed
+  // (a[1] is a pointer id minted by ADDR; mirrors C reading via raw pointers).
+  // The pss buffer stores FLOAT bit-patterns (as C reads glsettex data via
+  // float*), so each int is reinterpreted as a float32.
+  private readPixelsFromMemory(off: number, count: number): number[] {
+    const out = new Array<number>(count);
+    const view = ptrDeref(off);
+    if (!(view instanceof Float64Array)) { for (let i = 0; i < count; i++) out[i] = 0; return out; }
+    // C stores the buffer verbatim: for KGL_BGRA32 the values are packed uint32
+    // bit-patterns (0xAABBGGRR); for KGL_FLOAT they are plain float values. We
+    // return the raw double value and let the replayer decode by colmode.
+    for (let i = 0; i < count; i++) out[i] = view[i];
+    return out;
+  }
   private hf_glCapture(n: number, a: number[]): number {
     const c = this.glbuf.push();
-    if (n === 1) { c.op = GLCMD.CAPTURE; c.a = -1; c.b = 0; c.c = 0; c.mode = 0; }
+    // glcapture() (no args) and glcapture(tex,w,h,col) both begin a screen
+    // capture in C; the no-arg form captures the whole framebuffer (a=-1).
+    if (n === 0 || n === 1) { c.op = GLCMD.CAPTURE; c.a = -1; c.b = 0; c.c = 0; c.mode = 0; }
     else if (n === 4) { c.op = GLCMD.CAPTURE; c.a = a[0]; c.b = a[1]; c.c = a[2]; c.mode = a[3] | 0; }
     return 0;
   }
   private hf_glSetShader(n: number, a: number[]): number {
     let vi: Block | null = null, fi: Block | null = null;
-    if (n === 1) { fi = blkClamp(this.blocks, SEC_FRAGMENT, a[0] | 0); }
-    else if (n >= 2) {
+    // Mirrors C rh_glSetShader: n==1 (glsetshader(d)) picks f block d and
+    // ALWAYS v block 0; named (n>=2) does name lookup with v0/f0 fallback.
+    if (n === 1) {
+      vi = blkClamp(this.blocks, SEC_VERTEX, 0);
+      fi = blkClamp(this.blocks, SEC_FRAGMENT, a[0] | 0);
+    } else if (n >= 2) {
       const vn = this.strArg(a, 0), fn = this.strArg(a, 1);
       vi = vn ? blkFindName(this.blocks, SEC_VERTEX, vn) : null;
       fi = fn ? blkFindName(this.blocks, SEC_FRAGMENT, fn) : null;
@@ -360,8 +415,8 @@ export class PolyHostImpl {
     c.op = GLCMD.SETSHADER;
     c.a = vi ? vi.src.length : 0; // placeholder; replayer keyed by content below
     c.b = fi ? fi.src.length : 0;
-    (c as GLCmd & { vsrc?: string; fsrc?: string }).vsrc = vi?.src ?? '';
-    (c as GLCmd & { vsrc?: string; fsrc?: string }).fsrc = fi?.src ?? '';
+    c.s = vi?.src ?? '';
+    c.s2 = fi?.src ?? '';
     return 0;
   }
   private hf_glGetUniformLoc(n: number, a: number[]): number {
@@ -382,7 +437,10 @@ export class PolyHostImpl {
   private hf_uniformArray(kind: number, comps: number, n: number, a: number[]): number {
     const id = a[0] | 0;
     const count = n >= 2 ? (a[1] | 0) : 0;
-    const arr = (n >= 3 ? a[2] : null) as unknown as number[] | null;
+    // a[2] is a pointer id minted by ADDR for the EVAL array (mirrors C
+    // ptr_arg) — deref into the underlying storage before copying
+    const src = n >= 3 ? ptrDeref(a[2]) : null;
+    const arr = src instanceof Float64Array || Array.isArray(src) ? (src as number[] | Float64Array) : null;
     const total = Math.max(0, count) * comps;
     const buf: number[] = new Array(total).fill(0);
     if (arr) for (let i = 0; i < count && i < arr.length; i++) buf[i] = arr[i];

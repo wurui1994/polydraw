@@ -1,5 +1,5 @@
 node_modules/
-dist/
-*.js
-!vitest.config.ts
-package-lock.json
+dist-ui/
+src/dist-ui/
+*.log
+.DS_Store

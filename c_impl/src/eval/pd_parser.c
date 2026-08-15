@@ -58,6 +58,12 @@ static const pd_Builtin BUILTINS[] = {
     { "FMOD",   PD_OP_END,PD_FMOD   },
     { "MIN",    PD_OP_END,PD_MIN    },
     { "MAX",    PD_OP_END,PD_MAX    },
+    /* lowercase aliases — scripts in the wild call min()/max() with lowercase
+     * (e.g. tigrou/clock.pss, particules_morphing.pss). Without these the call
+     * resolved to an undefined function (aux=-1) and returned NaN, poisoning
+     * normals/uniforms and making every capture-based blur render black. */
+    { "min",    PD_OP_END,PD_MIN    },
+    { "max",    PD_OP_END,PD_MAX    },
     { "POW",    PD_OP_END,PD_POW    },
     { "FADD",   PD_OP_END,PD_FADD   },
     { NULL, 0, 0 }
@@ -137,10 +143,20 @@ static int sym_visible(const pd_Parser *p, const pd_Sym *s) {
 }
 
 static pd_Sym *sym_find(pd_Parser *p, const char *name, int nParams) {
+    if (getenv("PD_DEBUG_FUNCS")) {
+        fprintf(stderr, "sym_find(name='%s' nParams=%d nSyms=%d) FUNCs: ", name, nParams, p->nSyms);
+        for (int di = p->nSyms - 1; di >= 0; di--)
+            if (p->syms[di].kind == PD_SYM_FUNC)
+                fprintf(stderr, "[%s/%d]", p->syms[di].name, p->syms[di].nParams);
+        fprintf(stderr, "\n");
+    }
     /* exact name+arity match (for functions); for non-funcs arity ignored */
     for (int i = p->nSyms - 1; i >= 0; i--) {
         pd_Sym *s = &p->syms[i];
         if (strncmp(s->name, name, sizeof(s->name)) != 0) continue;
+        if (getenv("PD_DEBUG_FUNCS"))
+            fprintf(stderr, "  sym_find exact hit '%s' kind=%d vis=%d nP=%d want=%d fidx=%d\n",
+                    s->name, s->kind, sym_visible(p, s), s->nParams, nParams, s->funcIdx);
         if (!sym_visible(p, s)) continue;
         if (s->kind == PD_SYM_BUILTIN || s->kind == PD_SYM_EXT_FUNC || s->kind == PD_SYM_FUNC) {
             if (nParams >= 0 && s->nParams != nParams) {
@@ -154,6 +170,33 @@ static pd_Sym *sym_find(pd_Parser *p, const char *name, int nParams) {
                 continue;
             }
         }
+        return s;
+    }
+    /* Case-insensitive fallback: the lexer/parser normalizes *definitions* to
+     * upper-case (prescan registers "DRAWCADRAN", "DRAWCLOCK", ...) but leaves
+     * *call sites* as the script wrote them (e.g. "drawcadran()" in
+     * tigrou/clock.pss). Builtins like min()/max()/exp() are likewise called
+     * lowercase while stored upper-case. Without this the call resolves to an
+     * undefined function (aux=-1) returning NaN, which poisoned
+     * normals/uniforms and made every capture-based blur render black. User
+     * variables keep exact-case semantics. */
+    for (int i = p->nSyms - 1; i >= 0; i--) {
+        pd_Sym *s = &p->syms[i];
+        if (s->kind != PD_SYM_BUILTIN && s->kind != PD_SYM_EXT_FUNC && s->kind != PD_SYM_FUNC) continue;
+        if (strcasecmp(s->name, name) != 0) continue;
+        if (!sym_visible(p, s)) continue;
+        if (nParams >= 0 && s->nParams != nParams) {
+            int next = s->nextOverload;
+            while (next >= 0) {
+                pd_Sym *o = &p->syms[next];
+                if (o->nParams == nParams) return o;
+                next = o->nextOverload;
+            }
+            continue;
+        }
+        if (getenv("PD_DEBUG_FUNCS"))
+            fprintf(stderr, "sym_find fallback: '%s' -> '%s' (kind=%d nParams=%d)\n",
+                    name, s->name, s->kind, s->nParams);
         return s;
     }
     return NULL;
@@ -1511,8 +1554,13 @@ static void prescan_functions(pd_Parser *p) {
                         else if (st->kind==PD_TOK_PUNCT && st->len==1 && st->text[0]==')') depth--;
                         else if (st->kind==PD_TOK_PUNCT && st->len==1 && st->text[0]==',' && depth==1) nParams++;
                     }
-                    /* if there's content between ( and ), it's nParams+1 */
-                    if (s > afterName) nParams++;
+                    /* if there's content between ( and ), it's nParams+1.
+                     * Empty parens () → 0 params: `s > afterName` is true for
+                     * "()" too (s = afterName+1), which wrongly counted
+                     * parameterless functions like `drawcadran()` as 1-arg and
+                     * made every call (drawcadran() with 0 args) fail to
+                     * resolve (aux=-1) → NaN → black capture. */
+                    if (s > afterName + 1) nParams++;
                     /* scan the param list for '&' prefixes (pass-by-reference)
                      * so the call site can pass addresses even when the
                      * function is defined AFTER the calling main body. */
@@ -1555,6 +1603,14 @@ static void prescan_functions(pd_Parser *p) {
         p->tok++;
     }
     p->tok = savedTok;
+    if (getenv("PD_DEBUG_FUNCS")) {
+        for (int i = 0; i < p->nSyms; i++) {
+            const pd_Sym *s = &p->syms[i];
+            if (s->kind == PD_SYM_FUNC)
+                fprintf(stderr, "prescan func '%s' nParams=%d funcIdx=%d\n",
+                        s->name, s->nParams, s->funcIdx);
+        }
+    }
 }
 
 /* ---- top-level program parse ---- */

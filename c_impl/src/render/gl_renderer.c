@@ -201,9 +201,21 @@ static char *adapt_vertex(const char *src)
     t = str_replace_all(s, "gl_Normal", "a_normal"); free(s);
     if (!t) return NULL;
     /* declare gl_PointSize from the u_pointsize uniform so GL_POINTS honor
-     * glPointSize(); inject it at the top of the user's main(). */
-    s = str_replace_all(t, "void main()", "void main()\n{ gl_PointSize = u_pointsize;"); free(t);
+     * glPointSize(). Inject it right AFTER main()'s opening brace. Replacing
+     * the bare "void main()" token with "void main()\n{ gl_PointSize=..." left
+     * the user's own '{' in place, producing a duplicate brace and a
+     * 'premature EOF' compile error for shaders written as "void main()\n{"
+     * (e.g. tigrou/clock.pss) — those fell back to the default program and
+     * rendered solid white. Handle both "void main()\n{" and "void main() {". */
+    s = str_replace_all(t, "void main()\n{", "void main()\n{ gl_PointSize = u_pointsize;");
     if (!s) return NULL;
+    if (strcmp(s, t) == 0) {
+        /* newline format not present — try the same-line "void main() {" */
+        free(s);
+        s = str_replace_all(t, "void main() {", "void main() { gl_PointSize = u_pointsize;");
+        if (!s) return NULL;
+    }
+    free(t);
     t = s;
     size_t len = strlen(t);
     char *out = malloc(strlen(VERT_PREFIX) + len + 1);
@@ -362,6 +374,11 @@ static GLuint compile_shader(GLenum type, const char *src, const char *stage)
         char log[2048];
         glGetShaderInfoLog(sh, sizeof(log), NULL, log);
         fprintf(stderr, "gl_renderer: %s shader compile failed:\n%s\n", stage, log);
+        if (getenv("PD_DEBUG_GL")) {
+            FILE *f = fopen(stage[0] == 'v' ? "/tmp/vs_src.txt" : "/tmp/fs_src.txt", "w");
+            if (f) { fputs(src, f); fclose(f); }
+            fprintf(stderr, "  (%s source dumped)\n", stage);
+        }
         glDeleteShader(sh);
         return 0;
     }
@@ -389,6 +406,29 @@ static GLuint link_program(const char *vert_src, const char *frag_src)
         return 0;
     }
     glDeleteShader(vs); glDeleteShader(fs);
+    /* Bind every sampler uniform to texture unit 0. Without this, a
+     * post-process shader's sampler (e.g. `uniform sampler2D tex0` in
+     * clock.pss) gets an arbitrary default unit (GL may assign loc 4, which
+     * samples an unbound unit) and capture-based blur scripts come out black. */
+    /* glUniform1i only affects the CURRENTLY BOUND program, so activate the
+     * freshly linked one while configuring its samplers. */
+    GLint prevProg = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prevProg);
+    glUseProgram(prog);
+    GLint nuni = 0;
+    glGetProgramiv(prog, GL_ACTIVE_UNIFORMS, &nuni);
+    for (GLint i = 0; i < nuni; i++) {
+        char uname[256];
+        GLsizei ulen = 0; GLint usize = 0; GLenum utype = 0;
+        glGetActiveUniform(prog, (GLuint)i, (GLsizei)sizeof(uname),
+                           &ulen, &usize, &utype, uname);
+        if (utype == GL_SAMPLER_2D || utype == GL_SAMPLER_CUBE ||
+            utype == GL_INT_SAMPLER_2D || utype == GL_SAMPLER_2D_ARRAY) {
+            GLint uloc = glGetUniformLocation(prog, uname);
+            glUniform1i(uloc, 0);
+        }
+    }
+    if (prevProg) glUseProgram((GLuint)prevProg);
     return prog;
 }
 
@@ -720,6 +760,16 @@ static void draw_quad(pd_GLRenderer *rd)
     if (rd->tex_obj[rd->active_unit]) {
         glActiveTexture(GL_TEXTURE0 + rd->active_unit);
         glBindTexture(rd->tex_tgt[rd->active_unit], rd->tex_obj[rd->active_unit]);
+    }
+    if (rd->dbg_gl) {
+        GLint u0 = 0; glGetIntegerv(GL_ACTIVE_TEXTURE, &u0);
+        GLint b0 = 0, b1 = 0;
+        glActiveTexture(GL_TEXTURE0); glGetIntegerv(GL_TEXTURE_BINDING_2D, &b0);
+        glActiveTexture(GL_TEXTURE0 + 1); glGetIntegerv(GL_TEXTURE_BINDING_2D, &b1);
+        glActiveTexture((GLenum)u0);
+        fprintf(stderr, "  QUAD active_unit=%d tex0_loc=%d bind0=%u bind1=%u tex_obj[0]=%u\n",
+                rd->active_unit, glGetUniformLocation(rd->program, "tex0"),
+                (unsigned)b0, (unsigned)b1, (unsigned)rd->tex_obj[0]);
     }
     glBindBuffer(GL_ARRAY_BUFFER, rd->vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(tris), tris, GL_STREAM_DRAW);
@@ -1074,6 +1124,10 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
             flush_batch(rd);   /* pending geometry belongs to the old program */
             const char *vs = (const char *)(uintptr_t)(unsigned long long)c->a;
             const char *fs = (const char *)(uintptr_t)(unsigned long long)c->b;
+            if (rd->dbg_gl)
+                fprintf(stderr, "SETSHADER vs_len=%zu fs_len=%zu fshdr='%.80s'\n",
+                        vs ? strlen(vs) : 0, fs ? strlen(fs) : 0,
+                        fs ? (fs + (strspn(fs, "\r\n ") > 40 ? 40 : strspn(fs, "\r\n "))) : "(null)");
             pd_gl_renderer_set_shaders(rd, vs, fs);
             break;
         }
@@ -1308,69 +1362,95 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
                 rd->cap_w = rd->render_to_default ? rd->fb_w : rd->w;
                 rd->cap_h = rd->render_to_default ? rd->fb_h : rd->h;
             }
+            /* Capture strategy: draw the captured scene into the ACTIVE render
+             * target (main FBO / window), then at glcaptureend() read it back
+             * with glReadPixels into the sampled texture. The previous
+             * render-to-FBO approach (glBindFramebuffer(cap_fbo) +
+             * glCopyTexSubImage2D) produced a blank/white texture on the
+             * headless GL context, so every capture-based blur script (clock,
+             * twister, ...) came out solid white. Offscreen draws had also
+             * leaked into the visible frame (25_offscreen_capture showed the
+             * captured quad on screen). Drawing into the main target and
+             * reading back is simple and reliable everywhere. The captured
+             * scene is expected to be overwritten by the post-process quad, so
+             * any visible leak matches what a correct capture would replace.
+             * Start from a clean black, opaque background so post-process
+             * sampling only references the drawn scene. */
             if (!rd->cap_fbo) {
-                glGenFramebuffers(1, &rd->cap_fbo);
-                glGenTextures(1, &rd->cap_tex);
-                rd->cap_owned = 1;
+                glGenFramebuffers(1, &rd->cap_fbo); /* keep for status checks */
             }
-            glBindTexture(GL_TEXTURE_2D, rd->cap_tex);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, rd->cap_w, rd->cap_h,
-                         0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            /* Post-process shaders sample with coordinates intentionally
-             * scaled >1 (e.g. clock's blur uses 3.0*uv); wrap must REPEAT so
-             * those samples reference the drawn scene rather than clamping to
-             * the (black) edges. */
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-            glBindFramebuffer(GL_FRAMEBUFFER, rd->cap_fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                  GL_TEXTURE_2D, rd->cap_tex, 0);
-            /* start the capture from a clean (black, opaque) background so
-             * the post-process samples only the drawn scene */
             glViewport(0, 0, rd->cap_w, rd->cap_h);
             glClearColor(0, 0, 0, 1);
             glClear(GL_COLOR_BUFFER_BIT);
             break;
         }
         case GLCMD_CAPTUREEND: {
-            /* the captured scene must be fully drawn into cap_fbo before it
-             * is copied out into the sampled texture */
+            /* The captured scene was drawn into the active render target; read
+             * it back now (after flushing) into the sampled texture. */
             flush_batch(rd);
             int tex = (int)c->a;
             if (tex < 0 || tex >= REN_MAX_TEX) break;
-            if (rd->cap_fbo) {
-                /* The scene just rendered into rd->cap_tex (via the cap_fbo).
-                 * Hand a STABLE, independent copy to tex_obj[tex] so that
-                 * subsequent glcapture() calls (a script may capture several
-                 * indexes per frame) don't clobber an earlier captured texture
-                 * the post-process quad still needs to sample. Sharing the
-                 * cap_tex directly would overwrite every index each time. */
-                if (!rd->tex_obj[tex]) {
-                    glGenTextures(1, &rd->tex_obj[tex]);
-                    glBindTexture(GL_TEXTURE_2D, rd->tex_obj[tex]);
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rd->cap_w, rd->cap_h,
-                                 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                }
-                /* copy cap_fbo contents into tex_obj[tex] */
-                glBindFramebuffer(GL_FRAMEBUFFER, rd->cap_fbo);
+            if (!rd->tex_obj[tex]) {
+                glGenTextures(1, &rd->tex_obj[tex]);
                 glBindTexture(GL_TEXTURE_2D, rd->tex_obj[tex]);
-                glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0,
-                                    rd->cap_w, rd->cap_h);
-                rd->tex_tgt[tex] = GL_TEXTURE_2D;
-                /* keep it bound to unit 0 so the post-process quad samples it */
-                glActiveTexture(GL_TEXTURE0);
-                glBindTexture(GL_TEXTURE_2D, rd->tex_obj[tex]);
-                /* restore the main render target + viewport */
-                glBindFramebuffer(GL_FRAMEBUFFER, rd->render_to_default ? 0 : rd->fbo);
-                if (rd->render_to_default) glViewport(0, 0, rd->fb_w, rd->fb_h);
-                else                       glViewport(0, 0, rd->w, rd->h);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rd->cap_w, rd->cap_h,
+                             0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                /* Post-process shaders sample with coordinates scaled >1
+                 * (e.g. clock's blur uses 3.0*uv); wrap must REPEAT so those
+                 * samples reference the drawn scene rather than clamping to
+                 * the (black) edges. */
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
             }
+            /* Read the captured scene back from the ACTIVE render target (main
+             * FBO in the headless tool, window FB in the viewer) into the
+             * sampled texture. GL texture row 0 = bottom of the framebuffer,
+             * which matches how glquad()'s texcoords sample it (t=0 bottom). */
+            glBindTexture(GL_TEXTURE_2D, rd->tex_obj[tex]);
+            {
+                unsigned char *px = (unsigned char *)malloc(
+                    (size_t)rd->cap_w * rd->cap_h * 4);
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                glBindFramebuffer(GL_FRAMEBUFFER, rd->render_to_default ? 0 : rd->fbo);
+                glReadPixels(0, 0, rd->cap_w, rd->cap_h,
+                             GL_RGBA, GL_UNSIGNED_BYTE, px);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                if (rd->dbg_gl) {
+                    int nz = 0;
+                    for (int i = 0; i < rd->cap_w * rd->cap_h; i++)
+                        if (px[i*4] || px[i*4+1] || px[i*4+2]) nz++;
+                    fprintf(stderr, "CAPTUREEND readback nz=%d first=(%d,%d,%d,%d)\n",
+                            nz, px[0], px[1], px[2], px[3]);
+                }
+                /* Re-upload the full image (glTexSubImage2D into a texture
+                 * whose base image was created with NULL data left it black on
+                 * this headless context; a fresh glTexImage2D from the readback
+                 * is reliable). */
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                             rd->cap_w, rd->cap_h, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, px);
+                if (rd->dbg_gl) {
+                    unsigned char *vb = (unsigned char *)malloc(
+                        (size_t)rd->cap_w * rd->cap_h * 4);
+                    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, vb);
+                    int nz2 = 0;
+                    for (int i = 0; i < rd->cap_w * rd->cap_h; i++)
+                        if (vb[i*4] || vb[i*4+1] || vb[i*4+2]) nz2++;
+                    fprintf(stderr, "  tex_obj[%d] post-upload nz=%d first=(%d,%d,%d)\n",
+                            tex, nz2, vb[0], vb[1], vb[2]);
+                    free(vb);
+                }
+                free(px);
+            }
+            rd->tex_tgt[tex] = GL_TEXTURE_2D;
+            /* keep it bound to unit 0 so the post-process quad samples it */
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, rd->tex_obj[tex]);
+            /* restore the viewport for the rest of the frame */
+            if (rd->render_to_default) glViewport(0, 0, rd->fb_w, rd->fb_h);
+            else                       glViewport(0, 0, rd->w, rd->h);
             break;
         }
         }

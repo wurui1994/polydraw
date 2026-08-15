@@ -94,6 +94,15 @@ static int pd_compile_impl(pd_Program *prog, const char *src, const pd_Host *hos
     prog->nFuncs = p.nFuncs;
     p.funcs = NULL;
     if (host) pd_host_attach(prog, host);
+    if (getenv("PD_DEBUG_FUNCS")) {
+        for (unsigned f = 0; f < prog->nFuncs; f++) {
+            pd_Program *fp = &prog->funcs[f];
+            fprintf(stderr, "  func[%u] nInstr=%u: ", f, fp->nInstr);
+            for (unsigned i = 0; i < fp->nInstr; i++)
+                fprintf(stderr, "[%u]op=%d aux=%d ", i, fp->instr[i].op, fp->instr[i].aux);
+            fprintf(stderr, "\n");
+        }
+    }
     pd_lex_free(&ts);
     pd_builder_free(&b);
     return ok;

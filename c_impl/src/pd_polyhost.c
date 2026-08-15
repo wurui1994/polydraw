@@ -138,7 +138,11 @@ void pd_polyhost_install(pd_Host *h, pd_PolyState *s) {
     /* utility functions */
     pd_host_add_fn(h, "PRINTF($,.)",   hf_printf,  1);
     pd_host_add_fn(h, "PRINTG(,,,$,.)",hf_printg,  1);
-    pd_host_add_fn(h, "KLOCK()",       hf_klock,   1); /* variadic: 0 or 1 arg */
+    /* klock() and klock(1): scripts use both (e.g. tigrou/clock.pss calls
+     * klock(1) for date/time components). Register the 1-arg form too so the
+     * call resolves instead of aux=-1 → NaN. */
+    pd_host_add_fn(h, "KLOCK()",       hf_klock,   1);
+    pd_host_add_fn(h, "KLOCK(,)",      hf_klock,   1);
     pd_host_add_fn(h, "SRAND()",       hf_srand,   0);
     pd_host_add_fn(h, "SLEEP()",       hf_sleep,   0);
     pd_host_add_fn(h, "RGB(,,)",       hf_rgb,     0);
@@ -172,5 +176,13 @@ void pd_polyhost_install(pd_Host *h, pd_PolyState *s) {
     pd_host_add_fn(h, "GLENABLE()",        hf_gl_noop, 0);
     pd_host_add_fn(h, "GLDISABLE()",       hf_gl_noop, 0);
     pd_host_add_fn(h, "GLPOINTSIZE()",     hf_gl_noop, 0);
+    pd_host_add_fn(h, "GLPOINTSIZE(,)",    hf_gl_noop, 0);
+    /* GLLINEWIDTH was missing entirely; scripts call gllinewidth(5) (e.g.
+     * tigrou/clock.pss drawcadran). Without it the call resolved to an
+     * undefined function (aux=-1) returning NaN. GLENABLE/DISABLE take a
+     * capability argument in scripts (glEnable(GL_DEPTH_TEST)). */
+    pd_host_add_fn(h, "GLLINEWIDTH(,)",    hf_gl_noop, 0);
+    pd_host_add_fn(h, "GLENABLE(,)",       hf_gl_noop, 0);
+    pd_host_add_fn(h, "GLDISABLE(,)",      hf_gl_noop, 0);
     pd_host_add_fn(h, "GLCLEAR()",         hf_gl_noop, 0);
 }

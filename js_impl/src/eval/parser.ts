@@ -26,6 +26,9 @@ interface Sym {
   nDims: number;
   nextOverload: number;
   funcIdx: number;
+  refParam: number;    // PARAM: declared with & (pass-by-reference)
+  refMask: number;     // FUNC: bit i set = param i is by-reference
+  scopeId: number;     // 0 = file scope (main block), >0 = function body scope
 }
 
 const NO_LOOP = -2147483648;
@@ -96,6 +99,11 @@ export class Parser {
   funcs: Program[] = [];
   breakLabel = NO_LOOP;
   contLabel = NO_LOOP;
+  // goto/label support (function-scoped): GOTOs are emitted with a placeholder
+  // target and patched to the label's instruction index when the body ends —
+  // forward and backward jumps both work (drawcone2.pss: goto singsph/skipcone).
+  private gotoPatches: { idx: number; name: string }[] = [];
+  private labels = new Map<string, number>();
   lastLValue: Sym | null = null;
   lastLValueIsArrayIndex = 0;
   lastArrayIdx: Reg = reg(Fam.VOID, 0);
@@ -104,6 +112,12 @@ export class Parser {
   ok = true;
   err = '';
   errLine = 0;
+  // Scoping (mirrors c_impl sym_visible / original eval.c): each function
+  // body is its own scope; the main block is file scope (0). File-scope
+  // VAR/PARAM (main's frame-relative locals) are hidden inside function
+  // bodies — statics/enums/functions/host symbols stay visible everywhere.
+  curScope = 0;
+  private scopeSeq = 0;
 
   constructor(b: Builder, ts: Tok[]) {
     this.b = b;
@@ -138,11 +152,23 @@ export class Parser {
   }
 
   // ---- symbol table ----
+  // A symbol is visible if it lives in the current scope, or at file scope
+  // (0) with a kind that is frame-independent (statics/enums/functions/host
+  // symbols/builtins). File-scope VAR/PARAM are main-block frame locals and
+  // must NOT leak into function bodies (original eval.c resets newvar[] per
+  // function; c_impl sym_visible does the same).
+  private symVisible(s: Sym): boolean {
+    if (s.scopeId === this.curScope) return true;
+    if (s.scopeId !== 0) return false;
+    if (this.curScope !== 0 && (s.kind === SymKind.VAR || s.kind === SymKind.PARAM)) return false;
+    return true;
+  }
   symFind(name: string, nParams = -1): Sym | null {
     // search backwards (innermost scope last)
     for (let i = this.syms.length - 1; i >= 0; i--) {
       const s = this.syms[i];
       if (s.name !== name) continue;
+      if (!this.symVisible(s)) continue;
       if (nParams >= 0 && s.nParams !== nParams) {
         // try overload chain
         let o: Sym | null = (s.nextOverload >= 0) ? this.syms[s.nextOverload] : null;
@@ -154,13 +180,17 @@ export class Parser {
     return null;
   }
   symFindName(name: string): Sym | null {
-    for (let i = this.syms.length - 1; i >= 0; i--) if (this.syms[i].name === name) return this.syms[i];
+    for (let i = this.syms.length - 1; i >= 0; i--) {
+      const s = this.syms[i];
+      if (s.name === name && this.symVisible(s)) return s;
+    }
     return null;
   }
   symAdd(name: string, kind: SymKind): Sym {
     const s: Sym = {
       name, kind, nParams: -1, reg: reg(Fam.VOID, 0),
       arraySize: 0, dims: [], nDims: 0, nextOverload: -1, funcIdx: -1,
+      refParam: 0, refMask: 0, scopeId: this.curScope,
     };
     this.syms.push(s);
     return s;
@@ -278,12 +308,53 @@ export class Parser {
     return left;
   }
 
+  // A bare array name as a call argument passes its base pointer (mirrors C
+  // parse_call_arg): foo(arr) -> ADDR, foo(arr[i]) -> element value.
+  parseCallArg(): Reg {
+    const t = this.cur();
+    if (t.kind === TokKind.IDENT) {
+      const nx = this.tok + 1 < this.ts.length ? this.ts[this.tok + 1] : null;
+      const bare = !(nx && nx.kind === TokKind.PUNCT && nx.len === 1 && nx.text === '[');
+      if (bare) {
+        const s = this.symFindName(t.text);
+        if (s && s.kind === SymKind.ARRAY && s.arraySize > 0) {
+          this.eat();
+          const out = this.b.newLocal();
+          this.b.emit1(Op.ADDR, out, s.reg);
+          return out;
+        }
+      }
+    }
+    return this.parseExprPrec(0);
+  }
+
   parsePrimary(): Reg {
     const t = this.eat();
     this.lastLValue = null;
     this.lastLValueIsArrayIndex = 0;
-    // address-of prefix: &ident
+    // address-of prefix: &ident (EVAL pass-by-reference). Arrays resolve to
+    // a base pointer (ADDR); scalars pass their slot address (ADDRSLOT).
+    // Mirrors C pd_parse_primary.
     if (t.kind === TokKind.PUNCT && t.len === 1 && t.text === '&') {
+      const id = this.cur();
+      if (id.kind === TokKind.IDENT) {
+        const s = this.symFindName(id.text);
+        if (s && s.kind === SymKind.ARRAY && s.arraySize > 0) {
+          this.eat();
+          const out = this.b.newLocal();
+          this.b.emit1(Op.ADDR, out, s.reg);
+          return out;
+        }
+        if (s && (s.kind === SymKind.VAR || s.kind === SymKind.PARAM ||
+                  s.kind === SymKind.EXT_VAR ||
+                  (s.kind === SymKind.ARRAY && s.arraySize === 0))) {
+          this.eat();
+          const out = this.b.newLocal();
+          this.b.emit1(Op.ADDRSLOT, out, s.reg);
+          return out;
+        }
+      }
+      // unsupported & form: fall back to treating the operand as a value
       return this.parsePrimary();
     }
     // string-prefix $ident / $string: return 0
@@ -337,6 +408,11 @@ export class Parser {
       }
       // function call?
       if (this.cur().kind === TokKind.PUNCT && this.cur().text === '(') {
+        // callee's ref param mask (pass-by-reference => pass variable
+        // address): the & lives on the DEFINITION (rotate(&x,&y,r)); call
+        // sites may pass plain vars and the caller supplies the slot address.
+        const pre = this.symFindName(name);
+        const refMask = pre && pre.kind === SymKind.FUNC ? pre.refMask : 0;
         this.eat(); // (
         const args: Reg[] = [];
         let nArgs = 0;
@@ -345,7 +421,34 @@ export class Parser {
             if (this.cur().kind === TokKind.PUNCT && this.cur().text === ',') {
               args.push(this.b.newConst(0)); nArgs++; this.eat(); continue;
             }
-            args.push(this.parseExprPrec(0)); nArgs++;
+            // ref param: pass the ADDRESS of the lvalue slot. A bare array
+            // passes its base (ADDR); a scalar passes its slot (ADDRSLOT).
+            if ((refMask & (1 << nArgs)) &&
+                this.cur().kind === TokKind.IDENT) {
+              const nx = this.tok + 1 < this.ts.length ? this.ts[this.tok + 1] : null;
+              const indexed = !!(nx && nx.kind === TokKind.PUNCT && nx.len === 1 && nx.text === '[');
+              const as = this.symFindName(this.cur().text);
+              if (!indexed && as &&
+                  (as.kind === SymKind.VAR || as.kind === SymKind.PARAM ||
+                   as.kind === SymKind.EXT_VAR ||
+                   (as.kind === SymKind.ARRAY && as.arraySize === 0))) {
+                this.eat();
+                const ao = this.b.newLocal();
+                this.b.emit1(Op.ADDRSLOT, ao, as.reg);
+                args.push(ao); nArgs++;
+                if (this.acceptPunct(',')) continue;
+                break;
+              }
+              if (!indexed && as && as.kind === SymKind.ARRAY && as.arraySize > 0) {
+                this.eat();
+                const ao = this.b.newLocal();
+                this.b.emit1(Op.ADDR, ao, as.reg);
+                args.push(ao); nArgs++;
+                if (this.acceptPunct(',')) continue;
+                break;
+              }
+            }
+            args.push(this.parseCallArg()); nArgs++;
             if (!this.ok) return args[args.length - 1];
             if (this.acceptPunct(',')) {
               if (this.cur().kind === TokKind.PUNCT && this.cur().text === ')') {
@@ -443,6 +546,14 @@ export class Parser {
           this.lastLValue = s;
           this.lastLValueIsArrayIndex = 0;
         }
+        if (s.kind === SymKind.PARAM && s.refParam) {
+          // by-reference param: read through the pointer
+          const idx0 = this.b.newConst(0);
+          const out = this.b.newLocal();
+          const ii = this.b.emit2(Op.PEEK, out, s.reg, idx0);
+          this.b.instr[ii].aux = 0;
+          return out;
+        }
         const out = this.b.newLocal();
         this.b.emit1(Op.MOV, out, s.reg);
         return out;
@@ -458,13 +569,26 @@ export class Parser {
   }
 
   // ---- statement parser ----
+  // Patch every goto collected for the current function body to its label's
+  // instruction index. Called once per body (function or anon-main).
+  private resolveGotos(): void {
+    for (const g of this.gotoPatches) {
+      const target = this.labels.get(g.name);
+      if (target === undefined) { this.error(`goto to unknown label '${g.name}'`); break; }
+      this.b.patchGotoTarget(g.idx, target);
+    }
+    this.gotoPatches.length = 0;
+    this.labels.clear();
+  }
+
   parseStmt(): void {
     const t = this.cur();
-    // label: IDENT :
+    // label definition: IDENT : (target for goto)
     if (t.kind === TokKind.IDENT) {
       const a1 = this.tok + 1;
       if (a1 < this.ts.length &&
           this.ts[a1].kind === TokKind.PUNCT && this.ts[a1].text === ':') {
+        this.labels.set(t.text.toUpperCase(), this.b.instr.length);
         this.eat(); this.eat(); this.acceptPunct(';'); return;
       }
     }
@@ -495,8 +619,12 @@ export class Parser {
         this.acceptPunct(';'); return;
       }
       if (this.acceptIdent('GOTO')) {
-        // skip label name; goto not fully supported
-        this.eat(); this.acceptPunct(';'); return;
+        const lt = this.eat();
+        if (lt.kind !== TokKind.IDENT) { this.error('GOTO needs a label'); return; }
+        const gi = this.b.emit0(Op.GOTO, reg(Fam.VOID, 0));
+        this.gotoPatches.push({ idx: gi, name: lt.text.toUpperCase() });
+        this.acceptPunct(';');
+        return;
       }
     }
     if (t.kind === TokKind.PUNCT && t.text === '{') { this.parseBlock(); return; }
@@ -547,6 +675,9 @@ export class Parser {
     if (isAssign && lvSym) {
       this.lastLValue = null;
       this.parseExpr(); // consume lvalue tokens
+      // capture the LHS index NOW: parsing the RHS may read other arrays
+      // and clobber lastArrayIdx, so save it before the value parse
+      const lhsIdx = this.lastArrayIdx;
       this.eat(); // assign op
       const value = this.parseExpr();
       if (!this.ok) return 0;
@@ -556,8 +687,18 @@ export class Parser {
                     assignOp === Op.MINUS ? Op.POKEMINUS :
                     assignOp === Op.TIMES ? Op.POKETIMES :
                     assignOp === Op.SLASH ? Op.POKESLASH : Op.POKEPERC;
-        const ii = this.b.emit2(pop, lvSym.reg, value, this.lastArrayIdx);
+        const ii = this.b.emit2(pop, lvSym.reg, value, lhsIdx);
         this.b.instr[ii].aux = lvSym.arraySize;
+      } else if (lvSym.kind === SymKind.PARAM && lvSym.refParam) {
+        // by-reference param assignment: store through the pointer
+        const pop = assignOp === Op.MOV ? Op.POKE :
+                    assignOp === Op.PLUS ? Op.POKEPLUS :
+                    assignOp === Op.MINUS ? Op.POKEMINUS :
+                    assignOp === Op.TIMES ? Op.POKETIMES :
+                    assignOp === Op.SLASH ? Op.POKESLASH : Op.POKEPERC;
+        const idx0 = this.b.newConst(0);
+        const ii = this.b.emit2(pop, lvSym.reg, value, idx0);
+        this.b.instr[ii].aux = 0;
       } else {
         if (assignOp === Op.MOV) {
           this.b.emit1(Op.MOV, lvSym.reg, value);
@@ -589,7 +730,14 @@ export class Parser {
         this.eat(); this.eat(); this.eat();
         let lv = this.symFindName(name);
         if (!lv) lv = this.declareLocal(name);
-        if (lv.kind === SymKind.VAR || lv.kind === SymKind.PARAM || lv.kind === SymKind.EXT_VAR ||
+        if (lv.kind === SymKind.PARAM && lv.refParam) {
+          // by-reference param ++/--: update through the pointer
+          const one = this.b.newConst(1);
+          const idx0 = this.b.newConst(0);
+          const pop = c1 === '+' ? Op.POKEPLUS : Op.POKEMINUS;
+          const ii = this.b.emit2(pop, lv.reg, one, idx0);
+          this.b.instr[ii].aux = 0;
+        } else if (lv.kind === SymKind.VAR || lv.kind === SymKind.PARAM || lv.kind === SymKind.EXT_VAR ||
             (lv.kind === SymKind.ARRAY && lv.arraySize === 0)) {
           const o = c1 === '+' ? Op.PLUS : Op.MINUS;
           const one = this.b.newConst(1);
@@ -890,11 +1038,17 @@ export class Parser {
     this.eat(); // (
     const name = t.text;
     const savedSyms = this.syms.length;
+    // function params + body live in their own scope: main-block locals
+    // (file-scope VAR/PARAM) are invisible here (original eval.c semantics)
+    const savedScope = this.curScope;
+    this.curScope = ++this.scopeSeq;
     const fnSym = this.symFindName(name);
     // parse params
     let nParams = 0;
+    let fnRefMask = 0;
     if (!(this.cur().kind === TokKind.PUNCT && this.cur().text === ')')) {
       for (;;) {
+        let refFlag = 0;
         // skip optional type-prefix ident (ident followed by ident)
         while (this.cur().kind === TokKind.IDENT) {
           const nx = this.tok + 1;
@@ -902,7 +1056,10 @@ export class Parser {
           this.eat();
         }
         if (this.cur().kind === TokKind.PUNCT && this.cur().len === 1 &&
-            (this.cur().text === '&' || this.cur().text === '$')) this.eat();
+            (this.cur().text === '&' || this.cur().text === '$')) {
+          if (this.cur().text === '&') refFlag = 1; // pass-by-reference
+          this.eat();
+        }
         const pt = this.eat();
         if (pt.kind !== TokKind.IDENT) { this.error('expected param name'); break; }
         const pname = pt.text;
@@ -922,16 +1079,21 @@ export class Parser {
             this.eat();
           } while (d > 0 && this.cur().kind !== TokKind.EOF);
         }
+        // suffix & form: name&
+        if (this.cur().kind === TokKind.PUNCT && this.cur().len === 1 &&
+            this.cur().text === '&') refFlag = 1;
         const ps = this.symAdd(pname, SymKind.PARAM);
         ps.reg = reg(Fam.PARAM, nParams * 8);
+        ps.refParam = refFlag;
+        if (refFlag) fnRefMask |= (1 << nParams);
         nParams++;
         if (this.acceptPunct(',')) continue;
         break;
       }
     }
-    if (fnSym) fnSym.nParams = nParams;
-    if (!this.expectPunct(')')) { this.syms.length = savedSyms; return true; }
-    if (!this.expectPunct('{')) { this.syms.length = savedSyms; return true; }
+    if (fnSym) { fnSym.nParams = nParams; fnSym.refMask |= fnRefMask; }
+    if (!this.expectPunct(')')) { this.syms.length = savedSyms; this.curScope = savedScope; return true; }
+    if (!this.expectPunct('{')) { this.syms.length = savedSyms; this.curScope = savedScope; return true; }
     // pre-register the function so recursive calls inside the body resolve.
     const fidx = this.funcs.length;
     this.funcs.push(emptyProgram()); // placeholder; filled after body parse
@@ -951,8 +1113,11 @@ export class Parser {
       if (!this.ok) break;
     }
     this.expectPunct('}');
+    this.resolveGotos();
     fb.emit1(Op.RETURN, reg(Fam.VOID, 0), this.lastValueReg);
     this.breakLabel = savedBreak; this.contLabel = savedCont;
+    // back to file scope before re-registering the FUNC symbol
+    this.curScope = savedScope;
     // drop params/locals but KEEP the function symbol (so callers can find it)
     this.syms.length = savedSyms;
     if (!this.symFindName(name)) {
@@ -984,6 +1149,7 @@ export class Parser {
       if (!this.ok) break;
     }
     this.expectPunct('}');
+    this.resolveGotos();
     this.b.emit1(Op.RETURN, reg(Fam.VOID, 0), this.lastValueReg);
     return true;
   }
@@ -1035,11 +1201,30 @@ export class Parser {
             s++;
           }
           if (s < ts.length && ts[s + 1]?.kind === TokKind.PUNCT && ts[s + 1].text === '{') {
+            // prescan ref params: &x (or x&) => pass-by-reference bit i
+            let rm = 0;
+            {
+              let pi = 0, d = 0, sawAmp = false;
+              for (let k = after + 1; k <= s; k++) {
+                const tt = ts[k];
+                if (k === s || (d === 0 && tt.kind === TokKind.PUNCT && tt.text === ',')) {
+                  if (sawAmp) rm |= (1 << pi);
+                  pi++; sawAmp = false; continue;
+                }
+                if (tt.kind !== TokKind.PUNCT) continue;
+                if (tt.text === '(' || tt.text === '[') d++;
+                else if (tt.text === ')' || tt.text === ']') d--;
+                else if (d === 0 && tt.len === 1 && tt.text === '&') sawAmp = true;
+              }
+            }
             const s2 = this.symFindName(ts[i].text);
             if (!(s2 && s2.kind === SymKind.FUNC)) {
               const sym = this.symAdd(ts[i].text, SymKind.FUNC);
               sym.funcIdx = idx;
               sym.nParams = -1;
+              sym.refMask = rm;
+            } else if (s2.refMask === 0) {
+              s2.refMask = rm;
             }
             idx++;
             i = s + 2;

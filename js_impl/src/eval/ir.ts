@@ -54,6 +54,11 @@ export const Op = {
   POKEPLUS: 51, POKEMINUS: 52,
   // function call
   CALL: 53,
+  // pointers (JS pointer-registry simulation of C bit-cast addresses):
+  //   ADDR:     out = ptr id of an array's base storage
+  //   ADDRSLOT: out = ptr id of a variable's storage slot (scalar by-ref)
+  ADDR: 54,
+  ADDRSLOT: 55,
 } as const;
 export type Op = (typeof Op)[keyof typeof Op];
 

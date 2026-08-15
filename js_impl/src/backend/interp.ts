@@ -126,13 +126,61 @@ function slotRef(c: Ctx, r: Reg): { get: () => number; set: (v: number) => void 
   }
 }
 
-// Resolve an array base address (for PEEK/POKE).
-function arrayBase(c: Ctx, r: Reg): Float64Array | null {
+// Resolve an array base address (for PEEK/POKE). GLOBAL storage IS the array;
+// PARAM/LOCAL slots hold a pointer id from the registry (bit-cast in C).
+export type PtrView = Float64Array | { get(): number; set(v: number): void };
+function arrayBase(c: Ctx, r: Reg): PtrView | null {
   switch (r.fam) {
     case Fam.GLOBAL: return c.globals.subarray(r.off / 8);
     case Fam.PARAM: {
-      // array passed as pointer: the param slot holds... for now same as global slice
-      return null;
+      const v = (c.params as number[] | Float64Array)[r.off / 8] as number;
+      return typeof v === 'number' ? (g_ptrs.get(v) ?? null) : null;
+    }
+    case Fam.LOCAL: {
+      const v = c.frame[r.off / 8];
+      return typeof v === 'number' ? (g_ptrs.get(v) ?? null) : null;
+    }
+    default: return null;
+  }
+}
+
+// Pointer registry: JS has no bit-cast pointers, so ADDR/ADDRSLOT mint a
+// monotonically-increasing id bound to a view. Host functions that receive an
+// address (glsettex &arr) copy out immediately, so entries are safe to drop.
+const g_ptrs = new Map<number, PtrView>();
+let g_ptrId = 1;
+export function ptrMint(view: PtrView): number {
+  if (g_ptrs.size > 0x10000) g_ptrs.clear(); // bounded: ref-ptrs are call-scoped
+  const id = g_ptrId++;
+  if (g_ptrId > 0x3fffffff) { g_ptrs.clear(); g_ptrId = 1; }
+  g_ptrs.set(id, view);
+  return id;
+}
+export function ptrDeref(id: number): PtrView | null { return g_ptrs.get(id) ?? null; }
+function ptrRead(p: PtrView, j: number): number {
+  if (p instanceof Float64Array) return p[j];
+  return j === 0 ? p.get() : 0;
+}
+function ptrWrite(p: PtrView, j: number, v: number): void {
+  if (p instanceof Float64Array) { p[j] = v; return; }
+  if (j === 0) p.set(v);
+}
+// 1-element view over a writable slot (for ADDRSLOT on frame/globals/params).
+function slotView(c: Ctx, r: Reg): PtrView | null {
+  switch (r.fam) {
+    case Fam.LOCAL: return c.frame.subarray(r.off / 8, r.off / 8 + 1);
+    case Fam.PARAM: {
+      const arr = c.params as number[];
+      if (arr instanceof Float64Array) return arr.subarray(r.off / 8, r.off / 8 + 1);
+      // plain array params (host call): wrap index access
+      const i = r.off / 8;
+      return { get: () => arr[i], set: (v: number) => { arr[i] = v; } };
+    }
+    case Fam.GLOBAL: return c.globals.subarray(r.off / 8, r.off / 8 + 1);
+    case Fam.EXT: {
+      const vi = c.prog.consts[r.off / 8] | 0;
+      const v = c.root.host?.vars.get('_' + vi);
+      return v ?? null;
     }
     default: return null;
   }
@@ -212,20 +260,30 @@ export function runCtx(c: Ctx): number {
       case Op.PEEK: {
         const base = arrayBase(c, in_.in0);
         const j = bounds(b | 0, in_.aux);
-        if (outRef && base) outRef.set(base[j]);
+        if (outRef && base) outRef.set(ptrRead(base, j));
+        break;
+      }
+      case Op.ADDR: {
+        const base = arrayBase(c, in_.in0);
+        if (outRef) outRef.set(base ? ptrMint(base) : 0);
+        break;
+      }
+      case Op.ADDRSLOT: {
+        const sv = slotView(c, in_.in0);
+        if (outRef) outRef.set(sv ? ptrMint(sv) : 0);
         break;
       }
       case Op.POKE: {
         const base = arrayBase(c, in_.out);
         const j = bounds(b | 0, in_.aux);
-        if (base) base[j] = a;
+        if (base) ptrWrite(base, j, a);
         break;
       }
-      case Op.POKETIMES: { const base = arrayBase(c, in_.out); const j = bounds(b | 0, in_.aux); if (base) base[j] *= a; break; }
-      case Op.POKESLASH: { const base = arrayBase(c, in_.out); const j = bounds(b | 0, in_.aux); if (base) base[j] /= a; break; }
-      case Op.POKEPERC: { const base = arrayBase(c, in_.out); const j = bounds(b | 0, in_.aux); if (base) base[j] -= Math.floor(base[j] / Math.abs(a)) * Math.abs(a); break; }
-      case Op.POKEPLUS: { const base = arrayBase(c, in_.out); const j = bounds(b | 0, in_.aux); if (base) base[j] += a; break; }
-      case Op.POKEMINUS: { const base = arrayBase(c, in_.out); const j = bounds(b | 0, in_.aux); if (base) base[j] -= a; break; }
+      case Op.POKETIMES: { const base = arrayBase(c, in_.out); const j = bounds(b | 0, in_.aux); if (base) ptrWrite(base, j, ptrRead(base, j) * a); break; }
+      case Op.POKESLASH: { const base = arrayBase(c, in_.out); const j = bounds(b | 0, in_.aux); if (base) ptrWrite(base, j, ptrRead(base, j) / a); break; }
+      case Op.POKEPERC: { const base = arrayBase(c, in_.out); const j = bounds(b | 0, in_.aux); if (base) { const v = ptrRead(base, j); ptrWrite(base, j, v - Math.floor(v / Math.abs(a)) * Math.abs(a)); } break; }
+      case Op.POKEPLUS: { const base = arrayBase(c, in_.out); const j = bounds(b | 0, in_.aux); if (base) ptrWrite(base, j, ptrRead(base, j) + a); break; }
+      case Op.POKEMINUS: { const base = arrayBase(c, in_.out); const j = bounds(b | 0, in_.aux); if (base) ptrWrite(base, j, ptrRead(base, j) - a); break; }
       case Op.CALL: {
         const na = in_.nIn;
         const argbuf: number[] = [];
