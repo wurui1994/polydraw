@@ -103,7 +103,9 @@ function newTex(): Tex { return { valid: false, w: 0, h: 0, z: 1, colmode: 0, pi
 
 export class PolyState {
   xres = 640; yres = 480;
-  mousx = 0; mousy = 0; bstatus = 0; numframes = 0;
+  // C pd_polyhost.c starts the cursor at window center (mousx=640/2,
+  // mousy=480/2); scripts like ken/texture.pss position geometry from it.
+  mousx = 640 / 2; mousy = 480 / 2; bstatus = 0; numframes = 0;
   clockScale = 0;
   private startTime = Date.now() / 1000;
 }
@@ -202,11 +204,11 @@ export class PolyHostImpl {
     addFn('GLQUAD', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.QUAD; c.a = n >= 1 ? a[0] : 0; return 0; });
     addFn('GLLINEWIDTH', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.LINEWIDTH; c.a = n >= 1 ? a[0] : 1; return 0; });
     addFn('GLPOINTSIZE', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.POINTSIZE; c.a = n >= 1 ? a[0] : 1; return 0; });
-    // C records GLCULLFACE via rh_glCullFace but its parser routes the call to
-    // a base no-op extern, so the command never reaches the GLCmd buffer. Match
-    // that de-facto behavior for cross-backend parity. (GLACTIVETEXTURE, by
-    // contrast, IS recorded by C's rh_glActiveTex — keep it.)
-    addFn('GLCULLFACE', 0, () => 0);
+    // Original polydraw.c registers {"GLCULLFACE()", kglCullFace} which calls
+    // glCullFace + glFrontFace(GL_CW); ken/texture.pss uses it for the cube's
+    // two passes. Record the command; the soft rasterizer maps GL_FRONT/BACK
+    // with CW front-face winding.
+    addFn('GLCULLFACE', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.CULLFACE; c.mode = n >= 1 ? a[0] : 0; return 0; });
     addFn('GLFRONTFACE', 0, () => 0);
     addFn('GLVIEWPORT', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.VIEWPORT; c.a = n >= 1 ? a[0] : 0; c.b = n >= 2 ? a[1] : 0; return 0; });
     addFn('GLMATRIXMODE', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.MATRIXMODE; c.mode = n >= 1 ? a[0] : 0; return 0; });

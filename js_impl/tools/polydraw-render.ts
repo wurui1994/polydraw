@@ -130,18 +130,25 @@ function renderOne(script: string, a: Args, out: string): string {
   engine.ctx.setClockScale(1.0 / 60.0); // deterministic klock() (C: pdrl_set_clock_scale 1/60)
   const sr = new SoftRenderer({ width: a.w, height: a.h, fragment: (v) => [v.r, v.g, v.b] });
   engine.attach(sr as never);
-  // Advance the interpreter through frames 0..N (textures/captures registered
-  // on early frames stay live in SoftRenderer's per-instance state), then
-  // rasterize ONLY the final frame's recorded command stream. SoftRenderer's
-  // framebuffer does not accumulate across frames (each render() redraws from
-  // its batches), so rendering frames 0..N-1 would be pure waste — and for
-  // per-pixel shaders that multiplies the cost by N for nothing. This is what
-  // made heavy scripts appear to "time out": 31 fullscreen shader rasterizes.
+  // Advance the interpreter through frames 0..N, then rasterize ONLY the
+  // final frame's recorded command stream. SoftRenderer's framebuffer does not
+  // accumulate across frames (each render() redraws from its batches), so
+  // rendering frames 0..N-1 would be pure waste — and for per-pixel shaders
+  // that multiplies the cost by N for nothing. This is what made heavy scripts
+  // appear to "time out": 31 fullscreen shader rasterizes.
+  // Texture uploads persist across frames in the C renderer (tex_obj[]), but
+  // each frame's GLCmd buffer is cleared, so glsettex() recorded on frame 0
+  // (ken/texture.pss: `if (numframes == 0) glsettex(...)`) must be carried
+  // forward manually: replay every frame (cheap — no rasterization) and merge
+  // texData by texture id.
+  const texAll = new Map<number, { id: number }>();
+  let batches: ReturnType<typeof engine.ff.replay> = [];
   for (let f = 0; f <= a.frame; f++) {
     engine.ctx.runFrame(f);
+    batches = engine.ff.replay(engine.ctx.glbuf);
+    for (const t of engine.ff.texData) texAll.set(t.id, t as never);
   }
-  const batches = engine.ff.replay(engine.ctx.glbuf);
-  sr.render({ batches, captures: engine.ff.captures, texData: engine.ff.texData });
+  sr.render({ batches, captures: engine.ff.captures, texData: [...texAll.values()] as never });
   if (process.env.PD_DEBUG_GLSL) {
     const st = glslStats();
     console.error(`[glsl] shader calls=${st.calls} discards=${st.discards}`);

@@ -185,4 +185,10 @@ void pd_polyhost_install(pd_Host *h, pd_PolyState *s) {
     pd_host_add_fn(h, "GLENABLE(,)",       hf_gl_noop, 0);
     pd_host_add_fn(h, "GLDISABLE(,)",      hf_gl_noop, 0);
     pd_host_add_fn(h, "GLCLEAR()",         hf_gl_noop, 0);
+    /* GLCULLFACE was missing: ken/texture.pss calls glcullface(GL_FRONT/BACK)
+     * twice per frame; without a slot pd_polyhost_install_render's overwrite
+     * loop found nothing and calls resolved to aux=-1 -> NaN. Original
+     * polydraw.c registers {"GLCULLFACE()", kglCullFace}. */
+    pd_host_add_fn(h, "GLCULLFACE()",      hf_gl_noop, 0);
+    pd_host_add_fn(h, "GLCULLFACE(,)",     hf_gl_noop, 0);
 }

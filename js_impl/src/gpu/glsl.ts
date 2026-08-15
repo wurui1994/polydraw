@@ -25,7 +25,7 @@ export interface GLSLVaryings {
   ndx: number; ndy: number; ndz: number; ndw: number; // NDC pos (gl_Position)
 }
 
-export type GLSLTexFn = (u: number, v: number) => [number, number, number];
+export type GLSLTexFn = (unit: number, u: number, v: number) => [number, number, number];
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -119,6 +119,9 @@ class GLSLParser {
   // top-level `varying` declarations (names, in order) — the VS outputs /
   // FS inputs shared between the two stages
   varyNames: string[] = [];
+  // top-level `uniform sampler2D` names — each maps to a texture unit by
+  // name (texN -> unit N), mirroring polydraw.c's hard-coded sampler setup
+  uniSamplers: string[] = [];
 
   constructor(toks: Tok[]) { this.toks = toks; }
 
@@ -316,15 +319,22 @@ class GLSLParser {
     const id = this.peek();
     if (!id) return;
     if (id.t === 'id' && (id.v === 'varying' || id.v === 'uniform')) {
-      const isVarying = id.v === 'varying';
+      const isVarying = id.v === 'uniform' ? false : true;
       this.next();
       // consume the type word, then collect declared names (comma list,
       // optional [size]) so the vertex runner knows which env slots to
-      // export as varyings
-      if (this.peek()?.t === 'id') this.next();
+      // export as varyings; uniform sampler2D names feed the unit mapping
+      const tw = this.peek();
+      const typeWord = tw && tw.t === 'id' ? (tw.v as string) : '';
+      if (tw && tw.t === 'id') this.next();
+      const isSampler = typeWord === 'sampler2D';
       while (!this.isOp(';')) {
         const p = this.peek();
-        if (p && p.t === 'id') { if (isVarying) this.varyNames.push(p.v as string); this.next(); continue; }
+        if (p && p.t === 'id') {
+          if (isVarying) this.varyNames.push(p.v as string);
+          else if (isSampler) this.uniSamplers.push(p.v as string);
+          this.next(); continue;
+        }
         if (!this.next()) throw new Error('glsl: unterminated decl');
       }
       this.expect('op', ';');
@@ -637,7 +647,7 @@ function genCall(e: { name: string; args: E[] }): string {
     case 'int': return `_ufun(${a[0]},x=>Math.trunc(x))`;
     case 'float': return `${a[0]}`;
     case 'ftransform': return `_ftransform(env)`;
-    case 'texture2D': return `_tex(${a[1]},texFn)`;
+    case 'texture2D': return `_tex(${a[0]},${a[1]},texFn)`;
     case '__inc': {
       // a[0] is the raw E node: pass the NAME string so _inc writes it back
       const src = e.args[0];
@@ -664,7 +674,8 @@ function genStmt(s: S, out: string[]): void {
         if (sz !== undefined) { out.push(`env[${JSON.stringify(nm)}]=_arr(${sz},${JSON.stringify(s.type)});`); continue; }
         const init = s.inits.get(nm);
         if (init) out.push(`env[${JSON.stringify(nm)}]=${genE(init)};`);
-        else if (s.type === 'sampler2D' || s.type === 'uniform') out.push(`env[${JSON.stringify(nm)}]=0;`);
+        else if (s.type === 'sampler2D') out.push(`env[${JSON.stringify(nm)}]=_sunit(${JSON.stringify(nm)});`);
+        else if (s.type === 'uniform') out.push(`env[${JSON.stringify(nm)}]=0;`);
         else out.push(`env[${JSON.stringify(nm)}]=_dflt(${JSON.stringify(s.type)});`);
       }
       break;
@@ -723,12 +734,13 @@ function _g_mix(a,b,t){ const tv=_sc(t); if(_isV(a)||_isV(b)){ const av=_isV(a)?
 function _g_step(e,x){ if(_isV(e)||_isV(x)) return _bop(x,e,(edge,v)=>v>=edge?1:0); return x>=e?1:0; }
 function _g_smooth(a,b,x){ const e0=_sc(a),e1=_sc(b),xv=_sc(x); const t=Math.min(1,Math.max(0,(xv-e0)/(e1-e0))); return t*t*(3-2*t); }
 function _dflt(t){ return t==='vec2'?[0,0]:t==='vec3'?[0,0,0]:t==='vec4'?[0,0,0,0]:0; }
-function _tex(coord){ const c=_isV(coord)?coord:[coord]; if(!texFn) return [0,0,0,1]; const r=texFn(c[0]??0,c[1]??0); return [r[0],r[1],r[2],1]; }
+function _tex(sm,coord){ const c=_isV(coord)?coord:[coord]; if(!texFn) return [0,0,0,1]; const u=(sm===undefined||sm===null)?0:(_isV(sm)?(sm[0]??0):sm)|0; const r=texFn(u,c[0]??0,c[1]??0); return [r[0],r[1],r[2],1]; }
 function _swset(env,name,i,v){ const cur=env[name]; const a=_isV(cur)?cur.slice():[cur??0]; a[i]=_isV(v)?v[0]:v; env[name]=a.length===1?a[0]:a; }
 function _inc(env,name,v){ const old=env[name]; env[name]=v; return old; }
 function _ag(a,i){ if(_isV(a)) return a[i|0]??0; return i===0?(a??0):0; }
 function _aset(env,name,i,v){ let a=env[name]; if(!Array.isArray(a)){ a=[]; env[name]=a; } a[i|0]=_isV(v)?v[0]:v; }
 function _arr(n,t){ const o=new Array(n); for(let i=0;i<n;i++) o[i]=_dflt(t); return o; }
+function _sunit(nm){ return /^tex[0-3]$/.test(nm) ? +nm[3] : 0; }
 `;
 
 // ---------------------------------------------------------------------------
@@ -829,6 +841,11 @@ export function compileGLSL(src: string, vmap?: Map<string, string>): GLSLProgra
         if (expr) body.push(bind(name, expr));
       }
     }
+    // Declared samplers resolve to their texture unit by NAME (tex0->0,
+    // tex1->1, ...), mirroring polydraw.c's hard-coded glUniform1i mapping
+    // at program link. Emitted before the uniforms loop so an explicit
+    // glUniform1i from the script still overrides the default mapping.
+    for (const sm of parser.uniSamplers) body.push(bind(sm, `_sunit(${JSON.stringify(sm)})`));
     body.push(`if (uniforms) for (var _u of uniforms) { var _uv = _u.v; env[_u.loc] = _uv.length === 1 ? _uv[0] : _uv; }`);
     // Vertex-stage varyings (interpolated per pixel by the rasterizer) take
     // precedence over the fixed semantic bindings above — they are the real
@@ -837,8 +854,9 @@ export function compileGLSL(src: string, vmap?: Map<string, string>): GLSLProgra
     body.push(bind('gl_Color', '[vary.r,vary.g,vary.b,vary.a]'));
     body.push(bind('gl_Vertex', '[vary.px,vary.py,vary.pz,vary.pw]'));
     body.push(bind('gl_MultiTexCoord0', '[vary.s,vary.t,0,1]'));
-    body.push(bind('tex0', '0'));
-    body.push(bind('tex', '0'));
+    // unit-0 fallbacks for shaders that sample an UNDECLARED tex0/tex
+    if (!parser.uniSamplers.includes('tex0')) body.push(bind('tex0', '0'));
+    if (!parser.uniSamplers.includes('tex')) body.push(bind('tex', '0'));
     for (const st of stmts) genStmt(st, body);
     body.push(`var _o = env['gl_FragColor']; var _r = [_o[0],_o[1],_o[2]]; if (env['gl_FragDepth'] !== null) _r.fd = _sc(env['gl_FragDepth']); return _r;`);
     if (process.env.PD_DUMP_BODY) console.error('[glsl] BODY:\n' + body.join('\n'));

@@ -32,6 +32,10 @@ export interface DrawBatch {
   shaderF: string | null;
   texUnit: number;
   tex: number;
+  // per-unit texture bindings at draw time (glactivetexture+glbindtexture):
+  // index = unit, value = tex id (-1 = unbound). Multitexture fragment shaders
+  // (ken/texture.pss tex0/tex1/tex2) sample one texture per unit.
+  texUnits: number[];
   useTex: boolean;       // sample texture `tex` at (s,t) instead of vertex color
   pointSize: number; // gl_PointSize for GL_POINTS
   lineWidth: number; // glLineWidth for GL_LINES / GL_LINE_STRIP / GL_LINE_LOOP
@@ -66,6 +70,7 @@ export class FixedFunc {
   defaultShaderF: string | null = null;
   activeTex = 0;
   boundTex = 0;
+  private texUnits: number[] = [-1, -1, -1, -1];
   texBound = false;   // set by glbindtexture; drives texture sampling
   pointSize = 1.0;
   lineWidth = 1.0;
@@ -123,6 +128,7 @@ export class FixedFunc {
     this.shaderV = this.defaultShaderV;
     this.shaderF = this.defaultShaderF;
     this.activeTex = 0; this.boundTex = 0; this.texBound = false;
+    this.texUnits = [-1, -1, -1, -1];
     this.pointSize = 1.0;
     this.lineWidth = 1.0;
     this.depthTest = false;
@@ -158,6 +164,7 @@ export class FixedFunc {
       projection: this.stack.projection.slice() as Mat4,
       shaderV: this.shaderV, shaderF: this.shaderF,
       texUnit: this.activeTex, tex: this.boundTex,
+      texUnits: this.texUnits.slice(),
       useTex: this.texBound,
       pointSize: this.pointSize,
       lineWidth: this.lineWidth,
@@ -203,6 +210,7 @@ export class FixedFunc {
           projection: id.slice() as Mat4,
           shaderV: this.shaderV, shaderF: this.shaderF,
           texUnit: this.activeTex, tex: this.boundTex,
+          texUnits: this.texUnits.slice(),
           useTex: this.texBound,
           pointSize: this.pointSize,
           lineWidth: this.lineWidth,
@@ -282,7 +290,13 @@ export class FixedFunc {
         this.shaderF = (c.s2 as string) ?? null;
         break;
       case GLCMD.SETTEXDATA: this.texData.push({ id: c.a, w: c.b, h: c.c, z: c.d, colmode: c.mode, pixels: c.s as number[] | null }); break;
-      case GLCMD.BINDTEX: this.boundTex = c.a; this.texBound = true; break;
+      case GLCMD.BINDTEX:
+        this.boundTex = c.a;
+        this.texBound = true;
+        // glbindtexture binds to the CURRENT active unit (mirrors
+        // gl_renderer.c GLCMD_BINDTEX -> glActiveTexture(GL_TEXTURE0+unit))
+        if (this.activeTex >= 0 && this.activeTex < 4) this.texUnits[this.activeTex] = c.a;
+        break;
       case GLCMD.ACTIVETEX: this.activeTex = (c.a & 3); break;
       case GLCMD.POINTSIZE: this.pointSize = c.a; break;
       case GLCMD.LINEWIDTH: this.lineWidth = c.a; break;

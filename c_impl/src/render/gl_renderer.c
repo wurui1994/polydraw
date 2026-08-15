@@ -406,10 +406,12 @@ static GLuint link_program(const char *vert_src, const char *frag_src)
         return 0;
     }
     glDeleteShader(vs); glDeleteShader(fs);
-    /* Bind every sampler uniform to texture unit 0. Without this, a
-     * post-process shader's sampler (e.g. `uniform sampler2D tex0` in
-     * clock.pss) gets an arbitrary default unit (GL may assign loc 4, which
-     * samples an unbound unit) and capture-based blur scripts come out black. */
+    /* Bind sampler uniforms to texture units. Original polydraw.c:1064-1067
+     * hard-codes the mapping tex0->0, tex1->1, tex2->2, tex3->3 so scripts
+     * using multiple samplers (ken/texture.pss: tex0/tex1/tex2 sampling
+     * earth.jpg / procedural wood / the glcapture texture) get one unit each;
+     * any other sampler name falls back to unit 0. Binding everything to 0
+     * made every sampler sample the same texture. */
     /* glUniform1i only affects the CURRENTLY BOUND program, so activate the
      * freshly linked one while configuring its samplers. */
     GLint prevProg = 0;
@@ -425,7 +427,11 @@ static GLuint link_program(const char *vert_src, const char *frag_src)
         if (utype == GL_SAMPLER_2D || utype == GL_SAMPLER_CUBE ||
             utype == GL_INT_SAMPLER_2D || utype == GL_SAMPLER_2D_ARRAY) {
             GLint uloc = glGetUniformLocation(prog, uname);
-            glUniform1i(uloc, 0);
+            int unit = 0;
+            if (uname[0] == 't' && uname[1] == 'e' && uname[2] == 'x' &&
+                uname[3] >= '0' && uname[3] <= '3' && uname[4] == '\0')
+                unit = uname[3] - '0';
+            glUniform1i(uloc, unit);
         }
     }
     if (prevProg) glUseProgram((GLuint)prevProg);
@@ -1097,6 +1103,9 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
         case GLCMD_CULLFACE:
             flush_batch(rd);
             glEnable(GL_CULL_FACE);
+            /* original kglCullFace (polydraw.c:1598) also pins the front-face
+             * winding to CW; scripts (ken/texture.pss cube) emit CW quads */
+            glFrontFace(GL_CW);
             glCullFace((GLenum)c->mode);
             break;
         case GLCMD_LINEWIDTH:

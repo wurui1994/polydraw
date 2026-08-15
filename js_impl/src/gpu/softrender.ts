@@ -199,11 +199,20 @@ export class SoftRenderer {
         // A fragment shader that samples a sampler2D (e.g. blur passes after
         // glcapture) must get a texFn whenever the batch has a bound texture —
         // regardless of useTex (which only tracks glBindTexture for the legacy
-        // fixed-function color path). Mirrors C: the sampler binds tex_obj[tex].
-        const tex = b.tex >= 0 ? (u: number, v: number) => {
-          const t = this.sampleTex(b.tex, u, v);
-          return t ?? [0, 0, 0];
-        } : null;
+        // fixed-function color path). Mirrors C: samplers named texN bind unit
+        // N (polydraw.c:1064), and each unit samples the texture bound to it
+        // by glactivetexture(GL_TEXTURE0+N)+glbindtexture(id).
+        const units = b.texUnits ?? null;
+        const tex = units
+          ? (unit: number, u: number, v: number) => {
+            const tid = units[unit] ?? units[0];
+            const t = tid >= 0 ? this.sampleTex(tid, u, v) : null;
+            return t ?? [0, 0, 0];
+          }
+          : b.tex >= 0 ? (unit: number, u: number, v: number) => {
+            const t = this.sampleTex(b.tex, u, v);
+            return t ?? [0, 0, 0];
+          } : null;
         try {
           const rc = entry.prog.run(gv, tex, entry.vmap, b.uniforms as never, vr ?? undefined);
           if (process.env.PD_DEBUG_GLSL) {
@@ -257,9 +266,14 @@ export class SoftRenderer {
   private captureToTex(id: number): void {
     const w = this.opt.width, h = this.opt.height;
     const data = new Float32Array(w * h * 3);
-    // Capture buffer is stored top-down (row 0 = NDC y=+1); texels use the
-    // same orientation, so sampling keeps t aligned with the drawn scene.
-    data.set(this.capBuf ?? this.img);
+    // capBuf is top-down (row 0 = NDC y=+1) but GL textures are bottom-up
+    // (row 0 = NDC y=-1) — glReadPixels/glCopyTexImage2D in the C renderer
+    // upload in GL orientation. Flip rows so sampling parity holds.
+    const src = this.capBuf ?? this.img;
+    for (let y = 0; y < h; y++) {
+      const srow = (h - 1 - y) * w * 3, drow = y * w * 3;
+      for (let x = 0; x < w * 3; x++) data[drow + x] = src[srow + x];
+    }
     this.tex.set(id, { w, h, data });
     // Restore the main framebuffer as the render target.
     this.target = this.img;
