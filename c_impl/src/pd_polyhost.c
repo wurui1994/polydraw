@@ -171,5 +171,6 @@ void pd_polyhost_install(pd_Host *h, pd_PolyState *s) {
     pd_host_add_fn(h, "GLQUAD()",          hf_gl_noop, 0);
     pd_host_add_fn(h, "GLENABLE()",        hf_gl_noop, 0);
     pd_host_add_fn(h, "GLDISABLE()",       hf_gl_noop, 0);
+    pd_host_add_fn(h, "GLPOINTSIZE()",     hf_gl_noop, 0);
     pd_host_add_fn(h, "GLCLEAR()",         hf_gl_noop, 0);
 }

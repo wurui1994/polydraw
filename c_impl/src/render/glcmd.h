@@ -54,6 +54,7 @@ typedef enum {
     GLCMD_BLENDFUNC,     /* mode = sf<<16|df (encoded) */
     GLCMD_CULLFACE,      /* mode = face */
     GLCMD_LINEWIDTH,     /* a = width */
+    GLCMD_POINTSIZE,     /* a = size (gl_PointSize for GL_POINTS) */
 
     /* textures & capture (added in the texture milestone) */
     GLCMD_SETTEXDATA,    /* a=tex, b=w, c=h, d=z, mode=colmode, s=pixels */

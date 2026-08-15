@@ -99,6 +99,8 @@ static double rh_glQuad(pd_Host *h, int n, const double *a) { (void)h;(void)n;
     GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_QUAD; c->a=n>=1?a[0]:0;} return 0; }
 static double rh_glLineWidth(pd_Host *h, int n, const double *a) { (void)h;(void)n;
     GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_LINEWIDTH; c->a=n>=1?a[0]:1;} return 0; }
+static double rh_glPointSize(pd_Host *h, int n, const double *a) { (void)h;(void)n;
+    GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_POINTSIZE; c->a=n>=1?a[0]:1;} return 0; }
 static double rh_glCullFace(pd_Host *h, int n, const double *a) { (void)h;(void)n;
     GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_CULLFACE; c->mode=(int)(n>=1?a[0]:0);} return 0; }
 
@@ -150,6 +152,7 @@ void pd_polyhost_install_render(pd_Host *h, pd_PolyState *s, GLCmdBuf *glbuf) {
         else if (strcmp(nm,"GLDISABLE")==0)      h->fns[i].fn = rh_glDisable;
         else if (strcmp(nm,"GLQUAD")==0)         h->fns[i].fn = rh_glQuad;
         else if (strcmp(nm,"GLLINEWIDTH")==0)    h->fns[i].fn = rh_glLineWidth;
+        else if (strcmp(nm,"GLPOINTSIZE")==0)    h->fns[i].fn = rh_glPointSize;
         else if (strcmp(nm,"GLCULLFACE")==0)     h->fns[i].fn = rh_glCullFace;
     }
     /* GL_ constants */

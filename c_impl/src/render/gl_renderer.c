@@ -150,6 +150,7 @@ static void mat4_lookat(double out[16], double ex, double ey, double ez,
 static const char *VERT_PREFIX =
     "#version 330 core\n"
     "uniform mat4 u_mvp;\n"
+    "uniform float u_pointsize;\n"
     "layout(location=0) in vec4 a_vertex;\n"
     "layout(location=1) in vec4 a_color;\n"
     "layout(location=2) in vec4 a_texcoord;\n"
@@ -199,6 +200,11 @@ static char *adapt_vertex(const char *src)
     if (!s) return NULL;
     t = str_replace_all(s, "gl_Normal", "a_normal"); free(s);
     if (!t) return NULL;
+    /* declare gl_PointSize from the u_pointsize uniform so GL_POINTS honor
+     * glPointSize(); inject it at the top of the user's main(). */
+    s = str_replace_all(t, "void main()", "void main()\n{ gl_PointSize = u_pointsize;"); free(t);
+    if (!s) return NULL;
+    t = s;
     size_t len = strlen(t);
     char *out = malloc(strlen(VERT_PREFIX) + len + 1);
     if (!out) { free(t); return NULL; }
@@ -258,6 +264,7 @@ struct pd_GLRenderer {
 
     GLuint program;
     GLuint u_mvp;
+    GLuint u_pointsize;
     GLuint vao, vbo;
     GLuint fbo, rbo_color, rbo_depth;
 
@@ -317,6 +324,7 @@ struct pd_GLRenderer {
     /* GL state mirrors */
     int depth_test_enabled;
     int blend_enabled;
+    float point_size;       /* gl_PointSize for GL_POINTS (1.0 = default) */
 
     /* shader uniform-name table (filled by GLCMD_UNIFORMLOC, resolved
      * lazily against the current program on GLCMD_UNIFORM) */
@@ -534,6 +542,8 @@ static void flush_batch(pd_GLRenderer *rd)
     } else {
         glUniformMatrix4fv(rd->u_mvp, 1, GL_FALSE, rd->batch_mvp_f);
     }
+    if (rd->u_pointsize >= 0)
+        glUniform1f(rd->u_pointsize, rd->point_size);
     glDrawArrays((GLenum)rd->batch_prim, 0, (GLsizei)n);
     rd->stat_draws++;
     rd->batch_prim = -1;
@@ -627,6 +637,16 @@ static void end_primitive(pd_GLRenderer *rd)
         return;
     }
 
+    /* GL_POINTS: each captured vertex is one point. */
+    if (rd->mode == PDGL_POINTS) {
+        size_t n = rd->nverts;
+        rd->mode = -1;
+        rd->nverts = 0;
+        if (n == 0) return;
+        batch_append(rd, GL_POINTS, rd->verts, n);
+        return;
+    }
+
     /* tessellate into the per-renderer scratch, then hand to the batch */
     rd->ntri = 0;
     rd->tris = tessellate(rd->tris, &rd->ntri, &rd->captri,
@@ -705,6 +725,8 @@ static void draw_quad(pd_GLRenderer *rd)
     glBufferData(GL_ARRAY_BUFFER, sizeof(tris), tris, GL_STREAM_DRAW);
     glBindVertexArray(rd->vao);
     glUniformMatrix4fv(rd->u_mvp, 1, GL_FALSE, ident_f);
+    if (rd->u_pointsize >= 0)
+        glUniform1f(rd->u_pointsize, rd->point_size);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
 }
@@ -779,6 +801,7 @@ pd_GLRenderer *pd_gl_renderer_create_ex(int w, int h, double fovy, int own_offsc
     static const char *PVERT =
         "#version 330 core\n"
         "uniform mat4 u_mvp;\n"
+        "uniform float u_pointsize;\n"
         "layout(location=0) in vec4 a_vertex;\n"
         "layout(location=1) in vec4 a_color;\n"
         "layout(location=2) in vec4 a_texcoord;\n"
@@ -787,6 +810,7 @@ pd_GLRenderer *pd_gl_renderer_create_ex(int w, int h, double fovy, int own_offsc
         "void main() {\n"
         "   gl_Position = u_mvp * a_vertex;\n"
         "   c = a_color;\n"
+        "   gl_PointSize = u_pointsize;\n"
         "}\n";
     static const char *PFRAG =
         "#version 330 core\n"
@@ -800,6 +824,7 @@ pd_GLRenderer *pd_gl_renderer_create_ex(int w, int h, double fovy, int own_offsc
         return NULL;
     }
     rd->u_mvp = glGetUniformLocation(rd->program, "u_mvp");
+    rd->u_pointsize = glGetUniformLocation(rd->program, "u_pointsize");
 
     /* alpha semantics identical to the reference: RGB overwrite (src=ONE,
      * dst=ZERO), alpha accumulates as max(src,dst) — that is blend
@@ -809,6 +834,9 @@ pd_GLRenderer *pd_gl_renderer_create_ex(int w, int h, double fovy, int own_offsc
     glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ONE, GL_ONE);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
+    glEnable(GL_PROGRAM_POINT_SIZE);   /* honor gl_PointSize from vertex shaders */
+
+    rd->point_size = 1.0f;
 
     return rd;
 }
@@ -832,6 +860,7 @@ void pd_gl_renderer_set_shaders(pd_GLRenderer *rd,
             glDeleteProgram(rd->program);
             rd->program = prog;
             rd->u_mvp = glGetUniformLocation(rd->program, "u_mvp");
+            rd->u_pointsize = glGetUniformLocation(rd->program, "u_pointsize");
         }
     }
     /* Enable CPU MVP-baking only for shaders that never touch gl_Vertex as an
@@ -1023,6 +1052,10 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
         case GLCMD_LINEWIDTH:
             flush_batch(rd);
             glLineWidth((GLfloat)c->a);
+            break;
+        case GLCMD_POINTSIZE:
+            flush_batch(rd);
+            rd->point_size = (float)c->a;
             break;
 
         /* ---- shaders, uniforms, matrices, textures, capture ---- */
