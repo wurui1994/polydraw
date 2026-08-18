@@ -1,0 +1,30 @@
+// Translated from: shader/offscreen.c
+// Renders a quad, captures the framebuffer into a texture, then draws a foreground
+// quad textured with that capture. pss has no FBO/pbuffer API; glcapture() /
+// glcaptureend(id) grab the current framebuffer into a texture id, which is the
+// closest analogue.
+//
+// NOTE: FBO/pbuffer off-screen rendering is not exposed; glcapture() grabs the
+// default framebuffer. See NOT_SUPPORTED.md.
+
+setfov(45);
+glTranslate(0, 0, -3);
+
+// --- capture pass: record what we draw now into texture id 2 ---
+glcapture();
+glColor(1, 0.5, 0.2);
+glBegin(GL_QUADS);
+glVertex(-1, -1, 0); glVertex(1, -1, 0); glVertex(1, 1, 0); glVertex(-1, 1, 0);
+glEnd();
+glcaptureend(2);
+
+// --- draw foreground quad textured with the captured image ---
+glactivetexture(GL_TEXTURE0 + 0);
+glbindtexture(2);
+glColor(1, 1, 1);
+glBegin(GL_QUADS);
+glTexCoord(0, 0); glVertex(-0.8, -0.8, 0.01);
+glTexCoord(1, 0); glVertex( 0.8, -0.8, 0.01);
+glTexCoord(1, 1); glVertex( 0.8,  0.8, 0.01);
+glTexCoord(0, 1); glVertex(-0.8,  0.8, 0.01);
+glEnd();

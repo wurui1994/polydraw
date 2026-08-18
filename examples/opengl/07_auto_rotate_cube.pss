@@ -1,0 +1,33 @@
+// Translated from: basic/keyrotate.c
+// Originally a cube rotated by arrow keys (glutSpecialFunc -> keystatus).
+// pss currently has NO keyboard input access from scripts (keystatus[] array
+// access is not wired up — see NOT_SUPPORTED.md), so this version auto-rotates
+// about Y with klock(). The interactive key-to-angle mapping cannot be ported.
+
+
+setfov(45);
+
+glPushMatrix();
+glTranslate(0, 0, -5);
+glRotate(klock() * 45, 0, 1, 0);   // auto rotate, replaces key-driven angle
+
+glColor(0.7, 0.7, 0.7);
+// wire-frame box (glutWireCube has no pss equivalent, build it from edges)
+hx = 0.5; hy = 0.5; hz = 0.5;
+// bottom face
+glBegin(GL_LINE_STRIP);
+glVertex(-hx, -hy, -hz); glVertex( hx, -hy, -hz); glVertex( hx,  hy, -hz); glVertex(-hx,  hy, -hz); glVertex(-hx, -hy, -hz);
+glEnd();
+// top face
+glBegin(GL_LINE_STRIP);
+glVertex(-hx, -hy,  hz); glVertex( hx, -hy,  hz); glVertex( hx,  hy,  hz); glVertex(-hx,  hy,  hz); glVertex(-hx, -hy,  hz);
+glEnd();
+// vertical edges
+glBegin(GL_LINES);
+glVertex(-hx, -hy, -hz); glVertex(-hx, -hy,  hz);
+glVertex( hx, -hy, -hz); glVertex( hx, -hy,  hz);
+glVertex( hx,  hy, -hz); glVertex( hx,  hy,  hz);
+glVertex(-hx,  hy, -hz); glVertex(-hx,  hy,  hz);
+glEnd();
+
+glPopMatrix();

@@ -1,0 +1,29 @@
+// Translated from: glaux/transform.c
+// A wire-frame cube animated by a rotate -> translate -> rotate transform chain.
+// Original used auxWireCube (GLU/glaux geometry); pss builds the box edges
+// manually. gluPerspective is replaced by setfov().
+
+
+setfov(45);
+
+glPushMatrix();
+glRotate(45.0, 0, 1, 0);     // rot1
+glRotate(45.0, 1, 0, 0);     // rot2
+glTranslate(0, 0, -5);     // push into view
+
+hx = 0.5; hy = 0.5; hz = 0.5;
+glColor(0.7, 0.7, 0.7);
+// bottom + top faces
+glBegin(GL_LINE_STRIP);
+glVertex(-hx, -hy, -hz); glVertex( hx, -hy, -hz); glVertex( hx,  hy, -hz); glVertex(-hx,  hy, -hz); glVertex(-hx, -hy, -hz);
+glEnd();
+glBegin(GL_LINE_STRIP);
+glVertex(-hx, -hy,  hz); glVertex( hx, -hy,  hz); glVertex( hx,  hy,  hz); glVertex(-hx,  hy,  hz); glVertex(-hx, -hy,  hz);
+glEnd();
+glBegin(GL_LINES);
+glVertex(-hx, -hy, -hz); glVertex(-hx, -hy,  hz);
+glVertex( hx, -hy, -hz); glVertex( hx, -hy,  hz);
+glVertex( hx,  hy, -hz); glVertex( hx,  hy,  hz);
+glVertex(-hx,  hy, -hz); glVertex(-hx,  hy,  hz);
+glEnd();
+glPopMatrix();

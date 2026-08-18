@@ -1,0 +1,33 @@
+// Translated from: picture/readbmp.c / picture/soiljpg.c / picture/bmpinfo.c
+//
+// NOT SUPPORTED (image file decoding): these examples load BMP / JPG files from
+// disk (ReadBMP, SOIL_load_OGL_texture, BitMapFileHeader parsing) and upload them
+// with glTexImage2D. pss has no file access and no BMP/JPG decoder — textures
+// can only be created procedurally via glsettex(). So none of the file-based
+// texture loading can be ported. See NOT_SUPPORTED.md.
+//
+// As a stand-in, a procedural checkerboard texture is shown instead.
+
+if (numframes == 0) {
+    enum { SIZ = 64 }; static buf[SIZ][SIZ];
+    for (y = 0; y < SIZ; y++) for (x = 0; x < SIZ; x++) {
+        cx = int(x / 8) % 2;
+        cy = int(y / 8) % 2;
+        if (cx == cy) buf[y][x] = 0x40000000 + 0x003000d0;   // red-ish
+        else          buf[y][x] = 0x40000000 + 0x00d00030;   // blue-ish
+    }
+    glsettex(0, buf, SIZ, SIZ, KGL_BGRA32);
+}
+
+
+setfov(45);
+glTranslate(0, 0, -3);
+
+glactivetexture(GL_TEXTURE0 + 0);
+glbindtexture(0);
+glBegin(GL_QUADS);
+glTexCoord(0, 0); glVertex(-0.9, -0.9, 0);
+glTexCoord(1, 0); glVertex( 0.9, -0.9, 0);
+glTexCoord(1, 1); glVertex( 0.9,  0.9, 0);
+glTexCoord(0, 1); glVertex(-0.9,  0.9, 0);
+glEnd();

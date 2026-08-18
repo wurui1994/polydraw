@@ -1,0 +1,18 @@
+// Translated from: basic/fivecircle.c
+// Five concentric circles drawn with GL_LINE_LOOP. Original used gluOrtho2D
+// (-200..200) and a loop of 60 segments; pss keeps the perspective camera and
+// emits unit circles scaled by radius r.
+
+
+setfov(45);
+
+for (i = 1; i <= 5; i = i + 1) {
+    r = i * 0.18;                  // 5 concentric rings
+    glColor(0, 0, 1);             // blue
+    glBegin(GL_LINE_STRIP);        // LINE_LOOP unsupported by renderer; close manually
+    for (j = 0; j <= 60; j = j + 1) {
+        t = j * 2 * PI / 60;
+        glVertex(cos(t) * r, sin(t) * r, -3);
+    }
+    glEnd();
+}

@@ -1,0 +1,17 @@
+// Translated from: curve/curve.c
+// A parametric curve drawn with GL_LINE_STRIP.
+//   x = 2 cos(t) + 0.8 cos(3t) ; y = 2 sin(t) + 0.8 sin(3t)
+
+
+setfov(45);
+glTranslate(0, 0, -6);
+
+glColor(0, 0, 1);
+glBegin(GL_LINE_STRIP);
+for (i = 0; i <= 200; i = i + 1) {
+    t = i * 2 * PI / 200;
+    x = 2 * cos(t) + 0.8 * cos(3 * t);
+    y = 2 * sin(t) + 0.8 * sin(3 * t);
+    glVertex(x, y, 0);
+}
+glEnd();

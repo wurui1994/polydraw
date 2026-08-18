@@ -1,0 +1,24 @@
+// Translated from: mesh/surface.c
+//
+// NOT SUPPORTED (GLU geometry): the original draws cylinders, spheres and disks
+// via gluCylinder / gluSphere / gluDisk / gluNewQuadric. pss has no GLU quadric
+// objects, so none of these primitives can be emitted. A wire sphere (the
+// closest analogue) is shown below as a stand-in; the cylinder and disk parts
+// are dropped. See NOT_SUPPORTED.md.
+
+
+setfov(45);
+glTranslate(0, 0, -4);
+
+R = 1.0; segs = 40; rings = 20;
+for (lat = 0; lat <= rings; lat = lat + 1) {
+    phi = lat * PI / rings - PI/2;
+    y = R * sin(phi); rr = R * cos(phi);
+    glColor(0.3, 0.8, 1.0);
+    glBegin(GL_LINE_STRIP);
+    for (lon = 0; lon <= segs; lon = lon + 1) {
+        th = lon * 2 * PI / segs;
+        glVertex(rr * cos(th), y, rr * sin(th));
+    }
+    glEnd();
+}

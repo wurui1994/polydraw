@@ -1,0 +1,23 @@
+// Translated from: curve/axis.c + curve/grid.c
+// Draws X/Y/Z axes and a background reference grid using GL_LINES.
+
+
+setfov(45);
+glTranslate(0, 0, -6);
+
+// grid (z=0 plane)
+glColor(0.8, 0.8, 0.8);
+glBegin(GL_LINES);
+for (i = -5; i <= 5; i = i + 1) {
+    glVertex(i, -5, 0); glVertex(i, 5, 0);
+    glVertex(-5, i, 0); glVertex(5, i, 0);
+}
+glEnd();
+
+// axes
+glColor(1, 0, 0);   // X red
+glBegin(GL_LINES); glVertex(-5,0,0); glVertex(5,0,0); glEnd();
+glColor(0, 1, 0);   // Y green
+glBegin(GL_LINES); glVertex(0,-5,0); glVertex(0,5,0); glEnd();
+glColor(0, 0, 1);   // Z blue
+glBegin(GL_LINES); glVertex(0,0,-5); glVertex(0,0,5); glEnd();

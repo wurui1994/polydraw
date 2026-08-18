@@ -1,0 +1,26 @@
+// Translated from: curve/curve+grid.c
+// A parametric curve overlaid on a reference grid.
+
+
+setfov(45);
+glTranslate(0, 0, -6);
+
+// grid
+glColor(0.85, 0.85, 0.85);
+glBegin(GL_LINES);
+for (i = -5; i <= 5; i = i + 1) {
+    glVertex(i, -5, 0); glVertex(i, 5, 0);
+    glVertex(-5, i, 0); glVertex(5, i, 0);
+}
+glEnd();
+
+// curve
+glColor(1, 0, 0);
+glBegin(GL_LINE_STRIP);
+for (i = 0; i <= 200; i = i + 1) {
+    t = i * 2 * PI / 200;
+    x = 1.8 * cos(t) + 0.6 * cos(3 * t);
+    y = 1.8 * sin(t) + 0.6 * sin(3 * t);
+    glVertex(x, y, 0.01);
+}
+glEnd();

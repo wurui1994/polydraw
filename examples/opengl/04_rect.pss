@@ -1,0 +1,13 @@
+// Translated from: basic/rect.c
+// Draws one red rectangle. Original used a 2D ortho projection
+// (gluOrtho2D(0,200,0,200)) and glRectf(50,50,150,150). pss has no glOrtho /
+// glRectf, so we keep the perspective camera and emit a GL_QUADS at z=-3.
+
+
+glColor(1, 0, 0);           // red
+glBegin(GL_QUADS);
+glVertex(-0.5,  0.5, -3);
+glVertex( 0.5,  0.5, -3);
+glVertex( 0.5, -0.5, -3);
+glVertex(-0.5, -0.5, -3);
+glEnd();

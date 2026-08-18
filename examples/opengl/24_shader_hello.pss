@@ -1,0 +1,39 @@
+// Translated from: shader/hello.c
+// A minimal GLSL program that tints the fragment by its varying color.
+// pss custom-shader syntax: @v vertex, @f fragment, glsetshader(0).
+// Uses the implicit built-ins (gl_Vertex / gl_Color / ftransform) — pss does
+// not accept modern `attribute`/`gl_ModelViewProjectionMatrix` declarations.
+// NOTE: pss has no glClear/glClearColor (renderer clears by default); see
+// NOT_SUPPORTED.md.
+
+setfov(45);
+glTranslate(0, 0, -3);
+
+glsetshader(0);
+
+// a red quad
+glColor(1, 0, 0);
+glBegin(GL_QUADS);
+glVertex(-0.8, -0.8, 0); glVertex(0.8, -0.8, 0); glVertex(0.8, 0.8, 0); glVertex(-0.8, 0.8, 0);
+glEnd();
+
+// a green quad on top
+glColor(0, 1, 0);
+glBegin(GL_QUADS);
+glVertex(-0.4, -0.4, 0.01); glVertex(0.4, -0.4, 0.01); glVertex(0.4, 0.4, 0.01); glVertex(-0.4, 0.4, 0.01);
+glEnd();
+
+@v
+varying vec4 v_color;
+void main(void)
+{
+    gl_Position = ftransform();
+    v_color = gl_Color;
+}
+
+@f
+varying vec4 v_color;
+void main(void)
+{
+    gl_FragColor = vec4(v_color.rgb * 0.8 + 0.2, 1.0);
+}

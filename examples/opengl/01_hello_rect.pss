@@ -1,0 +1,13 @@
+// Translated from: basic/opengl.c (and basic/center.c)
+// Draws a single white rectangle on a black background.
+// Original used glRectf(-0.5,-0.5,0.5,0.5) under a default perspective.
+// pss has no glRectf, so we emit the four corners as a GL_QUADS.
+
+
+glColor(1, 1, 1);
+glBegin(GL_QUADS);
+glVertex(-0.5, -0.5, -3);
+glVertex( 0.5, -0.5, -3);
+glVertex( 0.5,  0.5, -3);
+glVertex(-0.5,  0.5, -3);
+glEnd();

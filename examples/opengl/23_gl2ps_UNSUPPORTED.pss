@@ -1,0 +1,17 @@
+// Translated from: curve/gl2ps.c
+//
+// NOT SUPPORTED (vector export): the original uses the gl2ps library to capture
+// the GL framebuffer as an SVG/PS vector file. pss has no off-screen vector
+// export. (Raster capture exists via glcapture, but not vector.) See
+// NOT_SUPPORTED.md.
+
+
+setfov(45);
+glTranslate(0, 0, -6);
+glColor(0, 0, 1);
+glBegin(GL_LINE_STRIP);
+for (i = 0; i <= 200; i = i + 1) {
+    t = i * 2 * PI / 200;
+    glVertex(2 * cos(t), 2 * sin(t), 0);
+}
+glEnd();

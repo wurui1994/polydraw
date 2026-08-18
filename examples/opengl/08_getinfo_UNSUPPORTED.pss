@@ -1,0 +1,8 @@
+// Translated from: basic/getinfo.c
+//
+// NOT SUPPORTED (text output): the original prints GPU/driver info via
+// glGetString and printf. pss has no printg / text rendering (the host PRINTG
+// is a no-op TODO: GPU text). This example is therefore a stub that just clears
+// the screen — the informational text cannot be produced in pss.
+// See NOT_SUPPORTED.md.
+

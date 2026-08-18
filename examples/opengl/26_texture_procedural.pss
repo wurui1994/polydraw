@@ -1,0 +1,34 @@
+// Translated from: picture/texture.c
+// Original loads "1.bmp" from disk (LoadTexture -> glTexImage2D) and maps it onto
+// a quad. pss has NO file/image loading (no BMP/SOIL decode) — see
+// NOT_SUPPORTED.md. Instead we generate a procedural checkerboard texture in a
+// static buffer and upload it with glsettex(id, buf, w, h, KGL_BGRA32), so the
+// mapping pipeline (glsettex + glTexCoord) is demonstrated.
+
+// Procedural checkerboard texture generated once, uploaded every frame
+// (glsettex is an idempotent re-upload; keeping it outside the numframes==0
+// guard means the texture is present at any rendered frame, matching how the
+// C reference renders a single frame at frame N).
+enum { SIZ = 64 }; static buf[SIZ][SIZ];
+if (numframes == 0) {
+    for (y = 0; y < SIZ; y++) for (x = 0; x < SIZ; x++) {
+        cx = int(x / 8) % 2;
+        cy = int(y / 8) % 2;
+        if (cx == cy) buf[y][x] = 0x40404040 + 0x00e0e000;   // yellow-ish
+        else          buf[y][x] = 0x40000000 + 0x009000d0;   // blue-ish
+    }
+}
+glsettex(0, &buf, SIZ, SIZ, KGL_BGRA32);
+
+
+setfov(45);
+glTranslate(0, 0, -3);
+
+glactivetexture(GL_TEXTURE0 + 0);
+glbindtexture(0);
+glBegin(GL_QUADS);
+glTexCoord(0, 0); glVertex(-0.9, -0.9, 0);
+glTexCoord(1, 0); glVertex( 0.9, -0.9, 0);
+glTexCoord(1, 1); glVertex( 0.9,  0.9, 0);
+glTexCoord(0, 1); glVertex(-0.9,  0.9, 0);
+glEnd();

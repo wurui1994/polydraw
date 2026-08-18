@@ -1,0 +1,33 @@
+// Translated from: curve/curve2.c
+// Three curves in different colors using GL_LINE_STRIP.
+
+
+setfov(45);
+glTranslate(0, 0, -6);
+
+// curve 1
+glColor(1, 0, 0);
+glBegin(GL_LINE_STRIP);
+for (i = 0; i <= 200; i = i + 1) {
+    t = i * 2 * PI / 200;
+    glVertex(2 * cos(t), 2 * sin(t) - 1.5, 0);
+}
+glEnd();
+
+// curve 2
+glColor(0, 1, 0);
+glBegin(GL_LINE_STRIP);
+for (i = 0; i <= 200; i = i + 1) {
+    t = i * 2 * PI / 200;
+    glVertex(1.2 * cos(t) + 0.5 * cos(4 * t), 1.2 * sin(t) - 1.5, 0);
+}
+glEnd();
+
+// curve 3
+glColor(0, 0, 1);
+glBegin(GL_LINE_STRIP);
+for (i = 0; i <= 200; i = i + 1) {
+    t = i * 2 * PI / 200;
+    glVertex(1.5 * cos(t), 1.5 * sin(t) + 1.5, 0);
+}
+glEnd();

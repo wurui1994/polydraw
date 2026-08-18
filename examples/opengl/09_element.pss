@@ -1,0 +1,33 @@
+// Translated from: glaux/element.c
+// Demonstrates GL_POINTS / GL_LINES / GL_LINE_LOOP / GL_POLYGON primitives.
+
+
+setfov(45);
+glTranslate(0, 0, -4);
+
+// points
+glColor(1, 0, 0);
+glBegin(GL_POINTS);
+glVertex(-0.8, 0.6, 0);
+glVertex(-0.7, 0.6, 0);
+glVertex(-0.6, 0.6, 0);
+glEnd();
+
+// lines
+glColor(0, 0, 1);
+glBegin(GL_LINES);
+glVertex(-0.8, 0.3, 0); glVertex(-0.6, 0.5, 0);
+glVertex(-0.6, 0.3, 0); glVertex(-0.8, 0.5, 0);
+glEnd();
+
+// line loop
+glColor(0, 1, 0);
+glBegin(GL_LINE_STRIP);
+glVertex(0.3, 0.3, 0); glVertex(0.6, 0.3, 0); glVertex(0.6, 0.6, 0); glVertex(0.3, 0.6, 0); glVertex(0.3, 0.3, 0);
+glEnd();
+
+// polygon
+glColor(1, 0.5, 0);
+glBegin(GL_POLYGON);
+glVertex(0.3, -0.4, 0); glVertex(0.6, -0.4, 0); glVertex(0.7, -0.1, 0); glVertex(0.45, 0.0, 0); glVertex(0.2, -0.1, 0);
+glEnd();

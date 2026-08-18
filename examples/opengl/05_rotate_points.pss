@@ -1,0 +1,22 @@
+// Translated from: basic/rotate.c
+// Three points rotating about the (1,1,1) axis. Original accumulated an angle
+// via a glut timer; pss uses klock() for deterministic time.
+//
+// glPointSize(4) makes the three points more visible as they rotate.
+
+
+setfov(45);
+
+glPushMatrix();
+glTranslate(0, 0, -7);
+glRotate(klock() * 60, 1, 1, 1);   // ~60 deg/sec about (1,1,1)
+
+glColor(0, 1, 1);
+glPointSize(4);
+glBegin(GL_POINTS);
+glVertex( 1,  1, -1);
+glVertex(-1,  1, -1);
+glVertex(-1,  1,  1);
+glEnd();
+
+glPopMatrix();

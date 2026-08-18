@@ -1,0 +1,34 @@
+// Translated from: mesh/sphere.c  (and mesh/drawsphere.cpp)
+// A wire-frame sphere built from latitude/longitude rings using GL_LINE_LOOP.
+// Original used gluSphere (GLU geometry); pss constructs it from line loops.
+
+
+setfov(45);
+glTranslate(0, 0, -4);
+
+R = 1.0;
+segs = 40;
+rings = 20;
+for (lat = 0; lat <= rings; lat = lat + 1) {
+    phi = lat * PI / rings - PI/2;     // -90..90
+    y = R * sin(phi);
+    rr = R * cos(phi);
+    glColor(0.3, 0.8, 1.0);
+    glBegin(GL_LINE_STRIP);        // LINE_LOOP unsupported; close manually
+    for (lon = 0; lon <= segs; lon = lon + 1) {
+        th = lon * 2 * PI / segs;
+        glVertex(rr * cos(th), y, rr * sin(th));
+    }
+    glEnd();
+}
+// a few longitude loops
+for (lon = 0; lon < 12; lon = lon + 1) {
+    th = lon * 2 * PI / 12;
+    glColor(0.3, 0.8, 1.0);
+    glBegin(GL_LINE_STRIP);        // LINE_LOOP unsupported; close manually
+    for (i = 0; i <= rings*2 + 1; i = i + 1) {
+        phi = i * PI / (rings*2) - PI/2;
+        glVertex(R * cos(phi) * cos(th), R * sin(phi), R * cos(phi) * sin(th));
+    }
+    glEnd();
+}

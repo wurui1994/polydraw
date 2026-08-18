@@ -1,0 +1,19 @@
+// Translated from: glaux/example.c
+//
+// NOT SUPPORTED (glOrtho): the original set up an orthographic 2D projection
+// (glOrtho(-200,200,-200,200,-200,200)) and a perspective-free viewport so that
+// GL_LINES drawn in raw pixel coordinates map 1:1. pss exposes no glOrtho (and
+// under modern GL/WebGL there is no legacy projection matrix to call), so an
+// exact pixel-space port is not possible. As a stand-in this draws the same
+// shape through the perspective camera at z=-3. Also note PRINTG (the original
+// printed "OpenGL" via wglUseFontBitmaps) is unsupported — see NOT_SUPPORTED.md.
+
+
+setfov(45);
+glTranslate(0, 0, -3);
+
+glColor(1, 0, 0);
+glBegin(GL_LINES);
+glVertex(-0.8, -0.8, 0); glVertex(0.8, 0.8, 0);
+glVertex(0.8, -0.8, 0);  glVertex(-0.8, 0.8, 0);
+glEnd();

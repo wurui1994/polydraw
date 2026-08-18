@@ -1,0 +1,7 @@
+// Translated from: curve/text.c
+//
+// NOT SUPPORTED (bitmap font text): the original renders text "Hello" using
+// wglUseFontBitmaps / glRasterPos. pss has no font/bitmap text rendering
+// (PRINTG is a no-op TODO: GPU text). This stub just clears the screen.
+// See NOT_SUPPORTED.md.
+

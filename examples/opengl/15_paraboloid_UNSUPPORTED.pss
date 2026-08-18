@@ -1,0 +1,34 @@
+// Translated from: mesh/paraboloid.c
+//
+// PARTIALLY SUPPORTED: the paraboloid surface itself is drawn fine (quad grid),
+// but the original clips it with glClipPlane + glEnable(GL_CLIP_PLANE0/1).
+// pss has NO glClipPlane and NO GL_CLIP_PLANE* enable, so the clipping half-space
+// cannot be expressed — the full surface is drawn instead. See NOT_SUPPORTED.md.
+// Below is the un-clipped paraboloid.
+
+
+setfov(45);
+glRotate(35, 1, 0, 0);
+glTranslate(0, 0, -6);
+
+n = 24;
+step = 0.25;
+for (i = 0; i < n; i = i + 1) {
+    for (j = 0; j < n; j = j + 1) {
+        x0 = (i - n/2) * step;
+        y0 = (j - n/2) * step;
+        x1 = x0 + step;
+        y1 = y0 + step;
+        z00 = (x0*x0 + y0*y0) * 0.08;
+        z10 = (x1*x1 + y0*y0) * 0.08;
+        z11 = (x1*x1 + y1*y1) * 0.08;
+        z01 = (x0*x0 + y1*y1) * 0.08;
+        glColor(0.6, 0.5, 0.3, 1);
+        glBegin(GL_QUADS);
+        glVertex(x0, z00, y0);
+        glVertex(x1, z10, y0);
+        glVertex(x1, z11, y1);
+        glVertex(x0, z01, y1);
+        glEnd();
+    }
+}

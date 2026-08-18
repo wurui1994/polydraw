@@ -1,0 +1,12 @@
+// Translated from: basic/point.c
+// Draws a single point at the origin.
+//
+// The original used glPointSize(9) to make the point 9px. pss supports
+// glPointSize() so the dot is drawn at the requested size.
+
+
+glColor(1, 0, 0);
+glPointSize(9);
+glBegin(GL_POINTS);
+glVertex(0, 0, -3);
+glEnd();
