@@ -26,6 +26,7 @@ extern "C" {
 typedef struct pd_GLRenderer pd_GLRenderer;
 
 #ifdef __APPLE__
+#define GL_SILENCE_DEPRECATION
 #  include <OpenGL/gl.h>
 #else
 #  include <GL/gl.h>
