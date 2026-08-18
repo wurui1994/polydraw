@@ -52,15 +52,22 @@ CFLAGS  = -std=c11 -Wall -Wextra -Wno-unused-function -Wno-unused-parameter \
 LDFLAGS = -lm $(LLVM_LIBS)
 
 SRC_EVAL = src/eval/pd_ir.c src/eval/pd_interp.c src/eval/pd_lexer.c \
+           src/eval/pd_preproc.c \
            src/eval/pd_parser.c src/eval/parser-fold.c src/eval/pd_compile.c \
+           src/eval/pd_optimize.c \
            src/eval/pd_host.c \
            src/eval/pd_section.c $(SRC_JIT)
 SRC_POLY = src/pd_polyhost.c
 SRC_RENDER = src/render/glcmd.c src/render/pd_polyhost_render.c src/render/pd_polyhost_tex.c src/render/pd_runlib.c
 SRC_GL = src/render/gl_offscreen.c src/render/gl_renderer.c
 
+# EvalDraw software-rendering host (no GL dependency)
+SRC_EVALDRAW = src/eval_impl/ed_host.c src/eval_impl/ed_util.c \
+              src/eval_impl/ed_draw.c src/eval_impl/ed_misc.c \
+              src/eval_impl/ed_runlib.c
+
 TESTS = build/test_interp build/test_lexer build/test_compile build/test_host build/test_fold build/test_section build/test_render build/test_jit
-TOOLS = build/polydraw-eval build/polydraw-render build/polydraw-view
+TOOLS = build/polydraw-eval build/polydraw-render build/polydraw-view build/evaldraw build/evaldraw-view build/pd-imgdecode
 
 # macOS uses .dylib, Linux .so
 ifeq ($(shell uname -s),Darwin)
@@ -141,6 +148,11 @@ build/polydraw-render: src/render_main.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $
 	$(CC) $(CFLAGS) -Isrc/render -Ithird_party -o $@ src/render_main.c \
 	    $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) $(LDFLAGS) $(GLLIBS)
 
+# Image decoder: decodes JPEG/PNG/BMP to PPM using stb_image (same decoder as
+# the C renderer) so the JS softrender can load identical pixels.
+build/pd-imgdecode: src/imgdecode_main.c third_party/stb_image.h | build
+	$(CC) $(CFLAGS) -Ithird_party -o $@ src/imgdecode_main.c $(LDFLAGS)
+
 # Interactive GLFW window viewer: same pipeline as polydraw-render but
 # driven live (M8: window GUI). Blits the offscreen FBO onto the window.
 build/polydraw-view: src/view_main.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) \
@@ -169,6 +181,24 @@ build/phaseprof: tools/phaseprof.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_G
 build/winprobe: tools/winprobe.c $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) | build
 	$(CC) $(CFLAGS) $(GLFWINC) -Isrc -Isrc/eval -Isrc/render -o $@ tools/winprobe.c \
 	    $(SRC_EVAL) $(SRC_POLY) $(SRC_RENDER) $(SRC_GL) $(LDFLAGS) $(GLLIBS) $(GLFWLIB)
+
+# EvalDraw: .kc script → software framebuffer → PNG (no GL needed)
+build/evaldraw: src/eval_impl/ed_main.c $(SRC_EVAL) $(SRC_EVALDRAW) \
+                src/eval_impl/ed_host.h src/eval_impl/ed_internal.h \
+                src/eval_impl/ed_runlib.h third_party/stb_image_write.h | build
+	$(CC) $(CFLAGS) -o $@ src/eval_impl/ed_main.c $(SRC_EVAL) $(SRC_EVALDRAW) $(LDFLAGS)
+
+# EvalDraw interactive viewer: .kc → software framebuffer → GLFW window
+build/evaldraw-view: src/eval_impl/ed_view.c $(SRC_EVAL) $(SRC_EVALDRAW) \
+                     src/eval_impl/ed_host.h src/eval_impl/ed_internal.h \
+                     src/eval_impl/ed_runlib.h third_party/stb_image_write.h | build
+	$(CC) $(CFLAGS) $(GLFWINC) -DGL_SILENCE_DEPRECATION -o $@ src/eval_impl/ed_view.c $(SRC_EVAL) $(SRC_EVALDRAW) $(LDFLAGS) $(GLFWLIB) $(GLLIBS)
+
+# EvalDraw test suite
+build/ed_test: src/eval_impl/ed_test.c $(SRC_EVAL) $(SRC_EVALDRAW) \
+               src/eval_impl/ed_host.h src/eval_impl/ed_internal.h \
+               src/eval_impl/ed_runlib.h third_party/stb_image_write.h | build
+	$(CC) $(CFLAGS) -o $@ src/eval_impl/ed_test.c $(SRC_EVAL) $(SRC_EVALDRAW) $(LDFLAGS)
 
 test: $(TESTS)
 	@for t in $(TESTS); do echo "=== $$t ==="; $$t || exit 1; done

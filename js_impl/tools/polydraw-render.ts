@@ -89,7 +89,7 @@ function decodeImage(file: string): { w: number; h: number; rgb: number[] } | nu
     const rgb: number[] = new Array(d.width * d.height);
     for (let i = 0; i < d.width * d.height; i++) {
       const r = d.rgb[i * 3], g = d.rgb[i * 3 + 1], b = d.rgb[i * 3 + 2];
-      rgb[i] = (0xff << 24) | (b << 16) | (g << 8) | r; // 0xAABBGGRR
+      rgb[i] = ((0xff << 24) | (r << 16) | (g << 8) | b) >>> 0; // 0xAARRGGBB (polydraw ARGB32)
     }
     return { w: d.width, h: d.height, rgb };
   } catch {

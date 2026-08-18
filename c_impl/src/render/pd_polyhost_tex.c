@@ -116,8 +116,10 @@ static void emit(pd_Host *h, GLCmdOp op, int mode, double a, double b, double c,
 
 /* ---- textures ---- */
 
-/* decode an image file into a BGRA32 double snapshot (one packed
- * 0xAABBGGRR double per texel). Returns 1 on success, 0 if not found. */
+/* decode an image file into an ARGB32 double snapshot (one packed
+ * 0xAARRGGBB double per texel — the original polydraw packs RGBA(,,,) this
+ * way and uploads with GL_BGRA/GL_UNSIGNED_BYTE, so image files and the
+ * RGBA() builtin share one layout). Returns 1 on success, 0 if not found. */
 static int decode_file(const char *file, int *w, int *h, double **out)
 {
     int ch = 0;
@@ -149,9 +151,9 @@ static int decode_file(const char *file, int *w, int *h, double **out)
     double *pix = malloc(n * sizeof(double));
     if (!pix) { stbi_image_free(px); return 0; }
     for (size_t i = 0; i < n; i++) {
-        unsigned char *q = px + i * 4;
-        unsigned int v = ((unsigned int)q[3] << 24) | ((unsigned int)q[2] << 16) |
-                         ((unsigned int)q[1] << 8) | q[0];
+        unsigned char *q = px + i * 4; /* stb loads RGBA */
+        unsigned int v = ((unsigned int)q[3] << 24) | ((unsigned int)q[0] << 16) |
+                         ((unsigned int)q[1] << 8) | q[2];
         pix[i] = (double)v;
     }
     stbi_image_free(px);

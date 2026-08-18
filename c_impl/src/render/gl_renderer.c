@@ -242,12 +242,16 @@ static char *adapt_fragment(const char *src)
     char *v = str_replace_all(u, "textureCube", "texture");
     free(u);
     if (!v) return NULL;
-    size_t len = strlen(v);
-    char *out = malloc(strlen(FRAG_PREFIX) + len + 1);
-    if (!out) { free(v); return NULL; }
-    strcpy(out, FRAG_PREFIX);
-    strcat(out, v);
+    /* texture3D -> texture (GLSL 330 core: texture() dispatches on sampler3D) */
+    char *w = str_replace_all(v, "texture3D", "texture");
     free(v);
+    if (!w) return NULL;
+    size_t len = strlen(w);
+    char *out = malloc(strlen(FRAG_PREFIX) + len + 1);
+    if (!out) { free(w); return NULL; }
+    strcpy(out, FRAG_PREFIX);
+    strcat(out, w);
+    free(w);
     return out;
 }
 
@@ -1125,6 +1129,10 @@ void pd_gl_renderer_set_shaders(pd_GLRenderer *rd,
     }
     if (va && fa) {
         GLuint prog = link_program(va, fa);
+        if (rd->dbg_gl) {
+            fprintf(stderr, "  set_shaders: prog=%u\n  VERT:\n%s\n  FRAG:\n%s\n",
+                    (unsigned)prog, va, fa);
+        }
         if (prog) {
             glDeleteProgram(rd->program);
             rd->program = prog;
@@ -1483,23 +1491,46 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
                         tex, w, h, c->mode, rd->active_unit);
             }
             const double *px = (const double *)c->s;
+            int z = (int)c->d;
+            if (rd->dbg_gl) {
+                fprintf(stderr, "  SETTEXDATA tex=%d %dx%dx%d mode=%d px=%p cnt=%lld px[0]=%.1f px[1]=%.1f px[%lld]=%.1f\n",
+                        tex, w, h, z, c->mode, (const void*)px,
+                        (long long)w * h * (z > 1 ? z : 1),
+                        px[0], px[1], (long long)w*h*z-1, px[w*h*z-1]);
+            }
             if (tex < 0 || tex >= REN_MAX_TEX || w < 1 || h < 1 || !px) break;
             if (!rd->tex_obj[tex]) glGenTextures(1, &rd->tex_obj[tex]);
             glActiveTexture(GL_TEXTURE0 + rd->active_unit);
             /* A vertical strip whose height is exactly 6× its width is a
              * cubemap (matches the reference: kglsettex detects xs*6==ys and
-             * switches to GL_TEXTURE_CUBE_MAP). Otherwise plain 2D. */
-            int cube = (w * 6 == h);
-            GLenum target = cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+             * switches to GL_TEXTURE_CUBE_MAP). A non-trivial z (>1) signals
+             * a 3D (volumetric) texture (ken/texture3d.pss). Otherwise 2D. */
+            int cube = (z <= 1) && (w * 6 == h);
+            int is3d = (z > 1);
+            GLenum target = cube ? GL_TEXTURE_CUBE_MAP
+                          : is3d ? GL_TEXTURE_3D : GL_TEXTURE_2D;
             rd->tex_tgt[tex] = target;
             glBindTexture(target, rd->tex_obj[tex]);
             /* packed 0xAABBGGRR → GL RGBA8 byte order */
             int nf = cube ? 6 : 1;
             int fw = w, fh = cube ? h / 6 : h;
-            unsigned char *bytes = malloc((size_t)fw * fh * 4);
+            size_t npix = is3d ? (size_t)fw * fh * z : (size_t)fw * fh;
+            unsigned char *bytes = malloc(npix * 4);
             if (!bytes) break;
             for (int f = 0; f < nf; f++) {
-                if (cube) {
+                if (is3d) {
+                    /* 3D texture: px is fw*fh*z doubles, laid out as
+                     * slice[z][y][x] in the same order the host script filled
+                     * it (ken/texture3d.pss writes voxels iterating iz
+                     * outermost, iy, then ix). */
+                    for (size_t p = 0; p < npix; p++) {
+                        unsigned int v = (unsigned int)(unsigned long long)px[p];
+                        bytes[p*4+0] = (unsigned char)((v >> 16) & 0xFF);
+                        bytes[p*4+1] = (unsigned char)((v >> 8) & 0xFF);
+                        bytes[p*4+2] = (unsigned char)(v & 0xFF);
+                        bytes[p*4+3] = (unsigned char)((v >> 24) & 0xFF);
+                    }
+                } else if (cube) {
                     /* faces are stored bottom-to-top in the strip */
                     int row = (5 - f) * fh;
                     for (int y = 0; y < fh; y++)
@@ -1507,21 +1538,24 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
                             size_t src = (size_t)(row + y) * w + x;
                             unsigned int v = (unsigned int)(unsigned long long)px[src];
                             size_t d = ((size_t)y * fw + x) * 4;
-                            bytes[d+0] = (unsigned char)(v & 0xFF);
+                            bytes[d+0] = (unsigned char)((v >> 16) & 0xFF);
                             bytes[d+1] = (unsigned char)((v >> 8) & 0xFF);
-                            bytes[d+2] = (unsigned char)((v >> 16) & 0xFF);
+                            bytes[d+2] = (unsigned char)(v & 0xFF);
                             bytes[d+3] = (unsigned char)((v >> 24) & 0xFF);
                         }
                 } else {
                     for (size_t p = 0; p < (size_t)fw * fh; p++) {
                         unsigned int v = (unsigned int)(unsigned long long)px[p];
-                        bytes[p*4+0] = (unsigned char)(v & 0xFF);
+                        bytes[p*4+0] = (unsigned char)((v >> 16) & 0xFF);
                         bytes[p*4+1] = (unsigned char)((v >> 8) & 0xFF);
-                        bytes[p*4+2] = (unsigned char)((v >> 16) & 0xFF);
+                        bytes[p*4+2] = (unsigned char)(v & 0xFF);
                         bytes[p*4+3] = (unsigned char)((v >> 24) & 0xFF);
                     }
                 }
-                if (cube) {
+                if (is3d) {
+                    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, fw, fh, z, 0, GL_RGBA,
+                                 GL_UNSIGNED_BYTE, bytes);
+                } else if (cube) {
                     static const GLenum faces[6] = {
                         GL_TEXTURE_CUBE_MAP_POSITIVE_X, GL_TEXTURE_CUBE_MAP_NEGATIVE_X,
                         GL_TEXTURE_CUBE_MAP_POSITIVE_Y, GL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
@@ -1549,7 +1583,19 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
             glTexParameteri(target, GL_TEXTURE_MAG_FILTER, magf);
             glTexParameteri(target, GL_TEXTURE_WRAP_S, wt);
             glTexParameteri(target, GL_TEXTURE_WRAP_T, wt);
+            if (is3d) glTexParameteri(target, GL_TEXTURE_WRAP_R, wt);
             if (filter >= 2) glGenerateMipmap(target);
+            if (rd->dbg_gl && is3d) {
+                /* verify voxel data by reading back a few corners */
+                unsigned char check[4] = {0,0,0,0};
+                /* voxel at (0,0,0) = buf[0] — should be r=ix*128+128 with ix=0 → r≈0*... */
+                glGetTexImage(target, 0, GL_RGBA, GL_UNSIGNED_BYTE, bytes);
+                fprintf(stderr, "  3D tex readback: (0,0,0)=%d,%d,%d,%d  (1,1,1)=%d,%d,%d,%d  (mid)=%d,%d,%d,%d\n",
+                    bytes[0],bytes[1],bytes[2],bytes[3],
+                    bytes[(1*fw+1)*4+0],bytes[(1*fw+1)*4+1],bytes[(1*fw+1)*4+2],bytes[(1*fw+1)*4+3],
+                    bytes[((fh/2)*fw+fw/2)*4+0],bytes[((fh/2)*fw+fw/2)*4+1],bytes[((fh/2)*fw+fw/2)*4+2],bytes[((fh/2)*fw+fw/2)*4+3]);
+                (void)check;
+            }
             if (getenv("PD_DUMP_TEX") && !cube) {
                 char fn[256];
                 snprintf(fn, sizeof(fn), "/tmp/pd_dump_tex_%d.ppm", (int)c->a);
