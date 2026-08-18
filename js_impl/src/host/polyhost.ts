@@ -334,7 +334,7 @@ export class PolyHostImpl {
     // file form: glsettex(tex, "file"[, colmode])
     const file = this.strArg(a, 1);
     if (file !== null) {
-      const colmode = n >= 3 ? (a[2] | 0) : (8 + 32); // KGL_MIPMAP | KGL_REPEAT
+      const colmode = n >= 3 ? (a[2] | 0) : ((2 << 4) + (0 << 8)); // KGL_MIPMAP + KGL_REPEAT
       if (this.imageLoader) {
         // The loader resolves the path itself (search dir + parent walk),
         // mirroring C decode_file().

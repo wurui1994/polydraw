@@ -354,6 +354,22 @@ struct pd_GLRenderer {
     int cap_owned;       /* we created cap_fbo/cap_tex and must free them */
     int cap_texno;       /* target texture index for the in-flight capture */
     int cap_w, cap_h;
+
+    /* render-graph trace: when non-NULL, flush_batch writes per-batch JSON
+     * (vertex transform results + framebuffer hash) for C/JS differential.
+     * trace_script/trace_frame are metadata written into the header. */
+    FILE *trace_fp;
+    int trace_batch_idx;
+    char trace_script[512];
+    int trace_frame;
+    /* when set, each traced batch also writes batch_NNN.ppm (P6, top-down)
+     * here — the element-level pixel-diff material for the JS comparator */
+    char trace_dir[512];
+    /* source command range [cmd_start, cmd_end] covered by the batch being
+     * built — written into each trace batch so the comparator can align C
+     * batches (which merge BEGIN/END sections) against JS batches (which
+     * keep them separate) by their origin in the GLCmd stream. */
+    int trace_cmd_start, trace_cmd_i;
 };
 
 /* interleaved VBO layout offsets (floats) */
@@ -555,12 +571,92 @@ static void update_mvp(pd_GLRenderer *rd)
  * custom shaders are free to use a_vertex/gl_Vertex as an object-space value
  * (lighting, procedural texturing). Pre-transforming on the CPU would change
  * what those shaders see, so instead a matrix change simply ends the batch. */
+
+/* Render-graph trace: dump one drawn batch (vertex transform results +
+ * framebuffer hash) as JSON. Shared by flush_batch (merged batches) and
+ * draw_quad (direct draws) so the JS comparator sees every actual drawcall.
+ * Enabled via PD_TRACE=path.json; format mirrors js softrender's onBatch. */
+static void trace_dump_batch(pd_GLRenderer *rd, int prim, const GVertex *bv,
+                             size_t n, const float mvp[16],
+                             int cmd_start, int cmd_end)
+{
+    if (!rd->trace_fp) return;
+    fprintf(rd->trace_fp, "%s{\"index\":%d, \"mode\":%d, \"nverts\":%zu, \"cmdStart\":%d, \"cmdEnd\":%d, \"mvp\":[",
+            rd->trace_batch_idx > 0 ? "," : "", rd->trace_batch_idx, prim, n,
+            cmd_start, cmd_end);
+    for (int i = 0; i < 16; i++) fprintf(rd->trace_fp, "%s%.9g", i?",":"", mvp[i]);
+    fprintf(rd->trace_fp, "], \"verts\":[");
+    for (size_t i = 0; i < n; i++) {
+        const GVertex *v = &bv[i];
+        float cx = mvp[0]*v->pos[0]+mvp[4]*v->pos[1]+mvp[8]*v->pos[2]+mvp[12];
+        float cy = mvp[1]*v->pos[0]+mvp[5]*v->pos[1]+mvp[9]*v->pos[2]+mvp[13];
+        float cz = mvp[2]*v->pos[0]+mvp[6]*v->pos[1]+mvp[10]*v->pos[2]+mvp[14];
+        float cw = mvp[3]*v->pos[0]+mvp[7]*v->pos[1]+mvp[11]*v->pos[2]+mvp[15];
+        float nx = fabsf(cw) < 1e-12f ? 0 : cx/cw;
+        float ny = fabsf(cw) < 1e-12f ? 0 : cy/cw;
+        float nz = fabsf(cw) < 1e-12f ? 0 : cz/cw;
+        fprintf(rd->trace_fp, "%s{\"ox\":%.9g,\"oy\":%.9g,\"oz\":%.9g,\"ow\":1,\"cx\":%.9g,\"cy\":%.9g,\"cz\":%.9g,\"cw\":%.9g,\"nx\":%.9g,\"ny\":%.9g,\"nz\":%.9g,\"r\":%.9g,\"g\":%.9g,\"b\":%.9g,\"a\":%.9g,\"s\":%.9g,\"t\":%.9g,\"nrmx\":%.9g,\"nrmy\":%.9g,\"nrmz\":%.9g}",
+                i?",":"", v->pos[0], v->pos[1], v->pos[2],
+                cx, cy, cz, cw, nx, ny, nz,
+                v->color[0], v->color[1], v->color[2], v->color[3],
+                v->tex[0], v->tex[1], v->nrm[0], v->nrm[1], v->nrm[2]);
+    }
+    /* framebuffer hash: read pixels and compute djb2 over top-left
+     * row-major RGB bytes — MUST match the JS softrender's trace hook
+     * (same order, same formula) so identical images hash identically. */
+    GLint rw = rd->fb_w, rh = rd->fb_h;
+    unsigned char *px = (unsigned char*)malloc((size_t)rw * rh * 3);
+    if (px) {
+        GLint prevAlign;
+        glGetIntegerv(GL_PACK_ALIGNMENT, &prevAlign);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, rw, rh, GL_RGB, GL_UNSIGNED_BYTE, px);
+        glPixelStorei(GL_PACK_ALIGNMENT, prevAlign);
+        unsigned hash = 5381;
+        double sum = 0;
+        long nonBlank = 0;
+        /* GL row 0 = bottom; walk top→bottom to match JS order */
+        for (long y = rh - 1; y >= 0; y--) {
+            for (long x = 0; x < rw; x++) {
+                const unsigned char *p = px + ((size_t)y * rw + x) * 3;
+                for (int ch = 0; ch < 3; ch++) {
+                    hash = ((hash << 5) + hash) + p[ch];
+                    sum += p[ch];
+                    if (p[ch] > 4) nonBlank++;
+                }
+            }
+        }
+        /* element-level snapshot: batch_NNN.ppm (P6, top-down row order) so
+         * the JS comparator can pixel-diff this exact drawcall's output */
+        if (rd->trace_dir[0]) {
+            char ppath[600];
+            snprintf(ppath, sizeof ppath, "%s/batch_%03d.ppm",
+                     rd->trace_dir, rd->trace_batch_idx);
+            FILE *pf = fopen(ppath, "wb");
+            if (pf) {
+                fprintf(pf, "P6\n%d %d\n255\n", (int)rw, (int)rh);
+                for (long y = rh - 1; y >= 0; y--)
+                    fwrite(px + (size_t)y * rw * 3, 1, (size_t)rw * 3, pf);
+                fclose(pf);
+            }
+        }
+        free(px);
+        double mean = sum / ((size_t)rw*rh*3);
+        double nonBlankPct = (double)nonBlank / ((size_t)rw*rh) * 100.0;
+        fprintf(rd->trace_fp, "], \"fbHash\":\"h%08x\", \"fbMean\":%.4f, \"fbNonBlankPct\":%.4f}\n",
+            hash, mean, nonBlankPct);
+    } else {
+        fprintf(rd->trace_fp, "], \"fbHash\":null, \"fbMean\":0, \"fbNonBlankPct\":0}\n");
+    }
+    rd->trace_batch_idx++;
+    rd->trace_cmd_start = -1;   /* next batch re-anchors at its BEGIN */
+}
+
 static void flush_batch(pd_GLRenderer *rd)
 {
     if (rd->nbatch == 0) return;
     size_t n = rd->nbatch;
     rd->nbatch = 0;              /* clear first: errors must not re-enter */
-
     glUseProgram(rd->program);
     /* Some scripts (e.g. gears/funky post-process) draw a quad that samples
      * a texture left bound by glcaptureend without an explicit glbindtexture;
@@ -592,6 +688,15 @@ static void flush_batch(pd_GLRenderer *rd)
         glUniform1f(rd->u_pointsize, rd->point_size);
     glDrawArrays((GLenum)rd->batch_prim, 0, (GLsizei)n);
     rd->stat_draws++;
+
+    /* Render-graph trace: dump the batch's vertex transforms + FB hash */
+    if (rd->trace_fp) {
+        static const float I[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+        trace_dump_batch(rd, rd->batch_prim, rd->batch, n,
+                         rd->mvp_bake ? I : rd->batch_mvp_f,
+                         rd->trace_cmd_start, rd->trace_cmd_i);
+    }
+
     rd->batch_prim = -1;
 }
 
@@ -612,6 +717,8 @@ size_t pd_gl_renderer_draw_calls(const pd_GLRenderer *rd)
 static void batch_append(pd_GLRenderer *rd, int prim, const GVertex *src, size_t n)
 {
     if (n == 0) return;
+    if (rd->nbatch == 0 && rd->trace_cmd_start < 0)
+        rd->trace_cmd_start = rd->trace_cmd_i;   /* batch begins here */
     if (rd->batch_prim != prim) {
         flush_batch(rd);
         rd->batch_prim = prim;
@@ -760,6 +867,15 @@ static void draw_quad(pd_GLRenderer *rd)
     tris[3] = q[0]; tris[4] = q[2]; tris[5] = q[3];
     static const GLfloat ident_f[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     glUseProgram(rd->program);
+    /* QUAD is a fullscreen pass (post-process / capture scene) that must
+     * never be culled. The previous frame's glcullface() can leave
+     * GL_CULL_FACE enabled with GL_CW front-face, which makes this CCW quad
+     * be treated as back-facing and fully culled — producing a black capture
+     * on every frame after the first (ken/texture.pss). Save/restore cull
+     * state and force-disable for the quad draw. */
+    GLboolean cullWasOn = GL_FALSE;
+    glGetBooleanv(GL_CULL_FACE, &cullWasOn);
+    if (cullWasOn) glDisable(GL_CULL_FACE);
     /* Bind the texture for the active unit (post-process quads sample the
      * capture texture left bound by glcaptureend; the replay issues BINDTEX
      * only when the host calls it, so bind defensively here). */
@@ -785,6 +901,15 @@ static void draw_quad(pd_GLRenderer *rd)
         glUniform1f(rd->u_pointsize, rd->point_size);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
+    if (cullWasOn) glEnable(GL_CULL_FACE);
+    rd->stat_draws++;
+    /* trace: the QUAD is a direct draw — dump it as its own trace batch so
+     * the JS comparator can align against its synthetic QUAD batch */
+    if (rd->trace_fp) {
+        static const GLfloat IQ[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+        trace_dump_batch(rd, GL_TRIANGLES, tris, 6, IQ,
+                         rd->trace_cmd_i, rd->trace_cmd_i);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -897,6 +1022,94 @@ pd_GLRenderer *pd_gl_renderer_create_ex(int w, int h, double fovy, int own_offsc
     return rd;
 }
 
+/* ---- render-graph trace helpers (C/JS differential) ----
+ * These dump the FULL GLCmd stream of the frame, so the JS comparator can
+ * align C and JS command-by-command before looking at batches/vertices.
+ * Payload serialization mirrors js_impl/tools/trace/js_dump_trace.ts exactly:
+ *   SETTEXDATA  -> "pxHash" (djb2 over the packed pixel doubles)
+ *   UNIFORM     -> "fv" (float values, count = mode&0xffff)
+ *   MULTMATRIX  -> "m16" (16 doubles)
+ *   UNIFORMLOC  -> "s" (name)
+ *   SETSHADER   -> "vsLen"/"fsLen"/"vsHash"/"fsHash" (djb2 over source) */
+static unsigned trace_str_hash(const char *s)
+{
+    unsigned h = 5381;
+    if (!s) return h;
+    for (; *s; s++) h = ((h << 5) + h) + (unsigned char)*s;
+    return h;
+}
+
+static void trace_json_str(FILE *fp, const char *s)
+{
+    fputc('"', fp);
+    if (s) for (; *s; s++) {
+        unsigned char ch = (unsigned char)*s;
+        if (ch == '"' || ch == '\\') { fputc('\\', fp); fputc(ch, fp); }
+        else if (ch < 0x20) fprintf(fp, "\\u%04x", ch);
+        else fputc(ch, fp);
+    }
+    fputc('"', fp);
+}
+
+static void trace_dump_cmds(FILE *fp, const GLCmdBuf *buf)
+{
+    fprintf(fp, "\"cmds\":[");
+    for (size_t i = 0; i < buf->n; i++) {
+        const GLCmd *c = &buf->cmds[i];
+        if (i) fputc(',', fp);
+        fprintf(fp, "{\"op\":%d,\"mode\":%d,\"a\":%.17g,\"b\":%.17g,\"c\":%.17g,\"d\":%.17g",
+                c->op, c->mode, c->a, c->b, c->c, c->d);
+        switch (c->op) {
+        case GLCMD_SETTEXDATA: {
+            const double *px = (const double *)c->s;
+            long long cnt = (long long)c->b * (long long)c->c;
+            unsigned h = 5381;
+            if (px) for (long long k = 0; k < cnt; k++)
+                h = ((h << 5) + h) + (unsigned)(long long)px[k];
+            fprintf(fp, ",\"pxHash\":\"h%08x\",\"pxCount\":%lld", h, px ? cnt : -1);
+            break;
+        }
+        case GLCMD_UNIFORM: {
+            const float *fv = (const float *)c->s;
+            int cnt = c->mode & 0xFFFF;
+            if (fv && cnt > 0) {
+                fprintf(fp, ",\"fv\":[");
+                for (int k = 0; k < cnt; k++)
+                    fprintf(fp, "%s%.9g", k ? "," : "", fv[k]);
+                fprintf(fp, "]");
+            }
+            break;
+        }
+        case GLCMD_MULTMATRIX: {
+            const double *m = (const double *)c->s;
+            if (m) {
+                fprintf(fp, ",\"m16\":[");
+                for (int k = 0; k < 16; k++)
+                    fprintf(fp, "%s%.17g", k ? "," : "", m[k]);
+                fprintf(fp, "]");
+            }
+            break;
+        }
+        case GLCMD_UNIFORMLOC:
+            fprintf(fp, ",\"s\":");
+            trace_json_str(fp, c->s);
+            break;
+        case GLCMD_SETSHADER: {
+            const char *vs = (const char *)(uintptr_t)(unsigned long long)c->a;
+            const char *fs = (const char *)(uintptr_t)(unsigned long long)c->b;
+            size_t vl = vs ? strlen(vs) : 0, fl = fs ? strlen(fs) : 0;
+            fprintf(fp, ",\"vsLen\":%zu,\"fsLen\":%zu,\"vsHash\":\"h%08x\",\"fsHash\":\"h%08x\"",
+                    vl, fl, trace_str_hash(vs), trace_str_hash(fs));
+            break;
+        }
+        default:
+            break;
+        }
+        fprintf(fp, "}");
+    }
+    fprintf(fp, "],");
+}
+
 void pd_gl_renderer_set_shaders(pd_GLRenderer *rd,
                                 const char *vert_src, const char *frag_src)
 {
@@ -942,6 +1155,17 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
     if (rd->dbg_gl)
         fprintf(stderr, "RENDER buf=%zu cmds\n", buf->n);
     rd->stat_draws = 0;
+    rd->trace_batch_idx = 0;
+    rd->trace_cmd_start = -1;
+    rd->trace_cmd_i = -1;
+    if (rd->trace_fp) {
+        fprintf(rd->trace_fp, "{\"source\":\"c\",\"script\":");
+        trace_json_str(rd->trace_fp, rd->trace_script);
+        fprintf(rd->trace_fp, ",\"frame\":%d,\"width\":%d,\"height\":%d,\"fovy\":%.9g,",
+                rd->trace_frame, rd->w, rd->h, rd->fovy);
+        trace_dump_cmds(rd->trace_fp, buf);
+        fprintf(rd->trace_fp, "\"batches\":[");
+    }
 
     /* Auto-clear fallback: if the script did not issue an explicit glClear()
      * this frame, clear the (background) to the configured clear colour at
@@ -975,6 +1199,7 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
 
     for (size_t i = 0; i < buf->n; i++) {
         const GLCmd *c = &buf->cmds[i];
+        rd->trace_cmd_i = (int)i;   /* trace: cmd behind any batch flushed now */
         static const char *OPNAMES[] = {
             "CLEAR","BEGIN","END","VERTEX","COLOR","TEXCOORD","NORMAL",
             "PUSH","POP","TRANSLATE","ROTATE","SCALE","MATRIXMODE","LOADIDENTITY",
@@ -998,6 +1223,9 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
         case GLCMD_BEGIN:
             rd->mode = c->mode;
             rd->nverts = 0;
+            /* trace: geometry added from here belongs to the current batch —
+             * anchor the batch's source range at this BEGIN if not set yet */
+            if (rd->trace_cmd_start < 0) rd->trace_cmd_start = rd->trace_cmd_i;
             break;
         case GLCMD_END:
             end_primitive(rd);
@@ -1322,6 +1550,18 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
             glTexParameteri(target, GL_TEXTURE_WRAP_S, wt);
             glTexParameteri(target, GL_TEXTURE_WRAP_T, wt);
             if (filter >= 2) glGenerateMipmap(target);
+            if (getenv("PD_DUMP_TEX") && !cube) {
+                char fn[256];
+                snprintf(fn, sizeof(fn), "/tmp/pd_dump_tex_%d.ppm", (int)c->a);
+                FILE *fp = fopen(fn, "wb");
+                if (fp) {
+                    fprintf(fp, "P6\n%d %d\n255\n", fw, fh);
+                    for (int p = 0; p < fw * fh; p++)
+                        fprintf(fp, "%c%c%c", bytes[p*4], bytes[p*4+1], bytes[p*4+2]);
+                    fclose(fp);
+                    fprintf(stderr, "PD_DUMP_TEX %d: %s (%dx%d)\n", (int)c->a, fn, fw, fh);
+                }
+            }
             break;
         }
 
@@ -1467,6 +1707,25 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
     /* end of the command stream: emit whatever is still queued */
     flush_batch(rd);
     glBindVertexArray(0);
+    if (rd->trace_fp) {
+        GLint rw = rd->fb_w, rh = rd->fb_h;
+        unsigned char *px = (unsigned char*)malloc((size_t)rw * rh * 3);
+        unsigned fhash = 5381;
+        if (px) {
+            GLint prevAlign;
+            glGetIntegerv(GL_PACK_ALIGNMENT, &prevAlign);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, rw, rh, GL_RGB, GL_UNSIGNED_BYTE, px);
+            glPixelStorei(GL_PACK_ALIGNMENT, prevAlign);
+            /* top→bottom row order to match the JS trace's finalHash */
+            for (long y = rh - 1; y >= 0; y--)
+                for (long x = 0; x < rw; x++)
+                    for (int ch = 0; ch < 3; ch++)
+                        fhash = ((fhash << 5) + fhash) + px[((size_t)y * rw + x) * 3 + ch];
+            free(px);
+        }
+        fprintf(rd->trace_fp, "], \"finalHash\":\"h%08x\"}\n", fhash);
+    }
 }
 
 void pd_gl_renderer_read_rgba(pd_GLRenderer *rd, unsigned char *out)
@@ -1508,6 +1767,26 @@ void pd_gl_renderer_get_framebuffer_size(const pd_GLRenderer *rd, int *fbw, int 
 {
     if (rd) { *fbw = rd->fb_w; *fbh = rd->fb_h; }
     else { *fbw = 0; *fbh = 0; }
+}
+
+void pd_gl_renderer_set_trace(pd_GLRenderer *rd, FILE *fp)
+{
+    if (!rd) return;
+    rd->trace_fp = fp;
+    rd->trace_batch_idx = 0;
+}
+
+void pd_gl_renderer_set_trace_meta(pd_GLRenderer *rd, const char *script, int frame)
+{
+    if (!rd) return;
+    snprintf(rd->trace_script, sizeof rd->trace_script, "%s", script ? script : "");
+    rd->trace_frame = frame;
+}
+
+void pd_gl_renderer_set_trace_dir(pd_GLRenderer *rd, const char *dir)
+{
+    if (!rd) return;
+    snprintf(rd->trace_dir, sizeof rd->trace_dir, "%s", dir ? dir : "");
 }
 
 void pd_gl_renderer_destroy(pd_GLRenderer *rd)

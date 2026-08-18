@@ -25,7 +25,7 @@ export interface GLSLVaryings {
   ndx: number; ndy: number; ndz: number; ndw: number; // NDC pos (gl_Position)
 }
 
-export type GLSLTexFn = (unit: number, u: number, v: number) => [number, number, number];
+export type GLSLTexFn = (unit: number, u: number, v: number, w?: number) => [number, number, number];
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -141,7 +141,7 @@ class GLSLParser {
 
   private isTypeWord(w: string): boolean {
     return w === 'float' || w === 'int' || w === 'bool' || w === 'vec2' || w === 'vec3' || w === 'vec4' ||
-      w === 'sampler2D' || w === 'varying' || w === 'uniform';
+      w === 'sampler2D' || w === 'sampler3D' || w === 'varying' || w === 'uniform';
   }
 
   parseProgram(): S[] {
@@ -327,7 +327,7 @@ class GLSLParser {
       const tw = this.peek();
       const typeWord = tw && tw.t === 'id' ? (tw.v as string) : '';
       if (tw && tw.t === 'id') this.next();
-      const isSampler = typeWord === 'sampler2D';
+      const isSampler = typeWord === 'sampler2D' || typeWord === 'sampler3D';
       while (!this.isOp(';')) {
         const p = this.peek();
         if (p && p.t === 'id') {
@@ -554,7 +554,7 @@ class GLSLParser {
 const BUILTINS = new Set([
   'cos', 'sin', 'sqrt', 'abs', 'mod', 'exp', 'pow', 'floor', 'min', 'max',
   'clamp', 'length', 'dot', 'cross', 'normalize', 'mix', 'step', 'smoothstep',
-  'sign', 'fract', 'atan', 'atan2', 'texture2D', 'int', 'float', 'ftransform',
+  'sign', 'fract', 'atan', 'atan2', 'texture2D', 'texture3D', 'int', 'float', 'ftransform',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -648,6 +648,7 @@ function genCall(e: { name: string; args: E[] }): string {
     case 'float': return `${a[0]}`;
     case 'ftransform': return `_ftransform(env)`;
     case 'texture2D': return `_tex(${a[0]},${a[1]},texFn)`;
+    case 'texture3D': return `_tex3(${a[0]},${a[1]},texFn)`;
     case '__inc': {
       // a[0] is the raw E node: pass the NAME string so _inc writes it back
       const src = e.args[0];
@@ -674,7 +675,7 @@ function genStmt(s: S, out: string[]): void {
         if (sz !== undefined) { out.push(`env[${JSON.stringify(nm)}]=_arr(${sz},${JSON.stringify(s.type)});`); continue; }
         const init = s.inits.get(nm);
         if (init) out.push(`env[${JSON.stringify(nm)}]=${genE(init)};`);
-        else if (s.type === 'sampler2D') out.push(`env[${JSON.stringify(nm)}]=_sunit(${JSON.stringify(nm)});`);
+        else if (s.type === 'sampler2D' || s.type === 'sampler3D') out.push(`env[${JSON.stringify(nm)}]=_sunit(${JSON.stringify(nm)});`);
         else if (s.type === 'uniform') out.push(`env[${JSON.stringify(nm)}]=0;`);
         else out.push(`env[${JSON.stringify(nm)}]=_dflt(${JSON.stringify(s.type)});`);
       }
@@ -735,6 +736,7 @@ function _g_step(e,x){ if(_isV(e)||_isV(x)) return _bop(x,e,(edge,v)=>v>=edge?1:
 function _g_smooth(a,b,x){ const e0=_sc(a),e1=_sc(b),xv=_sc(x); const t=Math.min(1,Math.max(0,(xv-e0)/(e1-e0))); return t*t*(3-2*t); }
 function _dflt(t){ return t==='vec2'?[0,0]:t==='vec3'?[0,0,0]:t==='vec4'?[0,0,0,0]:0; }
 function _tex(sm,coord){ const c=_isV(coord)?coord:[coord]; if(!texFn) return [0,0,0,1]; const u=(sm===undefined||sm===null)?0:(_isV(sm)?(sm[0]??0):sm)|0; const r=texFn(u,c[0]??0,c[1]??0); return [r[0],r[1],r[2],1]; }
+function _tex3(sm,coord){ const c=_isV(coord)?coord:[coord]; if(!texFn) return [0,0,0,1]; const u=(sm===undefined||sm===null)?0:(_isV(sm)?(sm[0]??0):sm)|0; const r=texFn(u,c[0]??0,c[1]??0,c[2]??0); return [r[0],r[1],r[2],1]; }
 function _swset(env,name,i,v){ const cur=env[name]; const a=_isV(cur)?cur.slice():[cur??0]; a[i]=_isV(v)?v[0]:v; env[name]=a.length===1?a[0]:a; }
 function _inc(env,name,v){ const old=env[name]; env[name]=v; return old; }
 function _ag(a,i){ if(_isV(a)) return a[i|0]??0; return i===0?(a??0):0; }
@@ -759,10 +761,12 @@ export interface GLSLProgram {
 export function parseVaryingMap(vertSrc: string): Map<string, string> {
   const map = new Map<string, string>();
   if (!vertSrc) return map;
-  const re = /varying\s+(?:vec[234]|float|bool)\s+([a-zA-Z_]\w*)/g;
+  const re = /varying\s+(?:vec[234]|float|bool)\s+([a-zA-Z_]\w*(?:\s*,\s*[a-zA-Z_]\w*)*)/g;
   const names: string[] = [];
   let m: RegExpExecArray | null;
-  while ((m = re.exec(vertSrc)) !== null) names.push(m[1]);
+  while ((m = re.exec(vertSrc)) !== null) {
+    for (const part of m[1].split(',')) names.push(part.trim());
+  }
   const assignRe = /([a-zA-Z_]\w*)\s*=\s*(gl_Color|gl_MultiTexCoord0|gl_Vertex|gl_Normal|gl_Position)/g;
   const semanticByAssign = new Map<string, string>();
   let am: RegExpExecArray | null;
@@ -772,7 +776,15 @@ export function parseVaryingMap(vertSrc: string): Map<string, string> {
     else if (g.startsWith('gl_MultiTexCoord0')) semanticByAssign.set(am[1], 'tex');
     else if (g.startsWith('gl_Vertex')) semanticByAssign.set(am[1], 'pos');
     else if (g.startsWith('gl_Normal')) semanticByAssign.set(am[1], 'nrm');
-    else if (g.startsWith('gl_Position')) semanticByAssign.set(am[1], 'ndc');
+    else if (g.startsWith('gl_Position')) {
+      // C's mvp_bake pre-divides vertices to NDC on the CPU ONLY when the
+      // vertex shader does NOT reference gl_Vertex (polydraw.c:927). In that
+      // mode gl_Position is already NDC (w=1), so p must bind to NDC. When the
+      // shader DOES reference gl_Vertex, mvp_bake=0 and gl_Position is the
+      // real clip-space output — p must keep the VR (clip-space) value.
+      const mvpBake = vertSrc.indexOf('gl_Vertex') < 0;
+      semanticByAssign.set(am[1], mvpBake ? 'ndc' : 'clip');
+    }
   }
   for (const name of names) {
     const sem = semanticByAssign.get(name);
@@ -831,12 +843,16 @@ export function compileGLSL(src: string, vmap?: Map<string, string>): GLSLProgra
     body.push(bind('gl_Position', '[vary.ndx,vary.ndy,vary.ndz,vary.ndw]'));
     if (vmap) {
       for (const [name, key] of vmap) {
-        if (name === 'c' || name === 't' || name === 'p' || name === 'n') continue; // already bound
+        if (name === 'c' || name === 't' || name === 'n') continue; // already bound
         const expr = key === 'color' ? '[vary.r,vary.g,vary.b,vary.a]'
           : key === 'tex' ? '[vary.s,vary.t,vary.p,vary.q]'
           : key === 'pos' ? '[vary.px,vary.py,vary.pz,vary.pw]'
           : key === 'nrm' ? '[vary.nx,vary.ny,vary.nz]'
           : key === 'ndc' ? '[vary.ndx,vary.ndy,vary.ndz,vary.ndw]'
+          // 'clip': p = gl_Position with mvp_bake=0 — gl_Position is the real
+          // clip-space output; VR already holds the correct interpolated value,
+          // so emit no binding and let VR override p.
+          : key === 'clip' ? null
           : null;
         if (expr) body.push(bind(name, expr));
       }
@@ -849,8 +865,19 @@ export function compileGLSL(src: string, vmap?: Map<string, string>): GLSLProgra
     body.push(`if (uniforms) for (var _u of uniforms) { var _uv = _u.v; env[_u.loc] = _uv.length === 1 ? _uv[0] : _uv; }`);
     // Vertex-stage varyings (interpolated per pixel by the rasterizer) take
     // precedence over the fixed semantic bindings above — they are the real
-    // values produced by executing the script's vertex shader.
-    body.push(`if (VR) for (var _vk in VR) env[_vk] = VR[_vk];`);
+    // values produced by executing the script's vertex shader. EXCEPT for
+    // varyings bound to 'ndc' (p = gl_Position): C's mvp_bake pre-divides
+    // positions to NDC on the CPU, so the fragment shader sees NDC (w=1), not
+    // the clip-space value the vertex shader wrote. The NDC binding above is
+    // already correct and must not be overridden by VR.
+    {
+      const skip = vmap ? [...vmap.entries()].filter(([, k]) => k === 'ndc').map(([n]) => n) : [];
+      if (skip.length) {
+        body.push(`if (VR) for (var _vk in VR) { if (${JSON.stringify(skip)}.indexOf(_vk) < 0) env[_vk] = VR[_vk]; }`);
+      } else {
+        body.push(`if (VR) for (var _vk in VR) env[_vk] = VR[_vk];`);
+      }
+    }
     body.push(bind('gl_Color', '[vary.r,vary.g,vary.b,vary.a]'));
     body.push(bind('gl_Vertex', '[vary.px,vary.py,vary.pz,vary.pw]'));
     body.push(bind('gl_MultiTexCoord0', '[vary.s,vary.t,0,1]'));

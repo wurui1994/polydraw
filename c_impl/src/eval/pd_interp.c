@@ -350,3 +350,32 @@ double pd_jit_call(pd_Ctx *c, const pd_Instr *in) {
     free(child.frame);
     return r;
 }
+
+/* Allocate a reusable ctx for the per-pixel hot loop (see pd_interp.h). */
+pd_Ctx *pd_run_ctx_alloc(const pd_Program *prog, const double *params,
+                         double *globals, volatile int *shouldQuit) {
+    pd_Ctx *c = (pd_Ctx*)calloc(1, sizeof(pd_Ctx));
+    if (!c) return NULL;
+    c->prog = prog;
+    c->frame = calloc(prog->nLocals ? prog->nLocals : 1, sizeof(double));
+    if (!c->frame) { free(c); return NULL; }
+    c->ownsFrame = 1;
+    if (!params) {
+        params = (double*)calloc(8, sizeof(double));
+        c->ownsParams = 1;
+    }
+    c->params = params;
+    c->globals = globals;
+    c->shouldQuit = shouldQuit;
+    c->parent = NULL;
+    c->root = prog;
+    c->instrLimit = -1;
+    return c;
+}
+
+void pd_run_ctx_free(pd_Ctx *c) {
+    if (!c) return;
+    if (c->ownsFrame && c->frame) free(c->frame);
+    if (c->ownsParams && c->params) free((void*)c->params);
+    free(c);
+}

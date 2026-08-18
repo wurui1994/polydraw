@@ -17,6 +17,7 @@
 #define PD_GL_RENDERER_H
 
 #include "glcmd.h"
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -92,6 +93,21 @@ void pd_gl_renderer_release(pd_GLRenderer *rd);
 unsigned int pd_gl_renderer_fbo(pd_GLRenderer *rd);
 
 void pd_gl_renderer_destroy(pd_GLRenderer *rd);
+
+/* Enable render-graph trace output: per-batch vertex transform results +
+ * framebuffer hash are written as JSON to the given file pointer. Pass NULL
+ * to disable. Used by the C/JS render-graph differential tool.
+ * The trace also dumps the full GLCmd stream of the frame. */
+void pd_gl_renderer_set_trace(pd_GLRenderer *rd, FILE *fp);
+
+/* Metadata written into the trace JSON header (script path, frame index).
+ * Call before the traced pd_gl_renderer_render. */
+void pd_gl_renderer_set_trace_meta(pd_GLRenderer *rd, const char *script, int frame);
+
+/* Directory to also write batch_NNN.ppm snapshots (P6, top-down) after each
+ * traced drawcall — the element-level pixel-diff material. Caller creates
+ * the directory. */
+void pd_gl_renderer_set_trace_dir(pd_GLRenderer *rd, const char *dir);
 
 #ifdef __cplusplus
 }

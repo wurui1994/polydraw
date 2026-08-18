@@ -54,6 +54,11 @@ export interface DrawBatch {
   // and must be drawn to the OFFSCREEN capture buffer (never the main
   // framebuffer), mirroring C's FBO render-target switch.
   captureTarget?: number;
+  // Source GLCmd range [cmdStart, cmdEnd] this batch originates from — the
+  // anchor used by the C/JS trace comparator to align batches across the two
+  // renderers (C merges BEGIN/END sections, JS keeps them separate).
+  cmdStart?: number;
+  cmdEnd?: number;
 }
 
 export class FixedFunc {
@@ -101,6 +106,11 @@ export class FixedFunc {
   private capturing = false;
   // fullscreen quad mode (glquad)
   quadMode = 0;
+  // current GLCmd index being replayed (trace anchor: batches record the
+  // command range they originate from)
+  private cmdIdx = 0;
+  // GLCmd index where the current BEGIN..END section started
+  private batchCmdStart = 0;
 
   constructor(width = 640, height = 480, defaultFovy = 0) {
     this.width = width; this.height = height; this.defaultFovy = defaultFovy;
@@ -151,7 +161,10 @@ export class FixedFunc {
 
   replay(g: GLCmdBuf): DrawBatch[] {
     this.reset();
-    for (const c of g.cmds as GLCmd[]) this.exec(c);
+    for (let i = 0; i < g.cmds.length; i++) {
+      this.cmdIdx = i;
+      this.exec(g.cmds[i] as GLCmd);
+    }
     return this.batches;
   }
 
@@ -175,6 +188,8 @@ export class FixedFunc {
       clearColor: this.clearColor.slice() as [number, number, number, number],
       uniforms: [...this.uniState.values()],
       captureTarget: this.capturing ? 1 : undefined,
+      cmdStart: this.batchCmdStart,
+      cmdEnd: this.cmdIdx,
     };
     this.batches.push(b);
   }
@@ -185,6 +200,7 @@ export class FixedFunc {
         this.inBegin = true;
         this.verts = [];
         this.beginMode = c.mode;
+        this.batchCmdStart = this.cmdIdx;
         break;
       case GLCMD.END:
         if (this.inBegin) this.emitBatch(this.beginMode, this.verts);
@@ -221,6 +237,8 @@ export class FixedFunc {
           clearColor: this.clearColor.slice() as [number, number, number, number],
           uniforms: [...this.uniState.values()],
           captureTarget: this.capturing ? 1 : undefined,
+          cmdStart: this.cmdIdx,
+          cmdEnd: this.cmdIdx,
         };
         this.batches.push(b);
         break;
@@ -281,6 +299,8 @@ export class FixedFunc {
           clearColor: this.clearColor.slice() as [number, number, number, number],
           uniforms: [],
           clear: clr,
+          cmdStart: this.cmdIdx,
+          cmdEnd: this.cmdIdx,
         };
         this.batches.push(b);
         break;

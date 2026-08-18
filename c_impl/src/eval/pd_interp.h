@@ -24,8 +24,22 @@ typedef struct pd_Ctx {
     double   *globals;     /* shared global static block */
     volatile int *shouldQuit; /* freeze-probe; checked in loops */
     int        quitCounter;
+    long       instrCount;   /* running total for runaway-loop guard */
+    long       instrLimit;   /* stop after this many ops (-1 = unlimited) */
     struct pd_Ctx *parent; /* caller's ctx, for accessing host externs */
     const pd_Program *root; /* the entry program (holds funcs[], host, extra[]) */
+    int        ownsFrame;   /* free(c->frame) on teardown */
+    int        ownsParams;  /* free(c->params) on teardown */
+
+    /* Bind-time operand pre-resolution: each instruction's out/in0/in1 are
+     * resolved to concrete double* once (at alloc), so the hot loop never
+     * re-runs pd_slot's switch + byte-offset math per instruction. Valid for
+     * the whole ctx lifetime because frame/params/globals addresses are stable
+     * (the loop only mutates the *values*, never the pointers). */
+    int        preresolved;
+    double   **pc_outs;
+    double   **pc_ins0;
+    double   **pc_ins1;
 } pd_Ctx;
 
 /* Resolve a register to a double storage pointer (for value operands).
@@ -58,6 +72,14 @@ double pd_run(const pd_Program *prog, const double *params,
 
 /* Run with an explicit ctx (used for recursive CALL). */
 double pd_run_ctx(pd_Ctx *c);
+
+/* Allocate/free a reusable ctx for the per-pixel hot loop. The caller keeps
+ * the ctx alive across all pixels of a frame, memsetting c->frame to zero and
+ * rewriting c->params between pd_run_ctx calls — this avoids one calloc/free
+ * per pixel (millions of calls/frame). */
+pd_Ctx *pd_run_ctx_alloc(const pd_Program *prog, const double *params,
+                         double *globals, volatile int *shouldQuit);
+void pd_run_ctx_free(pd_Ctx *c);
 
 /* Seed the EVAL RNG (affects RND/NRND ops). Matches original ksrand. */
 void pd_srand(unsigned long s);

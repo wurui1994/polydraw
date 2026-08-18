@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -151,6 +152,16 @@ int main(int argc, char **argv) {
     }
     pd_gl_renderer_set_shaders(rd, vert_src, frag_src);
 
+    /* Render-graph trace: if PD_TRACE=path.json is set, dump the command
+     * stream + per-batch vertex transforms + framebuffer hashes for the
+     * C/JS differential. IMPORTANT: the trace is enabled only for the LAST
+     * frame — pd_gl_renderer_render writes one complete JSON document per
+     * call, so tracing several frames would concatenate documents and
+     * corrupt the file. */
+    const char *trace_path = getenv("PD_TRACE");
+    const char *trace_dir = getenv("PD_TRACE_DIR");
+    FILE *trace_fp = NULL;
+
     /* JIT selection: auto → use the JIT backend if any is compiled in
      * (LLVM preferred, then sljit); --jit forces on, --no-jit forces the
      * interpreter. The JIT compiles the whole host program up front and
@@ -164,8 +175,25 @@ int main(int argc, char **argv) {
 
     for (int f = 0; f <= frame; f++) {
         run_frame(ctx, (double)f);
+        /* open the trace just before the LAST frame renders: one document */
+        if (f == frame && trace_path && *trace_path && !trace_fp) {
+            trace_fp = fopen(trace_path, "w");
+            if (trace_fp) {
+                pd_gl_renderer_set_trace_meta(rd, script, frame);
+                if (trace_dir && *trace_dir) {
+                    mkdir(trace_dir, 0755);   /* ok if it already exists */
+                    pd_gl_renderer_set_trace_dir(rd, trace_dir);
+                }
+                pd_gl_renderer_set_trace(rd, trace_fp);
+                fprintf(stderr, "polydraw-render: trace → %s%s%s%s\n", trace_path,
+                        trace_dir && *trace_dir ? " (+ppm in " : "",
+                        trace_dir && *trace_dir ? trace_dir : "",
+                        trace_dir && *trace_dir ? ")" : "");
+            }
+        }
         pd_gl_renderer_render(rd, pdrl_glbuf(ctx));
     }
+    if (trace_fp) { fclose(trace_fp); trace_fp = NULL; }
 
     /* ---- read back + write PNG (flip: GL bottom-left → image top-left) ---- */
     unsigned char *rgba = malloc((size_t)w * h * 4);
