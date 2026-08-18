@@ -27,6 +27,7 @@ typedef enum {
     PD_TOK_NUMBER,
     PD_TOK_IDENT,
     PD_TOK_STRING,
+    PD_TOK_CHAR,       /* 'a' character literal -> num holds ASCII code */
     PD_TOK_PUNCT,      /* multi or single char punctuation */
     PD_TOK_ERROR
 } pd_TokKind;

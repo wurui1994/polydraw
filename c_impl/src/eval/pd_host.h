@@ -39,6 +39,8 @@ typedef struct {
     int        nParams;    /* parameter count (variadic printf uses nargs as-is) */
     pd_HostFn  fn;         /* the C callback */
     int        variadic;   /* 1 if printf-style variadic (nParams is a hint) */
+    int        isStub;     /* 1 if this is an unimplemented no-op stub (warns on call) */
+    int        refMask;    /* bitmask: bit i set → param i is pass-by-reference ($) */
 } pd_HostFunc;
 
 /* A host variable: pointer to a double the host keeps updated. */
@@ -55,6 +57,7 @@ struct GLCmdBuf;  /* forward decl; defined in render/glcmd.h */
 typedef struct pd_Host {
     pd_HostFunc fns[PD_MAX_HOST_FNS];
     int         nFns;
+    char        stub_warned[PD_MAX_HOST_FNS]; /* per-stub "already warned" flag */
     pd_HostVar  vars[PD_MAX_HOST_VARS];
     int         nVars;
 
@@ -91,6 +94,11 @@ void pd_host_install(const pd_Host *h, pd_Parser *p);
 /* Attach a host table to a program (for interpreter dispatch). The program
  * does not own the table. */
 void pd_host_attach(pd_Program *prog, const pd_Host *h);
+
+/* Register a missing host function as a no-op stub (returns 0). Lets scripts
+ * that call unimplemented host APIs still compile & run instead of crashing on
+ * an unresolved CALL. Returns the host fn index or -1. */
+int pd_host_add_stub(pd_Host *h, const char *name, int nParams);
 
 #ifdef __cplusplus
 }

@@ -280,10 +280,6 @@ double ed_run_frame(ed_Ctx *ctx, double numframes) {
     ctx->state.frameinit = (ctx->state.persist ? (numframes == 0.0)
                                                : (numframes <= 0.0)) ? 1.0 : 0.0;
 
-    if (ctx->state.persist)
-        fprintf(stderr, "[DBG] ed_run_frame f=%.0f frameinit=%.0f globals[0]=%.3f\n",
-                numframes, ctx->state.frameinit, ctx->prog.globals[0]);
-
     size_t np = ctx->prog.nParams;
 
     if (np == 0) {
@@ -309,10 +305,6 @@ double ed_run_frame_jit(ed_Ctx *ctx, double numframes) {
     ctx->state.numframes = numframes;
     ctx->state.frameinit = (ctx->state.persist ? (numframes == 0.0)
                                                : (numframes <= 0.0)) ? 1.0 : 0.0;
-
-    if (ctx->state.persist)
-        fprintf(stderr, "[DBG] ed_run_frame_jit f=%.0f frameinit=%.0f globals[0]=%.3f\n",
-                numframes, ctx->state.frameinit, ctx->prog.globals[0]);
 
     size_t np = ctx->prog.nParams;
 

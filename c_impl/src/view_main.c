@@ -147,7 +147,7 @@ int main(int argc, char **argv) {
     const char *script = NULL;
     int w = 640, h = 480; double fovy = 73.74;
     int headless = 0; double headless_frame = 30;
-    int jit_mode = 2;   /* 2=auto, 1=force on, 0=force off */
+    int jit_mode = 0;   /* 0=off (default, batched interpreter), 1=force on, 2=auto */
     const char *outpath = NULL;
     for (int i = 1; i < argc; i++) {
         if      (strcmp(argv[i], "--w") == 0 && i+1 < argc)     w = atoi(argv[++i]);

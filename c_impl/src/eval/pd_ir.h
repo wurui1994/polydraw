@@ -140,6 +140,7 @@ struct pd_Program {
 
     /* error reporting */
     char      err[256];
+
 };
 
 /* ---- IR builder: used by the parser to construct programs ---- */
@@ -149,6 +150,7 @@ typedef struct {
     char     *strings; size_t nStrings, capStrings;
     pd_Reg   *extra;   size_t nExtra, capExtra;
     size_t    nLocals;
+    size_t    nParams;   /* number of entry-point parameters */
     char      err[256];
     int       ok;
 } pd_Builder;

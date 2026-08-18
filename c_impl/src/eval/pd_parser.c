@@ -21,7 +21,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <limits.h>
+#include <math.h>
+#include "pd_interp.h"
 
 /* sentinel meaning "not inside a loop" for breakLabel/contLabel */
 #define PD_NO_LOOP INT_MIN
@@ -110,9 +113,18 @@ int pd_accept(pd_Parser *p, pd_TokKind kind, const char *text) {
 static int accept_punct(pd_Parser *p, const char *text) { return pd_accept(p, PD_TOK_PUNCT, text); }
 static int accept_ident(pd_Parser *p, const char *text) { return pd_accept(p, PD_TOK_IDENT, text); }
 
+/* forward decls (definitions live further down) */
+static int peek_is_ident(pd_Parser *p, int ahead);
+static int peek_is_punct(pd_Parser *p, int ahead, char c);
+static int struct_type_find(pd_Parser *p, const char *name);
+static int struct_field_index(pd_Parser *p, int typeIdx, const char *field);
+
 static int pd_expect_punct(pd_Parser *p, const char *text) {
     if (accept_punct(p, text)) return 1;
-    snprintf(p->err, sizeof(p->err), "expected '%s' at line %d", text, pd_cur(p)->origLine);
+    pd_Tok *c = pd_cur(p);
+    char tk[32]; size_t tl = c->len < sizeof(tk)-1 ? c->len : sizeof(tk)-1;
+    memcpy(tk, c->text, tl); tk[tl] = 0;
+    snprintf(p->err, sizeof(p->err), "expected '%s' at line %d (got '%s' kind=%d)", text, pd_cur(p)->origLine, tk, c->kind);
     p->ok = 0; p->errLine = pd_cur(p)->origLine;
     return 0;
 }
@@ -159,7 +171,11 @@ static pd_Sym *sym_find(pd_Parser *p, const char *name, int nParams) {
                     s->name, s->kind, sym_visible(p, s), s->nParams, nParams, s->funcIdx);
         if (!sym_visible(p, s)) continue;
         if (s->kind == PD_SYM_BUILTIN || s->kind == PD_SYM_EXT_FUNC || s->kind == PD_SYM_FUNC) {
-            if (nParams >= 0 && s->nParams != nParams) {
+            /* Host (EXT_FUNC) and builtin functions are variadic — their
+             * registered nParams is just a nominal value, so never reject a
+             * call on arity (e.g. setcol(1) vs setcol(3), srand(1),
+             * glvertex(3)). Only user FUNCs enforce exact arity via overloads. */
+            if (nParams >= 0 && s->kind == PD_SYM_FUNC && s->nParams != nParams) {
                 /* try overload chain */
                 int next = s->nextOverload;
                 while (next >= 0) {
@@ -185,7 +201,7 @@ static pd_Sym *sym_find(pd_Parser *p, const char *name, int nParams) {
         if (s->kind != PD_SYM_BUILTIN && s->kind != PD_SYM_EXT_FUNC && s->kind != PD_SYM_FUNC) continue;
         if (strcasecmp(s->name, name) != 0) continue;
         if (!sym_visible(p, s)) continue;
-        if (nParams >= 0 && s->nParams != nParams) {
+        if (nParams >= 0 && s->kind == PD_SYM_FUNC && s->nParams != nParams) {
             int next = s->nextOverload;
             while (next >= 0) {
                 pd_Sym *o = &p->syms[next];
@@ -197,15 +213,15 @@ static pd_Sym *sym_find(pd_Parser *p, const char *name, int nParams) {
         if (getenv("PD_DEBUG_FUNCS"))
             fprintf(stderr, "sym_find fallback: '%s' -> '%s' (kind=%d nParams=%d)\n",
                     name, s->name, s->kind, s->nParams);
-        return s;
-    }
-    return NULL;
-}
+            return s;
+        }
+        return NULL;
+        }
 
 /* find any symbol by name ignoring arity (first match) */
 static pd_Sym *sym_find_name(pd_Parser *p, const char *name) {
     for (int i = p->nSyms - 1; i >= 0; i--) {
-        if (strncmp(p->syms[i].name, name, sizeof(p->syms[i].name)) == 0 &&
+        if (strncasecmp(p->syms[i].name, name, sizeof(p->syms[i].name)) == 0 &&
             sym_visible(p, &p->syms[i]))
             return &p->syms[i];
     }
@@ -220,6 +236,7 @@ static pd_Sym *sym_add(pd_Parser *p, const char *name, pd_SymKind kind) {
     s->kind = kind;
     s->nextOverload = -1;
     s->funcIdx = -1;
+    s->structType = -1;
     s->scopeId = p->curScopeId;
     return s;
 }
@@ -330,6 +347,9 @@ static const BinOp BINOPS[] = {
     { "||", 1, 0, PD_LOR   },
     { NULL, 0, 0, 0 }
 };
+/* Unary operators bind tighter than every binary operator in BINOPS
+ * (max binary prec is 7 for '^'). */
+#define PD_PREC_UNARY 8
 /* assignment handled separately (lowest precedence, right-assoc, lvalue) */
 static const BinOp ASSIGNOPS[] = {
     { "=",  0, 1, PD_MOV },
@@ -353,6 +373,19 @@ static const BinOp ASSIGNOPS[] = {
 static pd_Reg parse_expr_prec(pd_Parser *p, int minPrec) {
     int fresh = (minPrec == 0);
     pd_Reg left;
+    /* logical NOT: binds tighter than any binary operator and may be stacked
+     * (!!x). Implemented as `operand == 0`, matching EVAL semantics. */
+    if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len == 1 &&
+        pd_cur(p)->text[0] == '!') {
+        pd_eat(p);
+        pd_Reg operand = parse_expr_prec(p, PD_PREC_UNARY);
+        if (!p->ok) return operand;
+        pd_Reg zero = pd_new_const(p->b, 0.0);
+        pd_Reg out = pd_new_local(p->b);
+        pd_emit2(p->b, PD_EQU, out, operand, zero);
+        left = out;
+        goto pratt_loop;
+    }
     if (fresh && pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len == 1 &&
         (pd_cur(p)->text[0] == '+' || pd_cur(p)->text[0] == '-')) {
         /* insert an implicit 0 left operand; the pratt loop below consumes
@@ -377,6 +410,7 @@ static pd_Reg parse_expr_prec(pd_Parser *p, int minPrec) {
             left = out;
         }
     }
+pratt_loop:
     for (;;) {
         pd_Tok *t = pd_cur(p);
         if (t->kind != PD_TOK_PUNCT) break;
@@ -428,9 +462,12 @@ pd_Reg pd_parse_expr(pd_Parser *p) {
 static pd_Reg parse_call_arg(pd_Parser *p) {
     pd_Tok *t = pd_cur(p);
     if (t->kind == PD_TOK_IDENT) {
-        /* peek the token after the name: must be , or ) (bare reference) */
+        /* peek the token after the name: must be , or ) (bare reference).
+         * A following '[' (subscript) or '.' (struct member) means the name is
+         * not passed as a whole array. */
         const pd_Tok *nx = (p->tok + 1 < p->ts->nToks) ? &p->ts->toks[p->tok + 1] : NULL;
-        int bare = nx && !(nx->kind == PD_TOK_PUNCT && nx->len == 1 && nx->text[0] == '[');
+        int bare = nx && !(nx->kind == PD_TOK_PUNCT && nx->len == 1 &&
+                           (nx->text[0] == '[' || nx->text[0] == '.'));
         if (bare) {
             char nm[40];
             size_t nl = t->len < sizeof(nm) ? t->len : sizeof(nm)-1;
@@ -496,7 +533,7 @@ pd_Reg pd_parse_primary(pd_Parser *p) {
         pd_emit1(p->b, PD_MOV, out, z);
         return out;
     }
-    if (t->kind == PD_TOK_NUMBER) {
+    if (t->kind == PD_TOK_NUMBER || t->kind == PD_TOK_CHAR) {
         pd_Reg c = pd_new_const(p->b, t->num);
         pd_Reg out = pd_new_local(p->b);
         pd_emit1(p->b, PD_MOV, out, c);
@@ -537,15 +574,27 @@ pd_Reg pd_parse_primary(pd_Parser *p) {
              * EVAL call sites pass plain vars and the caller supplies the
              * variable's slot address for ref params. */
             pd_Sym *pre = sym_find_name(p, name);
-            int refMask = (pre && pre->kind == PD_SYM_FUNC) ? pre->refMask : 0;
+            int refMask = (pre && (pre->kind == PD_SYM_FUNC || pre->kind == PD_SYM_EXT_FUNC)) ? pre->refMask : 0;
             /* collect args */
             pd_eat(p); /* ( */
-            pd_Reg args[16]; int nArgs = 0;
+            int argsCap = 16;
+            pd_Reg *args = malloc(argsCap * sizeof(pd_Reg));
+            if (!args) { pd_error(p, "oom"); return pd_new_const(p->b, 0.0); }
+            int nArgs = 0;
+            #define PUSH_ARG(v) do { \
+                if (nArgs >= argsCap) { \
+                    argsCap *= 2; \
+                    pd_Reg *_n = realloc(args, argsCap * sizeof(pd_Reg)); \
+                    if (!_n) { pd_error(p, "oom"); free(args); return pd_new_const(p->b, 0.0); } \
+                    args = _n; \
+                } \
+                args[nArgs++] = (v); \
+            } while (0)
             if (!(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len == 1 && pd_cur(p)->text[0] == ')')) {
                 for (;;) {
                     if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len == 1 && pd_cur(p)->text[0] == ',') {
                         /* blank arg → 0 */
-                        args[nArgs++] = pd_new_const(p->b, 0.0);
+                        PUSH_ARG(pd_new_const(p->b, 0.0));
                         pd_eat(p);
                         continue;
                     }
@@ -555,18 +604,37 @@ pd_Reg pd_parse_primary(pd_Parser *p) {
                          * A bare array passes its base (ADDR); a scalar
                          * variable passes its slot address (ADDRSLOT). */
                         const pd_Tok *nx = (p->tok + 1 < p->ts->nToks) ? &p->ts->toks[p->tok + 1] : NULL;
-                        int indexed = nx && nx->kind == PD_TOK_PUNCT && nx->len == 1 && nx->text[0] == '[';
+                        /* '[' subscript or '.' member both mean "not a whole
+                         * object reference" */
+                        int indexed = nx && nx->kind == PD_TOK_PUNCT && nx->len == 1 &&
+                                      (nx->text[0] == '[' || nx->text[0] == '.');
                         char an[40]; size_t al = pd_cur(p)->len < sizeof(an)?pd_cur(p)->len:sizeof(an)-1;
                         memcpy(an, pd_cur(p)->text, al); an[al] = 0;
                         pd_Sym *as = sym_find_name(p, an);
+                        if (getenv("ED_DEBUG_REFMASK"))
+                            fprintf(stderr, "  [refarg] argIdx=%d name='%s' as=%p kind=%d indexed=%d refMaskBit=%d\n",
+                                    nArgs, an, (void*)as, as?as->kind:-1, indexed, (refMask>>nArgs)&1);
+                        if (!indexed && as && as->kind == PD_SYM_PARAM) {
+                            /* ref parameter forwarding: the callee already
+                             * holds a bit-cast pointer to the real variable.
+                             * Forward that pointer value (PD_ADDR → derefs the
+                             * param slot and re-bit-casts it), NOT the address
+                             * of the param slot itself. */
+                            pd_eat(p);
+                            pd_Reg ao = pd_new_local(p->b);
+                            pd_emit1(p->b, PD_ADDR, ao, as->reg);
+                            PUSH_ARG(ao);
+                            if (accept_punct(p, ",")) continue;
+                            break;
+                        }
                         if (!indexed && as &&
-                            (as->kind == PD_SYM_VAR || as->kind == PD_SYM_PARAM ||
+                            (as->kind == PD_SYM_VAR ||
                              as->kind == PD_SYM_EXT_VAR ||
                              (as->kind == PD_SYM_ARRAY && as->arraySize == 0))) {
                             pd_eat(p);
                             pd_Reg ao = pd_new_local(p->b);
                             pd_emit1(p->b, PD_ADDRSLOT, ao, as->reg);
-                            args[nArgs++] = ao;
+                            PUSH_ARG(ao);
                             if (accept_punct(p, ",")) continue;
                             break;
                         }
@@ -574,17 +642,17 @@ pd_Reg pd_parse_primary(pd_Parser *p) {
                             pd_eat(p);
                             pd_Reg ao = pd_new_local(p->b);
                             pd_emit1(p->b, PD_ADDR, ao, as->reg);
-                            args[nArgs++] = ao;
+                            PUSH_ARG(ao);
                             if (accept_punct(p, ",")) continue;
                             break;
                         }
                     }
-                    args[nArgs++] = parse_call_arg(p);
-                    if (!p->ok) { return args[nArgs-1]; }
+                    PUSH_ARG(parse_call_arg(p));
+                    if (!p->ok) { pd_Reg r = args[nArgs-1]; free(args); return r; }
                     if (accept_punct(p, ",")) {
                         /* if next is ) it was a trailing comma - treat as blank */
                         if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len == 1 && pd_cur(p)->text[0] == ')') {
-                            args[nArgs++] = pd_new_const(p->b, 0.0);
+                            PUSH_ARG(pd_new_const(p->b, 0.0));
                             break;
                         }
                         continue;
@@ -592,22 +660,38 @@ pd_Reg pd_parse_primary(pd_Parser *p) {
                     break;
                 }
             }
-            if (!pd_expect_punct(p, ")")) { pd_Reg z = pd_new_const(p->b,0); return z; }
+            if (!pd_expect_punct(p, ")")) { pd_Reg z = pd_new_const(p->b,0); free(args); return z; }
 
             /* resolve function symbol (try exact arity, else overload) */
             pd_Sym *s = sym_find(p, name, nArgs);
             if (!s) s = sym_find_name(p, name);
             if (!s) {
-                /* unknown function — EVAL is lenient: emit a CALL to an
-                 * unresolved function (aux=-1 → returns 0 at runtime). This
-                 * lets scripts with unregistered host funcs still compile. */
+                /* Unknown function. EVAL is lenient: rather than emit a broken
+                 * CALL (aux=-1) that crashes at runtime, resolve it to a safe
+                 * no-op host stub (returns 0) when a host table is available, or
+                 * simply yield 0 otherwise. This lets scripts calling
+                 * unimplemented host APIs (PLAYSOUND, GLDISABLE, PIC, ...) still
+                 * compile and run without crashing. */
                 pd_Reg out = pd_new_local(p->b);
-                size_t idx = p->b->nInstr;
-                if (pd_emit(p->b, PD_CALL, out, args, nArgs) == (size_t)-1) {
-                    pd_error(p, "emit fail"); return out;
+                if (p->host) {
+                    int hidx = pd_host_add_stub(p->host, name, nArgs);
+                    if (hidx >= 0) {
+                        size_t idx = p->b->nInstr;
+                        if (pd_emit(p->b, PD_CALL, out, args, nArgs) == (size_t)-1) {
+                            pd_error(p, "emit fail"); free(args); return out;
+                        }
+                        p->b->instr[idx].aux = -1000 - hidx; /* EXT_FUNC stub */
+                        if (getenv("PD_DEBUG_FUNCS"))
+                            fprintf(stderr, "[stub CALL] '%s' nArgs=%d hidx=%d\n", name, nArgs, hidx);
+                        free(args); return out;
+                    }
                 }
-                p->b->instr[idx].aux = -1; /* unresolved */
-                return out;
+                /* no host: just evaluate args for side effects, yield 0 */
+                if (nArgs >= 1) pd_emit1(p->b, PD_FABS, out, args[0]);
+                else { pd_Reg z = pd_new_const(p->b, 0.0); pd_emit1(p->b, PD_MOV, out, z); }
+                if (getenv("PD_DEBUG_FUNCS"))
+                    fprintf(stderr, "[unknown fn -> 0] '%s' nArgs=%d\n", name, nArgs);
+                free(args); return out;
             }
             if (s->kind == PD_SYM_BUILTIN) {
                 pd_Op op = (pd_Op)s->reg.off;
@@ -615,13 +699,13 @@ pd_Reg pd_parse_primary(pd_Parser *p) {
                 if (nArgs == 1) pd_emit1(p->b, op, out, args[0]);
                 else if (nArgs == 2) pd_emit2(p->b, op, out, args[0], args[1]);
                 else { pd_error(p, "bad arg count"); }
-                return out;
+                free(args); return out;
             }
             if (s->kind == PD_SYM_EXT_FUNC || s->kind == PD_SYM_FUNC) {
                 pd_Reg out = pd_new_local(p->b);
                 size_t idx = p->b->nInstr;
                 if (pd_emit(p->b, PD_CALL, out, args, nArgs) == (size_t)-1) {
-                    pd_error(p, "emit fail"); return out;
+                    pd_error(p, "emit fail"); free(args); return out;
                 }
                 if (s->kind == PD_SYM_FUNC) {
                     p->b->instr[idx].aux = s->funcIdx;  /* user function index */
@@ -630,25 +714,48 @@ pd_Reg pd_parse_primary(pd_Parser *p) {
                      * (-1000 - idx) to distinguish from user funcs (>=0) */
                     p->b->instr[idx].aux = -1000 - s->funcIdx;
                 }
-                return out;
+                free(args); return out;
             }
             /* variable used as function — error or 0 */
             pd_error(p, "not a function");
+            free(args);
             return pd_new_const(p->b, 0.0);
         }
 
         /* array access? name[expr] or name[i0][i1]... (multi-dim, flattened).
          * For buf3d[5][3][2]: buf3d[a][b][c] => int(a)*3*2 + int(b)*2 + c.
          * Inner indices are truncated toward 0; the last index is used raw. */
-        if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len == 1 && pd_cur(p)->text[0] == '[') {
+        if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len == 1 &&
+            (pd_cur(p)->text[0] == '[' ||
+             /* struct member access on a struct-typed variable: `v.field` is
+              * lowered to one more index, so it flows through the same
+              * flattening path as `v[...]`. */
+             (pd_cur(p)->text[0] == '.' && peek_is_ident(p, 1) &&
+              (sym_find_name(p, name) ? sym_find_name(p, name)->structType >= 0 : 0)))) {
             pd_Sym *s = sym_find_name(p, name);
             if (!s) s = declare_local(p, name);
             pd_Reg idxs[8]; int nd = 0;
-            while (accept_punct(p, "[")) {
-                pd_Reg ix = pd_parse_expr(p);
-                if (!p->ok) return ix;
-                if (!pd_expect_punct(p, "]")) return ix;
-                if (nd < 8) idxs[nd++] = ix;
+            for (;;) {
+                if (accept_punct(p, "[")) {
+                    pd_Reg ix = pd_parse_expr(p);
+                    if (!p->ok) return ix;
+                    if (!pd_expect_punct(p, "]")) return ix;
+                    if (nd < 8) idxs[nd++] = ix;
+                    continue;
+                }
+                /* `.field` -> constant index of that field */
+                if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len == 1 &&
+                    pd_cur(p)->text[0] == '.' && peek_is_ident(p, 1)) {
+                    pd_eat(p); /* . */
+                    pd_Tok *ft = pd_eat(p);
+                    char fname[40]; size_t fl = ft->len < sizeof(fname) ? ft->len : sizeof(fname)-1;
+                    memcpy(fname, ft->text, fl); fname[fl] = 0;
+                    int fi = struct_field_index(p, s->structType, fname);
+                    if (fi < 0) { pd_error(p, "unknown struct field"); return pd_new_const(p->b, 0.0); }
+                    if (nd < 8) idxs[nd++] = pd_new_const(p->b, (double)fi);
+                    continue;
+                }
+                break;
             }
             /* flatten: flat = sum_d trunc(idxs[d]) * product(dims[d+1..nDims-1]) */
             pd_Reg flat;
@@ -749,18 +856,21 @@ static int parse_expr_stmt(pd_Parser *p) {
     pd_Sym *lvSym = NULL;
     int lvIsArray = 0;
     pd_Op assignOp = PD_MOV;
+    char name[40]; name[0] = 0;
 
     /* peek: IDENT followed by assign op (possibly after [expr]) */
     if (t->kind == PD_TOK_IDENT) {
         /* save state to backtrack */
         size_t save = p->tok;
-        char name[40]; size_t nl = t->len < sizeof(name) ? t->len : sizeof(name)-1;
+        size_t nl = t->len < sizeof(name) ? t->len : sizeof(name)-1;
         memcpy(name, t->text, nl); name[nl] = 0;
         /* skip ident */
         p->tok++;
-        if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='[') {
-            /* array index: skip all [..] dimensions to find the assign op. */
-            while (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='[') {
+        /* Skip any chain of `[expr]` subscripts and `.field` members so the
+         * assignment operator after e.g. `a[i].f` is found. */
+        for (;;) {
+            pd_Tok *ct = pd_cur(p);
+            if (ct->kind == PD_TOK_PUNCT && ct->len==1 && ct->text[0]=='[') {
                 p->tok++; /* [ */
                 int depth=1;
                 while (pd_cur(p)->kind != PD_TOK_EOF && depth>0) {
@@ -768,7 +878,13 @@ static int parse_expr_stmt(pd_Parser *p) {
                     else if (pd_cur(p)->kind==PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]==']') depth--;
                     p->tok++;
                 }
+                continue;
             }
+            if (ct->kind == PD_TOK_PUNCT && ct->len==1 && ct->text[0]=='.' && peek_is_ident(p, 1)) {
+                p->tok += 2; /* . field */
+                continue;
+            }
+            break;
         }
         pd_Tok *nt = pd_cur(p);
         /* assignment ops: '=' (len1) or '+=' '-=' '*=' '/=' '%=' '^=' (len2,
@@ -784,18 +900,20 @@ static int parse_expr_stmt(pd_Parser *p) {
                     assignOp = ASSIGNOPS[i].op; break;
                 }
             }
-            /* check if it was array */
+            /* Indexed lvalue? Either a subscript or a struct member access —
+             * both lower to a POKE through the array base. */
             int hadArray = 0;
             for (size_t k = save+1; k < p->tok; k++) {
-                if (p->ts->toks[k].kind==PD_TOK_PUNCT && p->ts->toks[k].len==1 && p->ts->toks[k].text[0]=='[') { hadArray=1; break; }
+                if (p->ts->toks[k].kind==PD_TOK_PUNCT && p->ts->toks[k].len==1 &&
+                    (p->ts->toks[k].text[0]=='[' || p->ts->toks[k].text[0]=='.')) { hadArray=1; break; }
             }
             lvIsArray = hadArray;
         }
         /* restore */
         p->tok = save;
         if (isAssign) {
-            lvSym = sym_find_name(p, name);
-            if (!lvSym) lvSym = declare_local(p, name);
+        lvSym = sym_find_name(p, name);
+        if (!lvSym) lvSym = declare_local(p, name);
         }
     }
 
@@ -871,8 +989,9 @@ static int parse_expr_stmt(pd_Parser *p) {
             pd_eat(p); pd_eat(p); /* ++ or -- */
             pd_Sym *lv = sym_find_name(p, name);
             if (!lv) lv = declare_local(p, name);
-            if (lv->kind == PD_SYM_VAR || lv->kind == PD_SYM_PARAM || lv->kind == PD_SYM_EXT_VAR ||
-                (lv->kind == PD_SYM_ARRAY && lv->arraySize == 0)) {
+            if ((lv->kind == PD_SYM_VAR || lv->kind == PD_SYM_EXT_VAR ||
+                (lv->kind == PD_SYM_ARRAY && lv->arraySize == 0)) ||
+                (lv->kind == PD_SYM_PARAM && !lv->refParam)) {
                 pd_Op op = (c1=='+') ? PD_PLUS : PD_MINUS;
                 pd_Reg one = pd_new_const(p->b, 1.0);
                 pd_Reg cur = pd_new_local(p->b);
@@ -1027,8 +1146,11 @@ static void parse_for(pd_Parser *p) {
 static void parse_do_while(pd_Parser *p) {
     size_t top = pd_label_here(p->b);
     int saveBrk = p->breakLabel, saveCont = p->contLabel;
-    size_t contLbl = pd_label_here(p->b);
-    p->breakLabel = PD_NO_LOOP; p->contLabel = (int)contLbl;
+    /* We need a break target but don't know the end label yet. Use a
+     * sentinel (like parse_while/parse_for) and repoint break GOTOs after. */
+    int brkSentinel = -(int)top - 1;  /* unique negative sentinel */
+    size_t contLbl = top;             /* continue re-enters at loop top */
+    p->breakLabel = brkSentinel; p->contLabel = (int)contLbl;
     parse_block_or_stmt(p);
     p->breakLabel = saveBrk; p->contLabel = saveCont;
     if (!accept_ident(p, "WHILE")) { pd_error(p, "expected WHILE"); return; }
@@ -1039,6 +1161,14 @@ static void parse_do_while(pd_Parser *p) {
     /* if cond, goto top */
     size_t jBack = pd_emit1(p->b, PD_IF1, pdR(PD_FAM_VOID,0), cond);
     pd_patch_goto_target(p->b, jBack, top);
+    /* repoint break GOTOs to here (after the loop) */
+    size_t endLbl = pd_label_here(p->b);
+    for (size_t k = top; k < p->b->nInstr; k++) {
+        if (p->b->instr[k].op == PD_GOTO && p->b->instr[k].out.fam == PD_FAM_LABEL &&
+            (int)p->b->instr[k].out.off == brkSentinel) {
+            p->b->instr[k].out.off = (uint32_t)endLbl;
+        }
+    }
 }
 
 static void parse_block_or_stmt(pd_Parser *p) {
@@ -1056,6 +1186,51 @@ static void parse_block_or_stmt(pd_Parser *p) {
  * arithmetic on them (n*3, N+1, etc). Used for array sizes & enum values.
  * Returns a double so fractional enum values (e.g. radius = 0.5) survive;
  * array-dimension callers cast the result back to a long. */
+/* Look ahead `ahead` tokens from the cursor and test for a 1-char punctuator. */
+static int peek_is_punct(pd_Parser *p, int ahead, char c) {
+    size_t k = p->tok + (size_t)ahead;
+    if (k >= p->ts->nToks) return 0;
+    pd_Tok *t = &p->ts->toks[k];
+    return t->kind == PD_TOK_PUNCT && t->len == 1 && t->text[0] == c;
+}
+
+/* Look ahead `ahead` tokens from the cursor and test for an identifier. */
+static int peek_is_ident(pd_Parser *p, int ahead) {
+    size_t k = p->tok + (size_t)ahead;
+    if (k >= p->ts->nToks) return 0;
+    return p->ts->toks[k].kind == PD_TOK_IDENT;
+}
+
+/* Constant evaluation of a builtin call (e.g. sqrt(2) inside an enum value).
+ * Only the pure-math builtins that take constant args are supported; anything
+ * else returns 0 (the caller treats the value as a constant anyway). */
+static double pd_const_eval_builtin(pd_Parser *p, const char *name, int nargs, double *a) {
+    if (strcasecmp(name,"ABS")==0||strcasecmp(name,"FABS")==0) return fabs(a[0]);
+    if (strcasecmp(name,"ACOS")==0) return acos(a[0]);
+    if (strcasecmp(name,"ASIN")==0) return asin(a[0]);
+    if (strcasecmp(name,"ATAN")==0||strcasecmp(name,"ATN")==0) return atan(a[0]);
+    if (strcasecmp(name,"CEIL")==0) return ceil(a[0]);
+    if (strcasecmp(name,"COS")==0) return cos(a[0]);
+    if (strcasecmp(name,"EXP")==0) return exp(a[0]);
+    if (strcasecmp(name,"FACT")==0) return pd_fact(a[0]);
+    if (strcasecmp(name,"FLOOR")==0) return floor(a[0]);
+    if (strcasecmp(name,"INT")==0) return (a[0]>=0)?floor(a[0]):-floor(-a[0]);
+    if (strcasecmp(name,"LOG")==0) return (nargs==2)?log(a[0])/log(a[1]):log(a[0]);
+    if (strcasecmp(name,"SGN")==0) return (a[0]>0)-(a[0]<0);
+    if (strcasecmp(name,"SIN")==0) return sin(a[0]);
+    if (strcasecmp(name,"SQR")==0||strcasecmp(name,"SQRT")==0) return sqrt(a[0]);
+    if (strcasecmp(name,"TAN")==0) return tan(a[0]);
+    if (strcasecmp(name,"UNIT")==0) return (a[0]==0.0)*0.5+(a[0]>0);
+    if (strcasecmp(name,"ATAN2")==0) return atan2(a[0],a[1]);
+    if (strcasecmp(name,"FMOD")==0) return fmod(a[0],a[1]);
+    if (strcasecmp(name,"MIN")==0) return (a[1]<a[0])?a[1]:a[0];
+    if (strcasecmp(name,"MAX")==0) return (a[1]>a[0])?a[1]:a[0];
+    if (strcasecmp(name,"POW")==0) return pow(a[0],a[1]);
+    if (strcasecmp(name,"FADD")==0) return a[0]+a[1];
+    (void)p;
+    return 0.0;
+}
+
 static double eval_const_expr(pd_Parser *p) {
     pd_Tok *t = pd_cur(p);
     double v;
@@ -1065,7 +1240,7 @@ static double eval_const_expr(pd_Parser *p) {
         if (!p->ok) return -1;
         if (!pd_expect_punct(p, ")")) return -1;
         t = pd_cur(p);
-    } else if (t->kind == PD_TOK_NUMBER) {
+    } else if (t->kind == PD_TOK_NUMBER || t->kind == PD_TOK_CHAR) {
         pd_eat(p);
         v = t->num;
         t = pd_cur(p);
@@ -1076,8 +1251,25 @@ static double eval_const_expr(pd_Parser *p) {
         if (s && s->kind == PD_SYM_CONST) {
             pd_eat(p);
             v = p->b->consts[s->reg.off / 8];
+            t = pd_cur(p);
+        } else if (s && s->kind == PD_SYM_BUILTIN && peek_is_punct(p, 1, '(')) {
+            pd_eat(p); /* name */
+            pd_eat(p); /* ( */
+            double args[4]; int nargs = 0;
+            if (!(pd_cur(p)->kind==PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]==')')) {
+                while (p->ok) {
+                    if (nargs < 4) args[nargs] = eval_const_expr(p);
+                    else eval_const_expr(p);
+                    nargs++;
+                    if (!p->ok) return -1;
+                    if (pd_cur(p)->kind==PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]==',') { pd_eat(p); continue; }
+                    break;
+                }
+            }
+            if (!pd_expect_punct(p, ")")) return -1;
+            v = pd_const_eval_builtin(p, name, nargs, args);
+            t = pd_cur(p);
         } else { pd_error(p, "expected constant"); return -1; }
-        t = pd_cur(p);
     } else { pd_error(p, "expected constant"); return -1; }
     /* handle trailing binary ops: ^ * / + - (^ is exponent in EVAL, right-assoc).
      * Recurse for ^ so 2^3^2 = 2^9; the others fold left-to-right here. */
@@ -1129,11 +1321,95 @@ static void parse_enum(pd_Parser *p) {
     pd_expect_punct(p, "}");
 }
 
+/* Look up a declared struct type by name; returns its index or -1. */
+static int struct_type_find(pd_Parser *p, const char *name) {
+    for (int i = 0; i < p->nStructTypes; i++)
+        if (strcasecmp(p->structTypes[i].name, name) == 0) return i;
+    return -1;
+}
+
+/* Resolve a field name to its index within a struct type; -1 if unknown. */
+static int struct_field_index(pd_Parser *p, int typeIdx, const char *field) {
+    if (typeIdx < 0 || typeIdx >= p->nStructTypes) return -1;
+    pd_StructType *st = &p->structTypes[typeIdx];
+    for (int i = 0; i < st->nFields; i++)
+        if (strcasecmp(st->fields[i], field) == 0) return i;
+    return -1;
+}
+
+/* struct { f0, f1, ... ; more, fields ; } TypeName ;
+ *
+ * Fields may carry an ignored type prefix (`double x, y;`). The type is
+ * recorded as a flat ordered field list; instances are lowered to arrays with
+ * an extra innermost dimension of nFields (see pd_StructType). */
+static void parse_struct_decl(pd_Parser *p) {
+    if (!pd_expect_punct(p, "{")) return;
+    if (p->nStructTypes >= PD_MAX_STRUCT_TYPES) { pd_error(p, "too many struct types"); return; }
+    pd_StructType st;
+    memset(&st, 0, sizeof(st));
+
+    while (p->ok) {
+        pd_Tok *t = pd_cur(p);
+        if (t->kind == PD_TOK_PUNCT && t->len == 1 && t->text[0] == '}') break;
+        if (t->kind == PD_TOK_EOF) { pd_error(p, "unterminated struct body"); return; }
+        if (accept_punct(p, ";") || accept_punct(p, ",")) continue;
+        if (t->kind != PD_TOK_IDENT) { pd_error(p, "struct: expected field name"); return; }
+
+        char nm[40]; size_t nl = t->len < sizeof(nm) ? t->len : sizeof(nm)-1;
+        memcpy(nm, t->text, nl); nm[nl] = 0;
+        pd_eat(p);
+
+        /* An ignored type prefix: `double x` / `int n` -> the *next* ident is
+         * the real field name. Detect it by a following identifier. */
+        if (pd_cur(p)->kind == PD_TOK_IDENT) continue;
+
+        /* array field (`p[3];`) occupies that many slots; each gets its own
+         * synthetic entry so the flat layout stays correct. */
+        long count = 1;
+        if (accept_punct(p, "[")) {
+            count = (long)eval_const_expr(p);
+            if (!p->ok) return;
+            if (count <= 0) { pd_error(p, "invalid struct field dimension"); return; }
+            if (!pd_expect_punct(p, "]")) return;
+        }
+        for (long k = 0; k < count; k++) {
+            if (st.nFields >= PD_MAX_STRUCT_FIELDS) { pd_error(p, "too many struct fields"); return; }
+            /* only the first slot carries the visible name */
+            if (k == 0) strncpy(st.fields[st.nFields], nm, sizeof(st.fields[0])-1);
+            st.nFields++;
+        }
+    }
+    if (!pd_expect_punct(p, "}")) return;
+
+    pd_Tok *tn = pd_cur(p);
+    if (tn->kind != PD_TOK_IDENT) { pd_error(p, "struct: expected type name"); return; }
+    size_t tl = tn->len < sizeof(st.name) ? tn->len : sizeof(st.name)-1;
+    memcpy(st.name, tn->text, tl); st.name[tl] = 0;
+    pd_eat(p);
+
+    p->structTypes[p->nStructTypes] = st;
+    pd_Sym *s = sym_add(p, st.name, PD_SYM_STRUCT_TYPE);
+    if (s) s->structType = p->nStructTypes;
+    p->nStructTypes++;
+
+    accept_punct(p, ";");
+}
+
 /* static name[size], name2[size2], name3, ... ;
  * name[size] allocates an array of `size` doubles in global storage.
  * name (no brackets) allocates a single double (scalar static).
  * Optional initializer: = expr (scalar only, or first element). */
 static void parse_static(pd_Parser *p) {
+    /* Optional struct type prefix shared by the whole declarator list:
+     *   static pt_t a[4], b;   ->  both a and b have type pt_t. */
+    int declType = -1;
+    if (pd_cur(p)->kind == PD_TOK_IDENT && peek_is_ident(p, 1)) {
+        char tn[40]; size_t tl = pd_cur(p)->len < sizeof(tn) ? pd_cur(p)->len : sizeof(tn)-1;
+        memcpy(tn, pd_cur(p)->text, tl); tn[tl] = 0;
+        int ti = struct_type_find(p, tn);
+        if (ti >= 0) { declType = ti; pd_eat(p); }
+    }
+
     for (;;) {
         pd_Tok *nt = pd_eat(p);
         if (nt->kind != PD_TOK_IDENT) { pd_error(p, "static: expected name"); return; }
@@ -1155,6 +1431,17 @@ static void parse_static(pd_Parser *p) {
                 if (!accept_punct(p, "[")) break;
             }
         }
+        /* A struct-typed declarator gets one extra innermost dimension equal to
+         * the field count, so `a[i].f` lowers to `a[i][fieldIndex]`. */
+        if (declType >= 0) {
+            int nf = p->structTypes[declType].nFields;
+            if (nf > 0) {
+                if (nDims < 8) dims[nDims++] = nf;
+                arrSize *= nf;
+                isArr = 1;
+            }
+        }
+
         /* allocate from global storage */
         if (!p->globals) {
             p->globalsCap = 256;
@@ -1171,6 +1458,7 @@ static void parse_static(pd_Parser *p) {
         s->reg = pdR(PD_FAM_GLOBAL, (uint32_t)baseOff);
         s->arraySize = isArr ? (int)arrSize : 0;
         s->nDims = nDims;
+        s->structType = declType;
         for (int di = 0; di < nDims; di++) s->dims[di] = dims[di];
 
         /* initializer: = expr (scalar) or = { expr, expr, ... } (array list).
@@ -1182,11 +1470,19 @@ static void parse_static(pd_Parser *p) {
                 size_t elem = 0;
                 if (!(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='}')) {
                     for (;;) {
-                        pd_Reg v = pd_parse_expr(p);
-                        if (!p->ok) return;
-                        /* store into global[elem] */
-                        pd_Reg slot = pdR(PD_FAM_GLOBAL, (uint32_t)(baseOff + elem*8));
-                        pd_emit1(p->b, PD_MOV, slot, v);
+                        /* elided element: ",," or ", }" leaves the slot at 0.
+                         * EVAL scripts use this to lay out sparse tables, e.g.
+                         *   static note[16] = {65, , ,65, ,60,...};   */
+                        pd_Tok *ct = pd_cur(p);
+                        int elided = (ct->kind == PD_TOK_PUNCT && ct->len == 1 &&
+                                      (ct->text[0] == ',' || ct->text[0] == '}'));
+                        if (!elided) {
+                            pd_Reg v = pd_parse_expr(p);
+                            if (!p->ok) return;
+                            /* store into global[elem] */
+                            pd_Reg slot = pdR(PD_FAM_GLOBAL, (uint32_t)(baseOff + elem*8));
+                            pd_emit1(p->b, PD_MOV, slot, v);
+                        }
                         elem++;
                         if (accept_punct(p, ",")) {
                             /* trailing comma before }: list ends (EVAL allows it) */
@@ -1333,7 +1629,11 @@ static int try_parse_function_def(pd_Parser *p) {
     /* parse parameter list */
     int nParams = 0;
     int refFlag = 0;
-    pd_Reg paramRegs[16];
+    /* Parameter registers: grow on demand so functions with many parameters
+     * (evaldraw allows far more than 16) don't overflow a fixed array. */
+    int paramCap = 16;
+    pd_Reg *paramRegs = (pd_Reg*)malloc(paramCap * sizeof(pd_Reg));
+    if (!paramRegs) { pd_error(p, "oom"); return 0; }
     if (!(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]==')')) {
         for (;;) {
             refFlag = 0;
@@ -1343,15 +1643,21 @@ static int try_parse_function_def(pd_Parser *p) {
              *   $a       string arg (char*)            -- prefix skipped, treated as double
              *   a[n]     array                          -- [..] skipped, treated as double
              *   a(,,)    function pointer               -- (..) skipped, treated as double
-             * Optional C-style type prefix (double/void/...) is also allowed. */
+             * Optional C-style type prefix (double/void/... or a struct type name)
+             * is also allowed. */
+            int paramStructType = -1;
             while (pd_cur(p)->kind == PD_TOK_IDENT &&
                    !(pd_cur_at(p->tok+1)->kind == PD_TOK_PUNCT &&
                      pd_cur_at(p->tok+1)->len==1 &&
                      (pd_cur_at(p->tok+1)->text[0]==',' || pd_cur_at(p->tok+1)->text[0]==')'))) {
                 /* skip a type-prefix ident (e.g. "double x") — heuristic: an
-                 * ident followed by another ident is a type+name */
+                 * ident followed by another ident is a type+name. If that
+                 * prefix is a known struct type, remember it so the parameter
+                 * becomes a struct-typed (array) parameter. */
                 size_t nx = p->tok+1;
                 if (pd_cur_at(nx)->kind != PD_TOK_IDENT) break;
+                int ti = struct_type_find(p, pd_cur(p)->text);
+                if (ti >= 0) paramStructType = ti;
                 pd_eat(p);
             }
             if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 &&
@@ -1382,11 +1688,19 @@ static int try_parse_function_def(pd_Parser *p) {
                 } while (d>0 && !(pd_cur(p)->kind==PD_TOK_EOF));
             }
             if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='&') {
-                if (getenv("PD_DEBUG_ADDR"))
-                    fprintf(stderr, "ref-param detected for '%s'\n", pname);
                 refFlag = 1;
             }
-            /* allocate a PARAM reg */
+            /* allocate a PARAM reg. A struct-typed parameter is an array with
+             * an extra innermost dimension equal to the field count, so that
+             * `pr.x` inside the body lowers to `pr[fieldIndex]`. */
+            int paramIsStruct = (paramStructType >= 0);
+            int nf = paramIsStruct ? p->structTypes[paramStructType].nFields : 0;
+            if (nParams >= paramCap) {
+                paramCap *= 2;
+                pd_Reg *ng = (pd_Reg*)realloc(paramRegs, paramCap * sizeof(pd_Reg));
+                if (!ng) { pd_error(p, "oom"); free(paramRegs); return 0; }
+                paramRegs = ng;
+            }
             paramRegs[nParams] = pdR(PD_FAM_PARAM, (uint32_t)(nParams * 8));
             pd_Sym *ps = sym_add(p, pname, PD_SYM_PARAM);
             if (!ps) {
@@ -1396,6 +1710,11 @@ static int try_parse_function_def(pd_Parser *p) {
             }
             ps->reg = paramRegs[nParams];
             ps->refParam = refFlag;
+            ps->structType = paramStructType;
+            if (paramIsStruct && nf > 0) {
+                ps->nDims = 1; ps->dims[0] = nf;
+                ps->arraySize = nf;
+            }
             if (refFlag && fnSym) fnSym->refMask |= (1 << nParams);
             nParams++;
             if (accept_punct(p, ",")) continue;
@@ -1445,11 +1764,26 @@ restore:
         if (fnSym) fnSym->nParams = nParams;
     }
     p->b = savedB;
+    free(paramRegs);
     return 1;
 }
 
 int pd_parse_stmt(pd_Parser *p) {
     pd_Tok *t = pd_cur(p);
+    /* bare compound block: { ... } used as a statement (EVAL allows free-standing
+     * blocks, commonly left behind when an `if` is commented out). */
+    if (t->kind == PD_TOK_PUNCT && t->len == 1 && t->text[0] == '{') {
+        int saveScope = p->curScopeId;
+        p->curScopeId = p->nextScopeId++;
+        pd_eat(p); /* { */
+        while (p->ok && !(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='}')) {
+            if (pd_cur(p)->kind == PD_TOK_EOF) { pd_error(p, "unterminated block"); break; }
+            pd_parse_stmt(p);
+        }
+        pd_expect_punct(p, "}");
+        p->curScopeId = saveScope;
+        return 1;
+    }
     /* label definition: IDENT :  (EVAL goto labels). We accept and skip them;
      * goto support is partial (goto itself is a no-op for now). */
     if (t->kind == PD_TOK_IDENT) {
@@ -1471,6 +1805,14 @@ int pd_parse_stmt(pd_Parser *p) {
         if (accept_ident(p, "DO")) { parse_do_while(p); return 1; }
         if (accept_ident(p, "ENUM")) { parse_enum(p); accept_punct(p, ";"); return 1; }
         if (accept_ident(p, "STATIC")) { parse_static(p); accept_punct(p, ";"); return 1; }
+        if (accept_ident(p, "STRUCT")) { parse_struct_decl(p); return 1; }
+        /* declaration of a struct-typed variable without `static`:
+         *   pt_t p[4];   (EVAL treats these as statics) */
+        if (peek_is_ident(p, 1)) {
+            char tn[40]; size_t tl = t->len < sizeof(tn) ? t->len : sizeof(tn)-1;
+            memcpy(tn, t->text, tl); tn[tl] = 0;
+            if (struct_type_find(p, tn) >= 0) { parse_static(p); accept_punct(p, ";"); return 1; }
+        }
         /* function definition: NAME(params) { ... } */
         if (try_parse_function_def(p)) return 1;
         if (accept_ident(p, "RETURN")) {
@@ -1622,25 +1964,121 @@ static void prescan_functions(pd_Parser *p) {
  *       a bare block IS the main. We accept this form directly.)
  * Returns 1 if a main body was parsed. */
 static int try_parse_anon_main(pd_Parser *p) {
-    /* pd_cur_at takes an ABSOLUTE token index, so peek at tok+1 / tok+2. */
-    int hasParen = (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='(' &&
-          pd_cur_at(p->tok+1)->kind == PD_TOK_PUNCT && pd_cur_at(p->tok+1)->len==1 && pd_cur_at(p->tok+1)->text[0]==')' &&
-          pd_cur_at(p->tok+2)->kind == PD_TOK_PUNCT && pd_cur_at(p->tok+2)->len==1 && pd_cur_at(p->tok+2)->text[0]=='{');
+    /* Check for: ( ) {   or   ( params ) {   or   { */
+    int hasParen = (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='(');
     int hasBareBrace = (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='{');
+
+    if (hasParen) {
+        /* Peek ahead to find matching ) and check if { follows. */
+        int depth = 0;
+        int tokIdx = p->tok;
+        int foundClose = 0;
+        for (;;) {
+            pd_Tok *t = pd_cur_at(tokIdx);
+            if (t->kind == PD_TOK_EOF) break;
+            if (t->kind == PD_TOK_PUNCT && t->len==1 && t->text[0]=='(') depth++;
+            else if (t->kind == PD_TOK_PUNCT && t->len==1 && t->text[0]==')') {
+                depth--;
+                if (depth == 0) { foundClose = 1; break; }
+            }
+            tokIdx++;
+        }
+        if (!foundClose) return 0;
+        /* After the closing ')', the body may be:
+         *   (a) a bare block:  { ... }                 (evaldraw modern form)
+         *   (b) a bare statement list (no braces): EVAL
+         *       per-pixel entry, e.g.  (x,y,t,&r,&g,&b) if(...) {...} ...
+         * We treat (b) as an anonymous main too. The only case we must NOT
+         * swallow here is a NAMED function definition `name(params){...}`
+         * following the parens — but a per-pixel entry never has a leading
+         * name, so `(params) IDENT (params) {` would be a function def and we
+         * must let try_parse_function_def handle it. */
+        pd_Tok *after = pd_cur_at(tokIdx + 1);
+        if (after->kind == PD_TOK_IDENT && pd_cur_at(tokIdx + 2)->kind == PD_TOK_PUNCT &&
+            pd_cur_at(tokIdx + 2)->len == 1 && pd_cur_at(tokIdx + 2)->text[0] == '(') {
+            /* name ( params ) ... — a named function definition, not an
+             * anonymous main. Let the caller's function-def path take it. */
+            return 0;
+        }
+        /* otherwise: { ... } or bare statements — both are an anonymous main */
+    }
     if (!hasParen && !hasBareBrace) return 0;
-    if (hasParen) { pd_eat(p); /* ( */ pd_eat(p); /* ) */ }
-    if (!pd_expect_punct(p, "{")) return 1;
+
+    if (hasParen) {
+        pd_eat(p); /* ( */
+    }
+
     /* The main block is a function too: its locals must not be visible to the
      * named functions parsed after it. Without this, `x` inside drawsph()
      * resolved to main's `x` symbol, whose LOCAL offset indexes a completely
      * different frame slot in the callee. */
     int savedScope = p->curScopeId, savedNSyms = p->nSyms;
     p->curScopeId = p->nextScopeId++;
-    while (p->ok && !(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='}')) {
+
+    /* Parse parameter list inside the body scope so params are visible
+     * in the body. This supports evaldraw-style entry points like
+     * (x,y,t) { ... } or (x,y,&r,&g,&b) { ... }. */
+    if (hasParen) {
+        int nParams = 0;
+        if (!(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]==')')) {
+            for (;;) {
+                int refFlag = 0;
+                /* Skip optional type prefix (e.g. "double x"). */
+                while (pd_cur(p)->kind == PD_TOK_IDENT &&
+                       !(pd_cur_at(p->tok+1)->kind == PD_TOK_PUNCT &&
+                         pd_cur_at(p->tok+1)->len==1 &&
+                         (pd_cur_at(p->tok+1)->text[0]==',' || pd_cur_at(p->tok+1)->text[0]==')'))) {
+                    size_t nx = p->tok+1;
+                    if (pd_cur_at(nx)->kind != PD_TOK_IDENT) break;
+                    pd_eat(p);
+                }
+                /* & or $ prefix. */
+                if (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 &&
+                    (pd_cur(p)->text[0]=='&' || pd_cur(p)->text[0]=='$')) {
+                    if (pd_cur(p)->text[0]=='&') refFlag = 1;
+                    pd_eat(p);
+                }
+                pd_Tok *pt = pd_eat(p);
+                if (pt->kind != PD_TOK_IDENT) { pd_error(p, "expected param name"); return 1; }
+                char pname[40]; size_t pnl = pt->len < sizeof(pname)?pt->len:sizeof(pname)-1;
+                memcpy(pname, pt->text, pnl); pname[pnl] = 0;
+                /* Skip array dims [..]. */
+                while (pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='[') {
+                    while (accept_punct(p, "[")) {
+                        while (!(pd_cur(p)->kind==PD_TOK_EOF ||
+                                 (pd_cur(p)->kind==PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]==']')))
+                            pd_eat(p);
+                        pd_expect_punct(p, "]");
+                    }
+                }
+                pd_Sym *ps = sym_add(p, pname, PD_SYM_PARAM);
+                if (ps) {
+                    ps->reg = pdR(PD_FAM_PARAM, (uint32_t)(nParams * 8));
+                    ps->refParam = refFlag;
+                }
+                nParams++;
+                if (accept_punct(p, ",")) continue;
+                break;
+            }
+        }
+        pd_expect_punct(p, ")");
+        p->b->nParams = nParams;
+    }
+
+    int bareBody = !(pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 && pd_cur(p)->text[0]=='{');
+    if (!bareBody && !pd_expect_punct(p, "{")) return 1;
+    int closed = 0;
+    while (p->ok) {
+        if (!bareBody && pd_cur(p)->kind == PD_TOK_PUNCT && pd_cur(p)->len==1 &&
+            pd_cur(p)->text[0]=='}') { closed = 1; break; }
+        if (bareBody && pd_cur(p)->kind == PD_TOK_EOF) break;
         pd_parse_stmt(p);
         if (!p->ok) break;
     }
-    pd_expect_punct(p, "}");
+    if (!bareBody) {
+        if (!closed) pd_expect_punct(p, "}");
+        else pd_eat(p); /* consume the } */
+    }
     pd_emit1(p->b, PD_RETURN, pdR(PD_FAM_VOID,0), p->lastValueReg);
     p->curScopeId = savedScope;
     p->nSyms = savedNSyms;
@@ -1665,6 +2103,14 @@ int pd_parse_program(pd_Parser *p) {
     /* main loop: parse top-level statements. An anonymous main () {...}
      * may appear anywhere (after static/enum decls). Once it's parsed, we
      * emit the final return; subsequent statements are named func defs. */
+    if (getenv("PD_DEBUG_TOKS")) {
+        for (size_t i = 0; i < p->ts->nToks; i++) {
+            pd_Tok *t = &p->ts->toks[i];
+            char buf[48]; size_t l = t->len < 47 ? t->len : 47;
+            memcpy(buf, t->text, l); buf[l] = 0;
+            fprintf(stderr, "TOK[%zu] line=%d kind=%d '%s'\n", i, t->origLine, t->kind, buf);
+        }
+    }
     int sawMain = 0;
     while (p->ok && pd_cur(p)->kind != PD_TOK_EOF) {
         if (!sawMain && try_parse_anon_main(p)) {

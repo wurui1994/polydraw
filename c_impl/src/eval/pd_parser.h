@@ -30,8 +30,24 @@ typedef enum {
     PD_SYM_EXT_VAR,      /* external variable (host: xres, etc) */
     PD_SYM_EXT_FUNC,     /* external function (host: glBegin, etc) */
     PD_SYM_FUNC,         /* user-defined function */
-    PD_SYM_ARRAY         /* array (local or global static) */
+    PD_SYM_ARRAY,        /* array (local or global static) */
+    PD_SYM_STRUCT_TYPE   /* struct type name (e.g. `struct{x,y;} pt_t;`) */
 } pd_SymKind;
+
+/* ---- struct types ----
+ * A struct is lowered to "one more array dimension": a variable of type T with
+ * F fields becomes an array whose innermost dimension is F, and `v.field`
+ * becomes a constant index into that dimension. This reuses the existing
+ * N-dimensional array addressing end-to-end, so no IR or backend changes are
+ * needed. */
+#define PD_MAX_STRUCT_TYPES 64
+#define PD_MAX_STRUCT_FIELDS 32
+
+typedef struct {
+    char name[40];                                  /* type name, upper-case */
+    char fields[PD_MAX_STRUCT_FIELDS][40];          /* field names, upper-case */
+    int  nFields;
+} pd_StructType;
 
 typedef struct {
     char       name[40];   /* upper-case */
@@ -62,6 +78,10 @@ typedef struct {
      * scope is invisible: locals of one function must never resolve inside
      * another, because their LOCAL/GLOBAL regs index a different frame. */
     int        scopeId;
+    /* For PD_SYM_STRUCT_TYPE: index into p->structTypes[].
+     * For a variable/array of struct type: the same index, so that `v.field`
+     * can resolve the field name to its constant index. -1 when unrelated. */
+    int        structType;
 } pd_Sym;
 
 #define PD_MAX_SYMS 8192
@@ -69,11 +89,15 @@ typedef struct {
 typedef struct {
     pd_Builder *b;
     pd_TokenStream *ts;
-    const pd_Host *host;    /* host table (for per-function re-install) */
+    pd_Host *host;          /* host table (for per-function re-install & stub registration) */
     size_t    tok;          /* current token index */
 
     pd_Sym    syms[PD_MAX_SYMS];
     int       nSyms;
+
+    /* declared struct types (see pd_StructType) */
+    pd_StructType structTypes[PD_MAX_STRUCT_TYPES];
+    int           nStructTypes;
 
     /* symbol scoping: curScopeId is stamped onto every symbol added; a fresh
      * id is taken from nextScopeId when entering a function body. */

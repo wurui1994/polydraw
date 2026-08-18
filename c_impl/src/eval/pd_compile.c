@@ -4,6 +4,15 @@
 #include "pd_parser.h"
 #include "pd_interp.h"
 #include "pd_host.h"
+#include "pd_preproc.h"
+
+/* IR optimization pass (constant folding + copy propagation + DCE).
+ * Default is OFF; enable via pd_set_optimize(1) (CLI: -O / --optimize). */
+void pd_optimize_program(pd_Program *p);
+
+static int g_pd_optimize_enabled = 0;
+void pd_set_optimize(int enable) { g_pd_optimize_enabled = enable ? 1 : 0; }
+int  pd_get_optimize(void)       { return g_pd_optimize_enabled; }
 
 #include <string.h>
 #include <stdlib.h>
@@ -11,12 +20,19 @@
 
 static int pd_compile_impl(pd_Program *prog, const char *src, const pd_Host *host,
                            int useFold, char *err, size_t errLen) {
+    /* Preprocess (#define / #if / #else / #endif) before lexing. The pass keeps
+     * line numbering intact so diagnostics still match the original source. */
+    char *pp = pd_preprocess(src, err, errLen);
+    if (!pp) return 0;
+
     pd_TokenStream ts; pd_lex_init(&ts);
-    if (!pd_lex(&ts, src) || !ts.ok) {
+    if (!pd_lex(&ts, pp) || !ts.ok) {
         snprintf(err, errLen, "lex error: %s", ts.err);
         pd_lex_free(&ts);
+        free(pp);
         return 0;
     }
+    free(pp);
     pd_Builder b; pd_builder_init(&b);
     pd_Parser p; pd_parser_init(&p, &b, &ts);
     p.host = host;
@@ -66,7 +82,7 @@ static int pd_compile_impl(pd_Program *prog, const char *src, const pd_Host *hos
         pd_program_free(&empty);
         pd_lex_free(&ts);
         pd_builder_free(&b);
-        free(p.globals);
+        /* NOTE: p.globals ownership transfers to prog below — do NOT free here. */
         *prog = promoted;
         prog->globals = p.globals;
         prog->nGlobals = p.nGlobals;
@@ -75,6 +91,7 @@ static int pd_compile_impl(pd_Program *prog, const char *src, const pd_Host *hos
         p.funcs = NULL;
         p.globals = NULL;
         if (host) pd_host_attach(prog, host);
+        if (g_pd_optimize_enabled) pd_optimize_program(prog);
         return 1;
     }
 
@@ -94,13 +111,30 @@ static int pd_compile_impl(pd_Program *prog, const char *src, const pd_Host *hos
     prog->nFuncs = p.nFuncs;
     p.funcs = NULL;
     if (host) pd_host_attach(prog, host);
+    if (g_pd_optimize_enabled) pd_optimize_program(prog);
     if (getenv("PD_DEBUG_FUNCS")) {
+        fprintf(stderr, "  MAIN nInstr=%u nParams=%u:\n", prog->nInstr, prog->nParams);
+        for (unsigned i = 0; i < prog->nInstr; i++) {
+            pd_Instr *I = &prog->instr[i];
+            fprintf(stderr, "    [%u] op=%d aux=%d out(fam=%d,off=%u) in0(fam=%d,off=%u) in1(fam=%d,off=%u) nIn=%d extraIdx=%d\n",
+                    i, I->op, I->aux,
+                    I->out.fam, I->out.off,
+                    I->in[0].fam, I->in[0].off,
+                    I->in[1].fam, I->in[1].off,
+                    I->nIn, I->extraIdx);
+        }
         for (unsigned f = 0; f < prog->nFuncs; f++) {
             pd_Program *fp = &prog->funcs[f];
-            fprintf(stderr, "  func[%u] nInstr=%u: ", f, fp->nInstr);
-            for (unsigned i = 0; i < fp->nInstr; i++)
-                fprintf(stderr, "[%u]op=%d aux=%d ", i, fp->instr[i].op, fp->instr[i].aux);
-            fprintf(stderr, "\n");
+            fprintf(stderr, "  func[%u] nInstr=%u:\n", f, fp->nInstr);
+            for (unsigned i = 0; i < fp->nInstr; i++) {
+                pd_Instr *I = &fp->instr[i];
+                fprintf(stderr, "    [%u] op=%d aux=%d out(fam=%d,off=%u) in0(fam=%d,off=%u) in1(fam=%d,off=%u) nIn=%d extraIdx=%d\n",
+                        i, I->op, I->aux,
+                        I->out.fam, I->out.off,
+                        I->in[0].fam, I->in[0].off,
+                        I->in[1].fam, I->in[1].off,
+                        I->nIn, I->extraIdx);
+            }
         }
     }
     pd_lex_free(&ts);

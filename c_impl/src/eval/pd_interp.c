@@ -90,14 +90,18 @@ static double pd_call_arg(pd_Ctx *c, const pd_Program *p, pd_Reg r) {
 }
 
 /* Resolve an array base address.
- * GLOBAL arrays: the reg points directly at the storage (no indirection).
+ * GLOBAL/EXT arrays: the reg points directly at the storage (no indirection).
+ *   - GLOBAL: pd_slot returns &globals[off/8]
+ *   - EXT (host var): pd_slot returns the host variable's address (already
+ *     dereferenced once from the const-slot bit-cast pointer)
  * LOCAL arrays (passed as pointer params): the slot holds a bit-cast double*.
  */
 static double *pd_array_base(pd_Ctx *c, pd_Reg r) {
     double *slot = pd_slot(c, r);
     if (!slot) return NULL;
-    if (r.fam == PD_FAM_GLOBAL || r.fam == PD_FAM_CONST) {
-        /* storage IS the array */
+    if (r.fam == PD_FAM_GLOBAL || r.fam == PD_FAM_CONST || r.fam == PD_FAM_EXT) {
+        /* storage IS the array (EXT: pd_slot already dereferenced the const
+         * slot's bit-cast pointer to the host variable) */
         return slot;
     }
     /* LOCAL: slot holds a bit-cast pointer */

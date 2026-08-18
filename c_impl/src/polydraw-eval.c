@@ -47,6 +47,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-d") == 0) dump = 1;
         else if (strcmp(argv[i], "-c") == 0) compileOnly = 1;
+        else if (strcmp(argv[i], "-O") == 0 || strcmp(argv[i], "--optimize") == 0)
+            pd_set_optimize(1);
         else if (strcmp(argv[i], "-f") == 0 && i+1 < argc) {
             fileBuf = read_file(argv[++i], NULL);
             if (!fileBuf) { fprintf(stderr, "cannot read %s\n", argv[i]); return 2; }
@@ -92,6 +94,8 @@ int main(int argc, char **argv) {
         pd_polystate_init(&state);
         pd_polyhost_install(&host, &state);
         phost = &host;
+    } else {
+        memset(&state, 0, sizeof(state));
     }
 
     char err[256];

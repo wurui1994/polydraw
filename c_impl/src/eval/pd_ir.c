@@ -150,7 +150,11 @@ int pd_builder_finish(pd_Builder *b, pd_Program *out) {
     if (b->nExtra) memcpy(out->extra, b->extra, b->nExtra * sizeof(pd_Reg));
 
     out->nLocals  = b->nLocals;
-    out->nParams  = 0;
+    /* Entry-point parameter count (set by the parser for evaldraw per-pixel
+     * entry points like (x,y,t) or (x,y,&r,&g,&b)). Dropping this makes the
+     * host treat every program as ()-mode and run the body once with no
+     * params — per-pixel scripts would never fill the framebuffer. */
+    out->nParams  = b->nParams;
     out->globals  = NULL;
     out->nGlobals = 0;
     out->funcs    = NULL;
@@ -168,19 +172,67 @@ void pd_program_free(pd_Program *p) {
     free(p->globals); p->globals = NULL;
 }
 
-/* ---- debug names ---- */
-static const char *g_opNames[] = {
-    "NOP","GOTO","RETURN","RND","NRND",
-    "MOV","NEGMOV","NEQU0","IF0","IF1",
-    "FABS","SGN","UNIT","FLOOR","CEIL","ROUND0",
-    "SIN","COS","TAN","ASIN","ACOS","ATAN",
-    "SQRT","EXP","FACT","LOG",
-    "TIMES","SLASH","PERC","PLUS","MINUS",
-    "LES","LESEQ","MOR","MOREQ","EQU","NEQU",
-    "LAND","LOR","POW","MIN","MAX","FADD","FMOD",
-    "ATAN2","LOGB",
-    "PEEK","POKE","POKETIMES","POKESLASH","POKEPERC","POKEPLUS","POKEMINUS",
-    "CALL","OP_END"
+/* ---- debug names ----
+ * MUST stay in lock-step with the pd_Op enum in pd_ir.h. Use explicit
+ * indices so a missing entry shifts nothing and the mapping stays correct. */
+static const char *g_opNames[(int)PD_OP_END + 1] = {
+    [PD_NOP]=      "NOP",
+    [PD_GOTO]=     "GOTO",
+    [PD_RETURN]=   "RETURN",
+    [PD_RND]=      "RND",
+    [PD_NRND]=     "NRND",
+    [PD_MOV]=      "MOV",
+    [PD_NEGMOV]=   "NEGMOV",
+    [PD_NEQU0]=    "NEQU0",
+    [PD_IF0]=      "IF0",
+    [PD_IF1]=      "IF1",
+    [PD_FABS]=     "FABS",
+    [PD_SGN]=      "SGN",
+    [PD_UNIT]=     "UNIT",
+    [PD_FLOOR]=    "FLOOR",
+    [PD_CEIL]=     "CEIL",
+    [PD_ROUND0]=   "ROUND0",
+    [PD_SIN]=      "SIN",
+    [PD_COS]=      "COS",
+    [PD_TAN]=      "TAN",
+    [PD_ASIN]=     "ASIN",
+    [PD_ACOS]=     "ACOS",
+    [PD_ATAN]=     "ATAN",
+    [PD_SQRT]=     "SQRT",
+    [PD_EXP]=      "EXP",
+    [PD_FACT]=     "FACT",
+    [PD_LOG]=      "LOG",
+    [PD_TIMES]=    "TIMES",
+    [PD_SLASH]=    "SLASH",
+    [PD_PERC]=     "PERC",
+    [PD_PLUS]=     "PLUS",
+    [PD_MINUS]=    "MINUS",
+    [PD_LES]=      "LES",
+    [PD_LESEQ]=    "LESEQ",
+    [PD_MOR]=      "MOR",
+    [PD_MOREQ]=    "MOREQ",
+    [PD_EQU]=      "EQU",
+    [PD_NEQU]=     "NEQU",
+    [PD_LAND]=     "LAND",
+    [PD_LOR]=      "LOR",
+    [PD_POW]=      "POW",
+    [PD_MIN]=      "MIN",
+    [PD_MAX]=      "MAX",
+    [PD_FADD]=     "FADD",
+    [PD_FMOD]=     "FMOD",
+    [PD_ATAN2]=    "ATAN2",
+    [PD_LOGB]=     "LOGB",
+    [PD_PEEK]=     "PEEK",
+    [PD_ADDR]=     "ADDR",
+    [PD_ADDRSLOT]= "ADDRSLOT",
+    [PD_POKE]=     "POKE",
+    [PD_POKETIMES]=  "POKETIMES",
+    [PD_POKESLASH]=  "POKESLASH",
+    [PD_POKEPERC]=   "POKEPERC",
+    [PD_POKEPLUS]=   "POKEPLUS",
+    [PD_POKEMINUS]=  "POKEMINUS",
+    [PD_CALL]=     "CALL",
+    [PD_OP_END]=   "OP_END"
 };
 const char *pd_op_name(pd_Op op) {
     if (op < 0 || op >= PD_OP_END) return "?";
@@ -202,9 +254,17 @@ void pd_dump_program(const pd_Program *p, FILE *f) {
         fprintf(f, "%4zu: %-9s", i, pd_op_name(in->op));
         if (in->out.fam != PD_FAM_VOID || in->op==PD_GOTO || in->op==PD_IF0 || in->op==PD_IF1)
             fprintf(f, " %s:%u", pd_fam_name(in->out.fam), in->out.off);
-        for (int k = 0; k < in->nIn; k++)
+        /* in[] array only has 2 slots; for nIn>2 the rest live in p->extra[] */
+        for (int k = 0; k < in->nIn && k < 2; k++)
             fprintf(f, "  %s:%u", pd_fam_name(in->in[k].fam), in->in[k].off);
-        if (in->aux >= 0) fprintf(f, "  aux=%d", in->aux);
+        /* CALL with >2 args stores the rest in p->extra[]; print them. */
+        if (in->op == PD_CALL && in->extraIdx >= 0) {
+            for (int k = 2; k < in->nIn; k++)
+                fprintf(f, "  %s:%u",
+                        pd_fam_name(p->extra[in->extraIdx + k - 2].fam),
+                        p->extra[in->extraIdx + k - 2].off);
+        }
+        if (in->aux != 0 || in->op == PD_CALL) fprintf(f, "  aux=%d", in->aux);
         fprintf(f, "\n");
     }
 }

@@ -27,6 +27,12 @@ int pd_compile_fold_host(pd_Program *prog, const char *src, const pd_Host *host,
  * result, or NaN on compile error (err filled). */
 double pd_eval(const char *src, char *err, size_t errLen);
 
+/* IR optimization (constant folding + copy propagation + DCE) toggle.
+ * Default is OFF. Enable via CLI (-O / --optimize) or this call before
+ * compiling. Affects subsequent pd_compile* calls in this process. */
+void pd_set_optimize(int enable);
+int  pd_get_optimize(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -471,12 +471,18 @@ double pd_sljit_run_jit(const pd_Program *prog, const double *params,
     pd_Ctx c;
     c.prog = prog;
     c.frame = (double*)calloc(prog->nLocals ? prog->nLocals : 1, sizeof(double));
-    c.params = params ? params : (const double*)"\0\0\0\0\0\0\0\0";
+    double *argbuf = NULL;
+    if (!params) {
+        argbuf = (double*)calloc(8, sizeof(double));
+        params = argbuf;
+    }
+    c.params = params;
     c.globals = globals;
     c.shouldQuit = q;
     c.parent = NULL;
     c.root = prog;
     double r = fn(&c);
     free(c.frame);
+    free(argbuf);
     return r;
 }

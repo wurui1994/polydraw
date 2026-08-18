@@ -156,6 +156,41 @@ int pd_lex(pd_TokenStream *t, const char *src) {
             continue;
         }
 
+        /* character literal: 'a', '\'' (escaped quote), '\n', etc.
+         * The numeric value (ASCII code) is folded into tk->num so the
+         * parser can treat it exactly like a numeric constant. */
+        if (c == '\'') {
+            size_t origOff = i;
+            int origLine = line;
+            i++; /* skip opening quote */
+            if (!src[i]) { t->ok = 0; snprintf(t->err, sizeof(t->err), "unterminated char literal"); goto finalize; }
+            double ch;
+            if (src[i] == '\\') {
+                i++;
+                switch (src[i]) {
+                    case 'n': ch = '\n'; break;
+                    case 't': ch = '\t'; break;
+                    case 'r': ch = '\r'; break;
+                    case '0': ch = 0; break;
+                    case '\'': ch = '\''; break;
+                    case '\\': ch = '\\'; break;
+                    case '"': ch = '"'; break;
+                    default: ch = (unsigned char)src[i]; break;
+                }
+                i++;
+            } else {
+                ch = (unsigned char)src[i];
+                i++;
+            }
+            if (src[i] != '\'') { t->ok = 0; snprintf(t->err, sizeof(t->err), "unterminated char literal"); goto finalize; }
+            i++; /* skip closing quote */
+            pd_Tok *tk = new_tok(t);
+            tk->kind = PD_TOK_CHAR;
+            tk->num = ch;
+            tk->origOff = origOff; tk->origLine = origLine;
+            continue;
+        }
+
         /* number: decimal, .5, hex */
         if (isdigit((unsigned char)c) || (c == '.' && isdigit((unsigned char)src[i+1]))) {
             size_t origOff = i;

@@ -9,6 +9,7 @@
 #include "eval_impl/ed_runlib.h"
 #include "eval/pd_jit.h"
 #include "eval/pd_ir.h"
+#include "eval/pd_compile.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,7 +43,7 @@ int main(int argc, char **argv) {
     const char *outpath = NULL;
     int frame = 30;
     int w = 640, h = 480;
-    int jit_mode = 2; /* 2=auto, 1=force on, 0=force off */
+    int jit_mode = 0; /* 0=off (default), 1=force on, 2=auto */
     int accum = 0;    /* --accum: cross-frame accumulation (persist mode) */
 
     for (int i = 1; i < argc; i++) {
@@ -53,6 +54,8 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--jit") == 0)                   jit_mode = 1;
         else if (strcmp(argv[i], "--no-jit") == 0)                jit_mode = 0;
         else if (strcmp(argv[i], "--accum") == 0)                 accum = 1;
+        else if (strcmp(argv[i], "-O") == 0 || strcmp(argv[i], "--optimize") == 0)
+            pd_set_optimize(1);
         else if (argv[i][0] != '-')                               script = argv[i];
     }
 
@@ -79,6 +82,20 @@ int main(int argc, char **argv) {
         return 1;
     }
     free(src);
+
+    /* set the script directory for texture file search */
+    {
+        const char *slash = strrchr(script, '/');
+        if (slash) {
+            size_t dlen = (size_t)(slash - script);
+            if (dlen >= sizeof(ctx->state.scriptDir)) dlen = sizeof(ctx->state.scriptDir) - 1;
+            memcpy(ctx->state.scriptDir, script, dlen);
+            ctx->state.scriptDir[dlen] = 0;
+        } else {
+            ctx->state.scriptDir[0] = '.';
+            ctx->state.scriptDir[1] = 0;
+        }
+    }
 
     ed_set_clock_scale(ctx, 1.0 / 60.0);
     ctx->state.persist = accum;

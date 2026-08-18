@@ -24,6 +24,15 @@ typedef struct pd_Ctx {
     double   *globals;     /* shared global static block */
     volatile int *shouldQuit; /* freeze-probe; checked in loops */
     int        quitCounter;
+    /* Suspend/resume support: when *shouldQuit fires and resumePC is >= 0
+     * capable (i.e. the caller opted in by setting resumePC = 0), pd_run_ctx
+     * stores the current instruction index here and returns. The next
+     * pd_run_ctx call continues from that instruction instead of restarting
+     * (locals/globals persist in the ctx). -1 = start from the beginning /
+     * program ran to completion. Used by the evaldraw driver to treat
+     * refresh() as a frame boundary inside `while(1){...refresh();}`
+     * scripts. */
+    long       resumePC;
     long       instrCount;   /* running total for runaway-loop guard */
     long       instrLimit;   /* stop after this many ops (-1 = unlimited) */
     struct pd_Ctx *parent; /* caller's ctx, for accessing host externs */

@@ -68,6 +68,13 @@ void ed_state_free(ed_State *s) {
     s->logBuf = NULL;
     s->logLen = 0;
     s->logCap = 0;
+    free(s->glTexData);
+    s->glTexData = NULL;
+    s->glTexW = s->glTexH = s->glTexCh = 0;
+    free(s->picData);
+    s->picData = NULL;
+    s->picName[0] = '\0';
+    s->picW = s->picH = 0;
 }
 
 void ed_state_resize(ed_State *s, int xres, int yres) {

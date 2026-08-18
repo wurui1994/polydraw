@@ -10,6 +10,10 @@
 #include <string.h>
 #include <math.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_NO_SIMD
+#include "stb_image.h"
+
 /* cls(col) or cls(r,g,b) — clear framebuffer to a color. */
 static double hf_cls(pd_Host *h, int n, const double *a) {
     ed_State *s = ST(h);
@@ -158,6 +162,87 @@ static double hf_lineto(pd_Host *h, int n, const double *a) {
         }
     }
     return 0;
+}
+
+/* sethlin(x0, y, hbuf, count) — copy `count` color values from the `hbuf`
+ * array (starting at offset 0) to the framebuffer row `y`, beginning at
+ * column `x0`. Each hbuf element is a packed 24-bit color stored as a
+ * double (0x00RRGGBB). */
+static double hf_sethlin(pd_Host *h, int n, const double *a) {
+    ed_State *s = ST(h);
+    if (n < 4)
+        return 0;
+    int x0 = (int)a[0];
+    int y  = (int)a[1];
+    double *buf;
+    memcpy(&buf, &a[2], sizeof(void*));
+    int count = (int)a[3];
+    if (!buf || y < 0 || y >= s->yres)
+        return 0;
+    for (int i = 0; i < count; i++) {
+        int x = x0 + i;
+        if (x < 0 || x >= s->xres)
+            continue;
+        uint32_t col = (uint32_t)(unsigned)(int64_t)buf[i] & 0xFFFFFF;
+        s->fb[y * s->xres + x] = col;
+    }
+    return 0;
+}
+
+/* pic(filename, x, y) — read a pixel from an image file. Returns the color
+ * as a packed 24-bit integer (0x00RRGGBB). The image is cached so repeated
+ * calls with the same filename don't reload. Used by lab3d.kc for its
+ * raycaster world map. */
+static double hf_pic(pd_Host *h, int n, const double *a) {
+    ed_State *s = ST(h);
+    if (n < 3)
+        return 0;
+
+    const char *fname = NULL;
+    memcpy(&fname, &a[0], sizeof(void*));
+    if (!fname || !fname[0])
+        return 0;
+
+    int ix = (int)a[1];
+    int iy = (int)a[2];
+
+    /* Load (or reload if filename changed) */
+    if (strncmp(s->picName, fname, sizeof(s->picName) - 1) != 0 || !s->picData) {
+        strncpy(s->picName, fname, sizeof(s->picName) - 1);
+        s->picName[sizeof(s->picName) - 1] = '\0';
+        free(s->picData);
+        s->picData = NULL;
+
+        int w, h2, ch;
+        unsigned char *img = stbi_load(fname, &w, &h2, &ch, 3);
+        if (!img && s->scriptDir[0]) {
+            char path[2048];
+            snprintf(path, sizeof(path), "%s/%s", s->scriptDir, fname);
+            img = stbi_load(path, &w, &h2, &ch, 3);
+        }
+        if (!img && s->scriptDir[0]) {
+            char path[2048];
+            snprintf(path, sizeof(path), "%s/../data/%s", s->scriptDir, fname);
+            img = stbi_load(path, &w, &h2, &ch, 3);
+        }
+        if (!img) {
+            fprintf(stderr, "[evaldraw] pic: cannot load '%s'\n", fname);
+            return 0;
+        }
+        s->picData = img;
+        s->picW = w;
+        s->picH = h2;
+    }
+
+    if (!s->picData)
+        return 0;
+
+    /* Tile-wrap coordinates (evaldraw pic() wraps) */
+    int x = ix % s->picW; if (x < 0) x += s->picW;
+    int y = iy % s->picH; if (y < 0) y += s->picH;
+
+    unsigned char *px = s->picData + (y * s->picW + x) * 3;
+    return (double)((px[0] << 16) | (px[1] << 8) | px[2]);
 }
 
 /* drawsph(x,y,z,rad) or drawsph(x,y,rad) — draw a sphere/circle. */
@@ -425,9 +510,38 @@ static double hf_glcolor(pd_Host *h, int n, const double *a) {
 
 static double hf_glsettex(pd_Host *h, int n, const double *a) {
     ed_State *s = ST(h);
-    /* texture loading is not yet wired; just record the id (use a[0] as id,
-     * or try to map a string path). For now enable textured shading flag. */
-    s->glCurTex = (int)a[0];
+    /* a[0] is a bit-cast char* filename (evaldraw convention). */
+    const char *fname = NULL;
+    if (n >= 1) memcpy(&fname, &a[0], sizeof(void*));
+    if (!fname || !fname[0]) { s->glCurTex = -1; return 0; }
+
+    /* free previous texture */
+    free(s->glTexData);
+    s->glTexData = NULL;
+    s->glTexW = s->glTexH = s->glTexCh = 0;
+
+    /* try: (1) as-is, (2) relative to script dir, (3) script dir/../data */
+    char path[2048];
+    int w, h2, ch;
+    unsigned char *img = stbi_load(fname, &w, &h2, &ch, 3);
+    if (!img && s->scriptDir[0]) {
+        snprintf(path, sizeof(path), "%s/%s", s->scriptDir, fname);
+        img = stbi_load(path, &w, &h2, &ch, 3);
+    }
+    if (!img && s->scriptDir[0]) {
+        snprintf(path, sizeof(path), "%s/../data/%s", s->scriptDir, fname);
+        img = stbi_load(path, &w, &h2, &ch, 3);
+    }
+    if (!img) {
+        fprintf(stderr, "[evaldraw] glsettex: cannot load '%s'\n", fname);
+        s->glCurTex = -1;
+        return 0;
+    }
+    s->glTexData = img;
+    s->glTexW = w;
+    s->glTexH = h2;
+    s->glTexCh = 3; /* we requested 3 channels */
+    s->glCurTex = 1; /* mark texture active */
     return 0;
 }
 
@@ -435,11 +549,16 @@ static double hf_glnormal(pd_Host *h, int n, const double *a) {
     (void)h; (void)n; (void)a; return 0; /* lighting is flat; ignore */
 }
 
-/* rasterize one Gouraud-shaded triangle with Z-test */
+/* rasterize one triangle with Z-test. Supports both Gouraud shading and
+ * texture mapping (when s->glCurTex >= 0 and glTexData is loaded). */
 static void ed_gl_triangle(ed_State *s,
         double ax, double ay, double az, double ar, double ag, double ab,
         double bx, double by, double bz, double br, double bg, double bb,
         double cx, double cy, double cz, double cr, double cg, double cb) {
+    /* per-vertex texcoords (from the vertex arrays, set by caller via the
+     * glTu/glTv fields before calling us). We read them from s->glTu/glTv
+     * at indices tracked by the caller — but that's fragile. Instead we
+     * pass them via a small static cache set right before the call. */
     double sx0, sy0, d0, sx1, sy1, d1, sx2, sy2, d2;
     ed_project3d(s, ax, ay, az, &sx0, &sy0, &d0);
     ed_project3d(s, bx, by, bz, &sx1, &sy1, &d1);
@@ -454,6 +573,7 @@ static void ed_gl_triangle(ed_State *s,
     int maxy = ed_clamp(((y0>y1?y0:y1)>y2?(y0>y1?y0:y1):y2) + 1, 0, s->yres-1);
     double det = (double)(y1 - y2) * (x0 - x2) + (double)(x2 - x1) * (y0 - y2);
     if (det == 0) return;
+    int textured = (s->glCurTex >= 0 && s->glTexData != NULL);
     for (int y = miny; y <= maxy; y++) {
         for (int x = minx; x <= maxx; x++) {
             double l0 = ((double)(y1 - y2) * (x - x2) + (double)(x2 - x1) * (y - y2)) / det;
@@ -461,9 +581,31 @@ static void ed_gl_triangle(ed_State *s,
             double l2 = 1.0 - l0 - l1;
             if (l0 < 0 || l1 < 0 || l2 < 0) continue;
             double z = l0 * d0 + l1 * d1 + l2 * d2;
-            int r = (int)(l0 * ar + l1 * br + l2 * cr);
-            int g = (int)(l0 * ag + l1 * bg + l2 * cg);
-            int b = (int)(l0 * ab + l1 * bb + l2 * cb);
+            int r, g, b;
+            if (textured) {
+                /* interpolate texcoords and sample the texture */
+                double tu = l0 * s->glTuA + l1 * s->glTuB + l2 * s->glTuC;
+                double tv = l0 * s->glTvA + l1 * s->glTvB + l2 * s->glTvC;
+                /* wrap to [0,1) */
+                tu = tu - floor(tu);
+                tv = tv - floor(tv);
+                int tx = (int)(tu * (s->glTexW - 1) + 0.5);
+                int ty = (int)(tv * (s->glTexH - 1) + 0.5);
+                if (tx < 0) tx = 0; if (tx >= s->glTexW) tx = s->glTexW - 1;
+                if (ty < 0) ty = 0; if (ty >= s->glTexH) ty = s->glTexH - 1;
+                int idx = (ty * s->glTexW + tx) * s->glTexCh;
+                r = s->glTexData[idx];
+                g = s->glTexData[idx + 1];
+                b = s->glTexData[idx + 2];
+                /* modulate with vertex color (glearth uses white setcol) */
+                r = (int)(r * ar / 255.0);
+                g = (int)(g * ag / 255.0);
+                b = (int)(b * ab / 255.0);
+            } else {
+                r = (int)(l0 * ar + l1 * br + l2 * cr);
+                g = (int)(l0 * ag + l1 * bg + l2 * cg);
+                b = (int)(l0 * ab + l1 * bb + l2 * cb);
+            }
             ed_put_pixel_z(s, x, y, z,
                 ed_pack_rgb(ed_clamp(r,0,255), ed_clamp(g,0,255), ed_clamp(b,0,255)));
         }
@@ -487,32 +629,49 @@ void ed_gl_flush(ed_State *s) {
     int cnt = s->glCount;
     if (m < 0 || cnt == 0) { s->glMode = -1; return; }
     if (m == ED_GL_TRIANGLES) {
-        for (int i = 0; i + 2 < cnt; i += 3)
+        for (int i = 0; i + 2 < cnt; i += 3) {
+            s->glTuA=s->glTu[i]; s->glTvA=s->glTv[i];
+            s->glTuB=s->glTu[i+1]; s->glTvB=s->glTv[i+1];
+            s->glTuC=s->glTu[i+2]; s->glTvC=s->glTv[i+2];
             ed_gl_triangle(s,
                 s->glVx[i],s->glVy[i],s->glVz[i],s->glCr[i],s->glCg[i],s->glCb[i],
                 s->glVx[i+1],s->glVy[i+1],s->glVz[i+1],s->glCr[i+1],s->glCg[i+1],s->glCb[i+1],
                 s->glVx[i+2],s->glVy[i+2],s->glVz[i+2],s->glCr[i+2],s->glCg[i+2],s->glCb[i+2]);
+        }
     } else if (m == ED_GL_QUADS) {
         for (int i = 0; i + 3 < cnt; i += 4) {
+            s->glTuA=s->glTu[i]; s->glTvA=s->glTv[i];
+            s->glTuB=s->glTu[i+1]; s->glTvB=s->glTv[i+1];
+            s->glTuC=s->glTu[i+2]; s->glTvC=s->glTv[i+2];
             ed_gl_triangle(s,
                 s->glVx[i],s->glVy[i],s->glVz[i],s->glCr[i],s->glCg[i],s->glCb[i],
                 s->glVx[i+1],s->glVy[i+1],s->glVz[i+1],s->glCr[i+1],s->glCg[i+1],s->glCb[i+1],
                 s->glVx[i+2],s->glVy[i+2],s->glVz[i+2],s->glCr[i+2],s->glCg[i+2],s->glCb[i+2]);
+            s->glTuA=s->glTu[i]; s->glTvA=s->glTv[i];
+            s->glTuB=s->glTu[i+2]; s->glTvB=s->glTv[i+2];
+            s->glTuC=s->glTu[i+3]; s->glTvC=s->glTv[i+3];
             ed_gl_triangle(s,
                 s->glVx[i],s->glVy[i],s->glVz[i],s->glCr[i],s->glCg[i],s->glCb[i],
                 s->glVx[i+2],s->glVy[i+2],s->glVz[i+2],s->glCr[i+2],s->glCg[i+2],s->glCb[i+2],
                 s->glVx[i+3],s->glVy[i+3],s->glVz[i+3],s->glCr[i+3],s->glCg[i+3],s->glCb[i+3]);
         }
     } else if (m == ED_GL_POLYGON || m == ED_GL_TRIANGLE_FAN) {
-        for (int i = 1; i + 1 < cnt; i++)
+        for (int i = 1; i + 1 < cnt; i++) {
+            s->glTuA=s->glTu[0]; s->glTvA=s->glTv[0];
+            s->glTuB=s->glTu[i]; s->glTvB=s->glTv[i];
+            s->glTuC=s->glTu[i+1]; s->glTvC=s->glTv[i+1];
             ed_gl_triangle(s,
                 s->glVx[0],s->glVy[0],s->glVz[0],s->glCr[0],s->glCg[0],s->glCb[0],
                 s->glVx[i],s->glVy[i],s->glVz[i],s->glCr[i],s->glCg[i],s->glCb[i],
                 s->glVx[i+1],s->glVy[i+1],s->glVz[i+1],s->glCr[i+1],s->glCg[i+1],s->glCb[i+1]);
+        }
     } else if (m == ED_GL_TRIANGLE_STRIP) {
         for (int i = 0; i + 2 < cnt; i++) {
             int a0 = i, a1 = i+1, a2 = i+2;
             if (i & 1) { int t = a1; a1 = a2; a2 = t; }
+            s->glTuA=s->glTu[a0]; s->glTvA=s->glTv[a0];
+            s->glTuB=s->glTu[a1]; s->glTvB=s->glTv[a1];
+            s->glTuC=s->glTu[a2]; s->glTvC=s->glTv[a2];
             ed_gl_triangle(s,
                 s->glVx[a0],s->glVy[a0],s->glVz[a0],s->glCr[a0],s->glCg[a0],s->glCb[a0],
                 s->glVx[a1],s->glVy[a1],s->glVz[a1],s->glCr[a1],s->glCg[a1],s->glCb[a1],
@@ -548,10 +707,16 @@ void ed_gl_flush(ed_State *s) {
         }
     } else if (m == ED_GL_QUAD_STRIP) {
         for (int i = 0; i + 3 < cnt; i += 2) {
+            s->glTuA=s->glTu[i]; s->glTvA=s->glTv[i];
+            s->glTuB=s->glTu[i+1]; s->glTvB=s->glTv[i+1];
+            s->glTuC=s->glTu[i+2]; s->glTvC=s->glTv[i+2];
             ed_gl_triangle(s,
                 s->glVx[i],s->glVy[i],s->glVz[i],s->glCr[i],s->glCg[i],s->glCb[i],
                 s->glVx[i+1],s->glVy[i+1],s->glVz[i+1],s->glCr[i+1],s->glCg[i+1],s->glCb[i+1],
                 s->glVx[i+2],s->glVy[i+2],s->glVz[i+2],s->glCr[i+2],s->glCg[i+2],s->glCb[i+2]);
+            s->glTuA=s->glTu[i+1]; s->glTvA=s->glTv[i+1];
+            s->glTuB=s->glTu[i+3]; s->glTvB=s->glTv[i+3];
+            s->glTuC=s->glTu[i+2]; s->glTvC=s->glTv[i+2];
             ed_gl_triangle(s,
                 s->glVx[i+1],s->glVy[i+1],s->glVz[i+1],s->glCr[i+1],s->glCg[i+1],s->glCb[i+1],
                 s->glVx[i+3],s->glVy[i+3],s->glVz[i+3],s->glCr[i+3],s->glCg[i+3],s->glCb[i+3],
@@ -581,9 +746,11 @@ static const ed_FnReg ed_draw_fns[] = {
     { "CLZ()",        hf_clz,      0 },
     { "SETCOL(,,)",   hf_setcol,   0 },
     { "SETPIX(,,)",   hf_setpix,   0 },
-    { "GETPIX(,$,$,$)", hf_getpix, 0 },
+    { "GETPIX(,,$,$,$)", hf_getpix, 0 },
     { "MOVETO(,,)",   hf_moveto,   0 },
     { "LINETO(,,)",   hf_lineto,   0 },
+    { "SETHLIN(,,,)", hf_sethlin, 0 },
+    { "PIC(,,)",      hf_pic,      0 },
     { "DRAWSPH(,,)",  hf_drawsph,  0 },
     { "DRAWCONE(,,)", hf_drawcone, 0 },
     { "SETCAM(,,)",   hf_setcam,   0 },

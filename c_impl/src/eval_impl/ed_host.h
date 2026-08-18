@@ -92,6 +92,25 @@ typedef struct ed_State {
     double    glTu[256], glTv[256];              /* per-vertex texcoords */
     double    glCurTu, glCurTv;                  /* current texcoord */
     int       glCurTex;     /* current texture id (-1 = none) */
+
+    /* texture image data (single active texture, software-sampled) */
+    unsigned char *glTexData;  /* RGBA or RGB packed, stb_image output */
+    int       glTexW, glTexH;  /* texture dimensions */
+    int       glTexCh;         /* channels (3=RGB, 4=RGBA) */
+
+    /* current-triangle texcoord cache (set by ed_gl_flush before each
+     * ed_gl_triangle call, read inside the rasterizer) */
+    double    glTuA, glTvA, glTuB, glTvB, glTuC, glTvC;
+
+    /* script directory for texture file search (set by caller) */
+    char      scriptDir[1024];
+
+    /* pic() image cache — lab3d.kc and similar scripts call pic(filename,x,y)
+     * per-pixel to read from a source image. We cache loaded images here so
+     * they're only loaded once. */
+    char      picName[256];      /* filename of currently cached image */
+    unsigned char *picData;      /* RGB pixel data */
+    int       picW, picH;        /* image dimensions */
 } ed_State;
 
 void ed_state_init(ed_State *s, int xres, int yres);
