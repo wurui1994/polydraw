@@ -68,7 +68,7 @@ function parseArgs(argv: string[]): Args {
   return a;
 }
 
-// Decode an image file into the C reference's packed format: one 0xAABBGGRR
+// Decode an image file into the C reference's packed format: one 0xAARRGGBB
 // double per texel (exactly pd_polyhost_tex.c decode_file()). Supports PNG via
 // the built-in decoder; JPEG via `sips` (macOS; equivalent to stb_image).
 function decodeImage(file: string): { w: number; h: number; rgb: number[] } | null {

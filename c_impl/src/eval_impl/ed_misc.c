@@ -104,6 +104,59 @@ static double hf_noise(pd_Host *h, int n, const double *a) {
     return frac * 2.0 - 1.0; /* range [-1, 1] */
 }
 
+/* ---- noise3d: Ken Silverman style 3D value noise (evaldraw reference) ----
+ * Interpolated value noise on an integer lattice: hash each lattice point to
+ * a [0,1) value, then trilinearly interpolate with a smoothstep fade.
+ * This matches the smooth organic look scripts like glwavy.kc expect
+ * (noise3d(x*.21,y*.27,t*.33) displacing a height field). */
+
+static unsigned ed_noise_rand(unsigned s) {
+    /* Ken-style bit mixer: deterministic, decent distribution. */
+    s ^= s >> 13; s *= 0x788a9ed9u; s ^= s >> 7; s *= 0x4a39b0d1u; s ^= s >> 11;
+    return s;
+}
+
+static double ed_noise_val(int xi, int yi, int zi) {
+    unsigned h = (unsigned)xi * 92837111u ^ (unsigned)yi * 689287499u ^
+                 (unsigned)zi * 283923481u;
+    return (double)(ed_noise_rand(h) & 0xFFFFFF) / (double)0xFFFFFF; /* [0,1] */
+}
+
+/* noise3d(x,y,z) — smooth interpolated 3D value noise, range [0,1]. */
+static double hf_noise3d(pd_Host *h, int n, const double *a) {
+    (void)h;
+    if (n < 3)
+        return 0;
+
+    double x = a[0], y = a[1], z = a[2];
+    int x0 = (int)floor(x), y0 = (int)floor(y), z0 = (int)floor(z);
+    double fx = x - x0, fy = y - y0, fz = z - z0;
+
+    /* smoothstep fade */
+    double u = fx * fx * (3 - 2 * fx);
+    double v = fy * fy * (3 - 2 * fy);
+    double w = fz * fz * (3 - 2 * fz);
+
+    /* trilinear interpolation of the 8 lattice values */
+    double v000 = ed_noise_val(x0,     y0,     z0    );
+    double v100 = ed_noise_val(x0 + 1, y0,     z0    );
+    double v010 = ed_noise_val(x0,     y0 + 1, z0    );
+    double v110 = ed_noise_val(x0 + 1, y0 + 1, z0    );
+    double v001 = ed_noise_val(x0,     y0,     z0 + 1);
+    double v101 = ed_noise_val(x0 + 1, y0,     z0 + 1);
+    double v011 = ed_noise_val(x0,     y0 + 1, z0 + 1);
+    double v111 = ed_noise_val(x0 + 1, y0 + 1, z0 + 1);
+
+    double x00 = v000 + (v100 - v000) * u;
+    double x10 = v010 + (v110 - v010) * u;
+    double x01 = v001 + (v101 - v001) * u;
+    double x11 = v011 + (v111 - v011) * u;
+
+    double y0v = x00 + (x10 - x00) * v;
+    double y1v = x01 + (x11 - x01) * v;
+    return y0v + (y1v - y0v) * w;
+}
+
 /* printf(fmt, ...) — formatted output to log buffer or stdout. */
 static double hf_printf(pd_Host *h, int n, const double *a) {
     ed_State *s = ST(h);
@@ -164,6 +217,31 @@ static double hf_printf(pd_Host *h, int n, const double *a) {
     }
     buf[bi] = '\0';
     ed_log(s, buf, bi);
+    /* evaldraw printf() renders text at the cursor (console-style) using the
+     * current font and color, and advances the cursor. \n moves to the next
+     * line, \r returns to column 0, \t advances to the next 8-char stop. */
+    {
+        uint32_t col = ed_current_color(s);
+        int fw = (int)(s->fontW > 0 ? s->fontW : 5);
+        int fh = (int)(s->fontH > 0 ? s->fontH : 7);
+        for (const char *p = buf; *p; p++) {
+            switch (*p) {
+                case '\n':
+                    s->curY += fh;
+                    break;
+                case '\r':
+                    s->curX = 0;
+                    break;
+                case '\t':
+                    s->curX = ((int)(s->curX / fw) / 8 + 1) * 8 * fw;
+                    break;
+                default:
+                    ed_draw_char(s, (int)s->curX, (int)s->curY, *p, col);
+                    s->curX += fw;
+                    break;
+            }
+        }
+    }
     return 0;
 }
 
@@ -191,6 +269,7 @@ static const ed_FnReg ed_misc_fns[] = {
     { "RGB(,,)",     hf_rgb,     0 },
     { "RGBA(,,)",    hf_rgba,    0 },
     { "NOISE(,,)",   hf_noise,   0 },
+    { "NOISE3D(,,)", hf_noise3d, 0 },
     { "PRINTF($,.)", hf_printf,  1 },
     { "SETGRID(,,)", hf_setgrid, 0 },
     { NULL, NULL, 0 }

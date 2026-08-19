@@ -12,7 +12,7 @@ import type { GLSLProgram, GLSLVaryings, GLSLVaryRecord, GLSLVertexRunner } from
 // the output RGB in [0,1] or null to discard.
 export interface Varyings {
   r: number; g: number; b: number; a: number;
-  s: number; t: number;
+  s: number; t: number; p: number; // p = 3rd texcoord (3D texture R coord)
   nx: number; ny: number; nz: number;
   // object-space position (gl_Vertex): interpolated for shaders that sample p
   ox: number; oy: number; oz: number; ow: number;
@@ -169,6 +169,61 @@ export class SoftRenderer {
     return [c0[0] + (c1[0] - c0[0]) * f, c0[1] + (c1[1] - c0[1]) * f, c0[2] + (c1[2] - c0[2]) * f];
   }
 
+  // 3D (volumetric) texture sampling: data is laid out slice[z][y][x] with
+  // w*h*3 floats per slice — the same order the script filled the buffer
+  // (iz outermost). Internal filter convention: 0=NEAREST, 1=LINEAR
+  // (trilinear 8-tap over the volume); 3D textures never carry mips.
+  private sampleTex3D(T: { w: number; h: number; d: number; data: Float32Array; filter: number; wrap: number }, s: number, t: number, r: number): [number, number, number] {
+    const { w, h, d, data, filter, wrap } = T;
+    const wrapC = (c: number) => {
+      if (wrap === 2 || wrap === 3) return Math.min(1, Math.max(0, c));
+      if (wrap === 1) { const i = Math.floor(c); const f = c - i; return (i & 1) ? 1 - f : f; }
+      return c - Math.floor(c);
+    };
+    const u = wrapC(s), v = wrapC(t), q = wrapC(r);
+    if (filter === 0) {
+      const px = Math.min(w - 1, Math.max(0, Math.floor(u * w)));
+      const py = Math.min(h - 1, Math.max(0, Math.floor(v * h)));
+      const pz = Math.min(d - 1, Math.max(0, Math.floor(q * d)));
+      const o = ((pz * h + py) * w + px) * 3;
+      return [data[o], data[o + 1], data[o + 2]];
+    }
+    // GL_LINEAR on TEXTURE_3D = trilinear: bilinear in x/y on the two
+    // bracketing z slices, then linear across them.
+    const sx = u * w - 0.5, sy = v * h - 0.5, sz = q * d - 0.5;
+    const x0 = Math.floor(sx), y0 = Math.floor(sy), z0 = Math.floor(sz);
+    const fx = sx - x0, fy = sy - y0, fz = sz - z0;
+    const ix = (xi: number) => {
+      if (wrap === 2 || wrap === 3) return Math.min(w - 1, Math.max(0, xi));
+      if (wrap === 1) { let x = ((xi % (2 * w)) + 2 * w) % (2 * w); if (x >= w) x = 2 * w - 1 - x; return x; }
+      return ((xi % w) + w) % w;
+    };
+    const iy = (yi: number) => {
+      if (wrap === 2 || wrap === 3) return Math.min(h - 1, Math.max(0, yi));
+      if (wrap === 1) { let y = ((yi % (2 * h)) + 2 * h) % (2 * h); if (y >= h) y = 2 * h - 1 - y; return y; }
+      return ((yi % h) + h) % h;
+    };
+    const iz = (zi: number) => {
+      if (wrap === 2 || wrap === 3) return Math.min(d - 1, Math.max(0, zi));
+      if (wrap === 1) { let z = ((zi % (2 * d)) + 2 * d) % (2 * d); if (z >= d) z = 2 * d - 1 - z; return z; }
+      return ((zi % d) + d) % d;
+    };
+    const xa = ix(x0), xb = ix(x0 + 1), ya = iy(y0), yb = iy(y0 + 1);
+    const za = iz(z0), zb = iz(z0 + 1);
+    const texel = (x: number, y: number, z: number, c: number) => data[((z * h + y) * w + x) * 3 + c];
+    const out: [number, number, number] = [0, 0, 0];
+    for (let c = 0; c < 3; c++) {
+      const c00 = texel(xa, ya, za, c) + (texel(xb, ya, za, c) - texel(xa, ya, za, c)) * fx;
+      const c10 = texel(xa, yb, za, c) + (texel(xb, yb, za, c) - texel(xa, yb, za, c)) * fx;
+      const c01 = texel(xa, ya, zb, c) + (texel(xb, ya, zb, c) - texel(xa, ya, zb, c)) * fx;
+      const c11 = texel(xa, yb, zb, c) + (texel(xb, yb, zb, c) - texel(xa, yb, zb, c)) * fx;
+      const c0 = c00 + (c10 - c00) * fy;
+      const c1 = c01 + (c11 - c01) * fy;
+      out[c] = c0 + (c1 - c0) * fz;
+    }
+    return out;
+  }
+
   private sampleTexLevel(T: { w: number; h: number; data: Float32Array; filter: number; wrap: number }, s: number, t: number): [number, number, number] {
     const { w, h, data, filter, wrap } = T;
     const wrapCoord = (c: number) => {
@@ -276,7 +331,7 @@ export class SoftRenderer {
       if (entry) {
         const gv: GLSLVaryings = {
           r: vv.r, g: vv.g, b: vv.b, a: vv.a,
-          s: vv.s, t: vv.t, p: 0, q: 1,
+          s: vv.s, t: vv.t, p: vv.p, q: 1,
           nx: vv.nx, ny: vv.ny, nz: vv.nz,
           px: vv.ox, py: vv.oy, pz: vv.oz, pw: vv.ow,
           ndx: vv.ndx, ndy: vv.ndy, ndz: vv.ndz, ndw: vv.ndw,
@@ -289,13 +344,13 @@ export class SoftRenderer {
         // by glactivetexture(GL_TEXTURE0+N)+glbindtexture(id).
         const units = b.texUnits ?? null;
         const tex = units
-          ? (unit: number, u: number, v: number) => {
+          ? (unit: number, u: number, v: number, w?: number) => {
             const tid = units[unit] ?? units[0];
-            const t = tid >= 0 ? this.sampleTex(tid, u, v, this.curTexLod) : null;
+            const t = tid >= 0 ? this.sampleTex(tid, u, v, this.curTexLod, w) : null;
             return t ?? [0, 0, 0];
           }
-          : b.tex >= 0 ? (unit: number, u: number, v: number) => {
-            const t = this.sampleTex(b.tex, u, v, this.curTexLod);
+          : b.tex >= 0 ? (unit: number, u: number, v: number, w?: number) => {
+            const t = this.sampleTex(b.tex, u, v, this.curTexLod, w);
             return t ?? [0, 0, 0];
           } : null;
         try {
@@ -329,7 +384,11 @@ export class SoftRenderer {
   uploadTex(id: number, w: number, h: number, pixels: number[] | null, colmode = 0, z = 1): void {
     if (!pixels) return;
     const cm = colmode & 15;
-    const filter = (colmode >> 4) & 0xF;
+    const fnib = (colmode >> 4) & 0xF;
+    // KGL filter nibble: 0=KGL_LINEAR (bilinear), 1=KGL_NEAREST, 2..5=MIPMAP
+    // (polydraw.c:191). Normalize to this renderer's internal convention
+    // (0=NEAREST, 1=LINEAR, 2+=MIPMAP) — the same one captureToTex uses.
+    const filter = fnib === 0 ? 1 : fnib === 1 ? 0 : fnib;
     const wrap = (colmode >> 8) & 0xF;
     const dep = z > 1 ? z : 1;
     const n = w * h * dep;
@@ -349,7 +408,9 @@ export class SoftRenderer {
         data[i * 3 + 2] = pixels[i * 4 + 2] ?? 0;
       }
     }
-    this.tex.set(id, { w, h, d: dep, data, filter, wrap, mips: filter >= 2 ? this.genMips(w, h, data, wrap) : undefined });
+    // 3D textures: no mip chain (genMips is 2D; C's 3D path also skips mips
+    // unless explicitly requested — ken scripts never do).
+    this.tex.set(id, { w, h, d: dep, data, filter, wrap, mips: filter >= 2 && dep === 1 ? this.genMips(w, h, data, wrap) : undefined });
   }
 
   // Box-filter mip chain (mirrors glGenerateMipmap). Each level is half the
@@ -396,7 +457,7 @@ export class SoftRenderer {
       const srow = (h - 1 - y) * w * 3, drow = y * w * 3;
       for (let x = 0; x < w * 3; x++) data[drow + x] = src[srow + x];
     }
-    this.tex.set(id, { w, h, data, filter: 1, wrap: 2 }); // GL_LINEAR + CLAMP_TO_EDGE (C captureToTex)
+    this.tex.set(id, { w, h, d: 1, data, filter: 1, wrap: 2 }); // GL_LINEAR + CLAMP_TO_EDGE (C captureToTex)
     this.target = this.img;
     this.capBuf = null;
   }
@@ -423,7 +484,7 @@ export class SoftRenderer {
   render(scene: { batches: DrawBatch[]; captures?: { afterIndex: number; tex: number }[]; texData?: { id: number; w: number; h: number; z: number; colmode: number; pixels: number[] | null }[] }, onBatch?: (info: BatchTraceInfo) => void): void {
     const { width, height } = this.opt;
     const batches = scene.batches;
-    for (const td of scene.texData ?? []) this.uploadTex(td.id, td.w, td.h, td.pixels, td.colmode);
+    for (const td of scene.texData ?? []) this.uploadTex(td.id, td.w, td.h, td.pixels, td.colmode, td.z);
     const captures = scene.captures ?? [];
     let capIdx = 0;
     // C clears at the start of each frame unless the stream has an explicit
@@ -485,7 +546,7 @@ export class SoftRenderer {
           const maxX = Math.min(width - 1, Math.ceil(cx + half));
           const minY = Math.max(0, Math.floor(cy - half));
           const maxY = Math.min(height - 1, Math.ceil(cy + half));
-          const vv: Varyings = { r: vs[i].r, g: vs[i].g, b: vs[i].b, a: vs[i].a, s: vs[i].s, t: vs[i].t, nx: vs[i].nx, ny: vs[i].ny, nz: vs[i].nz, ox: vs[i].x, oy: vs[i].y, oz: vs[i].z, ow: vs[i].w };
+          const vv: Varyings = { r: vs[i].r, g: vs[i].g, b: vs[i].b, a: vs[i].a, s: vs[i].s, t: vs[i].t, p: vs[i].p, nx: vs[i].nx, ny: vs[i].ny, nz: vs[i].nz, ox: vs[i].x, oy: vs[i].y, oz: vs[i].z, ow: vs[i].w };
           const out = this.resolveColor(b, vv, vvary[i] ?? null);
           if (!out) continue;
           const fd = lastFragDepth();
@@ -534,6 +595,7 @@ export class SoftRenderer {
             a: vs[idx].a + (vs[ib].a - vs[idx].a) * t,
             s: vs[idx].s + (vs[ib].s - vs[idx].s) * t,
             t: vs[idx].t + (vs[ib].t - vs[idx].t) * t,
+            p: vs[idx].p + (vs[ib].p - vs[idx].p) * t,
             nx: vs[idx].nx, ny: vs[idx].ny, nz: vs[idx].nz,
             ox: vs[idx].x + (vs[ib].x - vs[idx].x) * t,
             oy: vs[idx].y + (vs[ib].y - vs[idx].y) * t,
@@ -724,9 +786,9 @@ export class SoftRenderer {
     const wa = clip[a][3], wb = clip[bb][3], wc = clip[c][3];
     const iwa = 1 / wa, iwb = 1 / wb, iwc = 1 / wc;
     // per-vertex varyings (with NDC for `p = gl_Position` shaders)
-    const va = { r: vs[a].r, g: vs[a].g, b: vs[a].b, a: vs[a].a, s: vs[a].s, t: vs[a].t, nx: vs[a].nx, ny: vs[a].ny, nz: vs[a].nz, ox: vs[a].x, oy: vs[a].y, oz: vs[a].z, ow: vs[a].w, ndx: pa[0], ndy: pa[1], ndz: pa[2], ndw: 1 };
-    const vb = { r: vs[bb].r, g: vs[bb].g, b: vs[bb].b, a: vs[bb].a, s: vs[bb].s, t: vs[bb].t, nx: vs[bb].nx, ny: vs[bb].ny, nz: vs[bb].nz, ox: vs[bb].x, oy: vs[bb].y, oz: vs[bb].z, ow: vs[bb].w, ndx: pb[0], ndy: pb[1], ndz: pb[2], ndw: 1 };
-    const vc = { r: vs[c].r, g: vs[c].g, b: vs[c].b, a: vs[c].a, s: vs[c].s, t: vs[c].t, nx: vs[c].nx, ny: vs[c].ny, nz: vs[c].nz, ox: vs[c].x, oy: vs[c].y, oz: vs[c].z, ow: vs[c].w, ndx: pc[0], ndy: pc[1], ndz: pc[2], ndw: 1 };
+    const va = { r: vs[a].r, g: vs[a].g, b: vs[a].b, a: vs[a].a, s: vs[a].s, t: vs[a].t, p: vs[a].p, nx: vs[a].nx, ny: vs[a].ny, nz: vs[a].nz, ox: vs[a].x, oy: vs[a].y, oz: vs[a].z, ow: vs[a].w, ndx: pa[0], ndy: pa[1], ndz: pa[2], ndw: 1 };
+    const vb = { r: vs[bb].r, g: vs[bb].g, b: vs[bb].b, a: vs[bb].a, s: vs[bb].s, t: vs[bb].t, p: vs[bb].p, nx: vs[bb].nx, ny: vs[bb].ny, nz: vs[bb].nz, ox: vs[bb].x, oy: vs[bb].y, oz: vs[bb].z, ow: vs[bb].w, ndx: pb[0], ndy: pb[1], ndz: pb[2], ndw: 1 };
+    const vc = { r: vs[c].r, g: vs[c].g, b: vs[c].b, a: vs[c].a, s: vs[c].s, t: vs[c].t, p: vs[c].p, nx: vs[c].nx, ny: vs[c].ny, nz: vs[c].nz, ox: vs[c].x, oy: vs[c].y, oz: vs[c].z, ow: vs[c].w, ndx: pc[0], ndy: pc[1], ndz: pc[2], ndw: 1 };
     // flatten the three vertices' varying records for fast interpolation:
     // names[] + per-name component arrays scaled by 1/w (perspective form)
     const vya = vvary[a] ?? {}, vyb = vvary[bb] ?? {}, vyc = vvary[c] ?? {};
@@ -804,6 +866,7 @@ export class SoftRenderer {
           a: wA * va.a + wB * vb.a + wC * vc.a,
           s: wA * va.s + wB * vb.s + wC * vc.s,
           t: wA * va.t + wB * vb.t + wC * vc.t,
+          p: wA * va.p + wB * vb.p + wC * vc.p,
           nx: wA * va.nx + wB * vb.nx + wC * vc.nx,
           ny: wA * va.ny + wB * vb.ny + wC * vc.ny,
           nz: wA * va.nz + wB * vb.nz + wC * vc.nz,
@@ -890,6 +953,7 @@ export class SoftRenderer {
           a: va.a + (vb.a - va.a) * t,
           s: va.s + (vb.s - va.s) * t,
           t: va.t + (vb.t - va.t) * t,
+          p: va.p + (vb.p - va.p) * t,
           nx: va.nx, ny: va.ny, nz: va.nz,
           ox: va.ox + (vb.ox - va.ox) * t,
           oy: va.oy + (vb.oy - va.oy) * t,

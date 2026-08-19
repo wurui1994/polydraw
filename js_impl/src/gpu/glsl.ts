@@ -880,7 +880,7 @@ export function compileGLSL(src: string, vmap?: Map<string, string>): GLSLProgra
     }
     body.push(bind('gl_Color', '[vary.r,vary.g,vary.b,vary.a]'));
     body.push(bind('gl_Vertex', '[vary.px,vary.py,vary.pz,vary.pw]'));
-    body.push(bind('gl_MultiTexCoord0', '[vary.s,vary.t,0,1]'));
+    body.push(bind('gl_MultiTexCoord0', '[vary.s,vary.t,vary.p,1]'));
     // unit-0 fallbacks for shaders that sample an UNDECLARED tex0/tex
     if (!parser.uniSamplers.includes('tex0')) body.push(bind('tex0', '0'));
     if (!parser.uniSamplers.includes('tex')) body.push(bind('tex', '0'));

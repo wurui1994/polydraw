@@ -111,6 +111,10 @@ typedef struct ed_State {
     char      picName[256];      /* filename of currently cached image */
     unsigned char *picData;      /* RGB pixel data */
     int       picW, picH;        /* image dimensions */
+
+    /* drawkv6()/drawspr() model cache — one KV6 voxel model at a time. */
+    char      kv6Name[256];      /* filename of currently cached model */
+    struct ed_Kv6 *kv6;          /* parsed voxel model (NULL = none) */
 } ed_State;
 
 void ed_state_init(ed_State *s, int xres, int yres);
