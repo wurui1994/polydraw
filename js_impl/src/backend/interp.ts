@@ -1,7 +1,7 @@
 // EVAL interpreter — TypeScript port of c_impl/src/eval/pd_interp.c.
 // Walks instr[] and evaluates. Mirrors original kasm87c_run (eval.c:5579).
 
-import type { Program, Instr, Reg } from '../eval/ir.ts';
+import type { Program, Instr, Reg, Host, HostFn } from '../eval/ir.ts';
 import { Op, Fam, NEGMOV } from '../eval/ir.ts';
 
 // RNG — exact port of original krand/nrnd (eval.c:497, 503) so srand()/RND/NRND
@@ -207,7 +207,7 @@ export function runCtx(c: Ctx): number {
     const a = in_.nIn >= 1 ? slotValue(c, in_.in0) : 0;
     const b = in_.nIn >= 2 ? slotValue(c, in_.in1) : 0;
 
-    switch (op) {
+    switch (op as number) {
       case Op.NOP: break;
       case Op.GOTO: i = in_.out.off; continue;
       case Op.RETURN: return a;
@@ -325,6 +325,39 @@ export function runCtx(c: Ctx): number {
 }
 
 export function run(prog: Program, params: Float64Array | number[] | null, globals: Float64Array, shouldQuit: { value: boolean } | null): number {
+  // JIT fast path: compile the program body once, then execute natively.
+  const DBG = typeof process !== 'undefined' && !!process.env.PD_JIT_DEBUG;
+  const NO_JIT = typeof process !== 'undefined' && !!process.env.PD_NO_JIT;
+  let f = jitRoots.get(prog);
+  if (!NO_JIT && f === undefined) {
+    try {
+      f = makeJitFn(prog);
+      if (DBG) console.error(`[jit] root compile ok: ${prog.instr.length} instrs`);
+    } catch (e) {
+      if (DBG) console.error(`[jit] root compile FAILED: ${e}`);
+      f = null;
+    }
+    jitRoots.set(prog, f);
+  }
+  if (f) {
+    const orig = params;
+    const P = params instanceof Float64Array ? params : Float64Array.from(params ?? [0]);
+    const H = prog.host ?? null;
+    const B = makeJitBridge(prog, globals, shouldQuit, H);
+    try {
+      const r = f(P, globals, prog.consts, shouldQuit, prog, H, B);
+      // mirror the interpreter: PARAM writes go back to a plain-array caller
+      if (Array.isArray(orig)) {
+        const m = Math.min(orig.length, P.length);
+        for (let k = 0; k < m; k++) orig[k] = P[k];
+      }
+      return r;
+    } catch (e) {
+      if (DBG) console.error(`[jit] RUNTIME error: ${(e as Error)?.stack ?? e}`);
+      if (DBG) return 0;
+      throw e;
+    }
+  }
   const c: Ctx = {
     prog,
     frame: new Float64Array(prog.nLocals || 1),
@@ -335,4 +368,281 @@ export function run(prog: Program, params: Float64Array | number[] | null, globa
     root: prog,
   };
   return runCtx(c);
+}
+
+// ==================== JIT-JS backend ====================
+// The tree-walking interpreter above costs ~2 closures + 1 object per
+// instruction; texture3d.pss calls voxfunc 262144 times and profiles at
+// >90% of CPU in runCtx. Each user function / program body is instead
+// compiled to a native JS function (while+switch dispatch over the flat
+// bytecode, all slots as direct Float64Array accesses).
+
+interface JitBridge {
+  KRAND: typeof krand; NRND: typeof nrnd; FACT: typeof fact; BND: typeof bounds;
+  GV: (i: number) => Float64Array; DEREF: typeof ptrDeref;
+  PRD: (p: PtrView | null, j: number) => number; PWR: (p: PtrView | null, j: number, v: number) => void;
+  MINT: (v: PtrView | null) => number; HV: (vi: number) => PtrView | null;
+  HVG: (vi: number) => number; HF: (hidx: number) => HostFn | undefined;
+  CAL: (idx: number, args: number[]) => number;
+}
+
+type JitFn = (P: Float64Array, G: Float64Array, C: number[], SQ: { value: boolean } | null, RT: Program, H: Host | null, B: JitBridge) => number;
+
+const jitRoots = new WeakMap<Program, JitFn | null>();
+const jitFuncs = new WeakMap<Program, (JitFn | null)[]>();
+
+function jitRd(r: Reg): string {
+  switch (r.fam) {
+    case Fam.LOCAL: return `_L[${r.off / 8}]`;
+    case Fam.PARAM: return `_P[${r.off / 8}]`;
+    case Fam.GLOBAL: return `_G[${r.off / 8}]`;
+    case Fam.CONST: return `_C[${r.off / 8}]`;
+    case Fam.EXT: return `B.HVG(_C[${r.off / 8}])`;
+    default: return '0';
+  }
+}
+
+function jitWr(r: Reg): string | null {
+  switch (r.fam) {
+    case Fam.LOCAL: return `_L[${r.off / 8}]`;
+    case Fam.PARAM: return `_P[${r.off / 8}]`;
+    case Fam.GLOBAL: return `_G[${r.off / 8}]`;
+    case Fam.CONST: return `_C[${r.off / 8}]`;
+    default: return null; // EXT/LABEL/PTR/VOID: mirrors slotRef default noop
+  }
+}
+
+// PtrView-producing expression for PEEK/POKE/ADDR (mirrors arrayBase).
+function jitBase(r: Reg): string {
+  switch (r.fam) {
+    case Fam.GLOBAL: return `B.GV(${r.off / 8})`;
+    case Fam.PARAM: return `B.DEREF(_P[${r.off / 8}])`;
+    case Fam.LOCAL: return `B.DEREF(_L[${r.off / 8}])`;
+    default: return 'null';
+  }
+}
+
+function jitBody(prog: Program): string {
+  const L: string[] = [];
+  L.push(`var _L = new Float64Array(${prog.nLocals || 1});`);
+  L.push('var _P = P, _G = G, _C = C;');
+  L.push('var pc = 0, _qc = 0;');
+  L.push('for (;;) {');
+  L.push('  if (++_qc >= 4096) { _qc = 0; if (SQ && SQ.value) return 0; }');
+  L.push('  switch (pc) {');
+  for (let i = 0; i < prog.instr.length; i++) {
+    const in_ = prog.instr[i];
+    const hasOut = in_.op !== Op.GOTO && in_.op !== Op.IF0 && in_.op !== Op.IF1;
+    const o = hasOut ? jitWr(in_.out) : null;
+    const a = in_.nIn >= 1 ? jitRd(in_.in0) : '0';
+    const b = in_.nIn >= 2 ? jitRd(in_.in1) : '0';
+    const set = (e: string) => (o ? `${o}=${e};` : '');
+    let s = '';
+    switch (in_.op as number) {
+      case Op.NOP: s = ';'; break;
+      case Op.GOTO: s = `pc=${in_.out.off};`; break;
+      case Op.RETURN: s = `return ${a};`; break;
+      case Op.RND: s = set('B.KRAND() * 4.656612873077393e-10'); break;
+      case Op.NRND: s = set('B.NRND()'); break;
+      case Op.MOV: s = set(a); break;
+      case NEGMOV: s = set(`-(${a})`); break;
+      case Op.NEQU0: s = set(`(${a} !== 0 ? 1 : 0)`); break;
+      case Op.IF0: s = `if (${a} === 0) { pc=${in_.out.off}; } else { pc=${i + 1}; }`; break;
+      case Op.IF1: s = `if (${a} !== 0) { pc=${in_.out.off}; } else { pc=${i + 1}; }`; break;
+      case Op.FABS: s = set(`Math.abs(${a})`); break;
+      case Op.SGN: s = set(`((${a} > 0 ? 1 : 0) - (${a} < 0 ? 1 : 0))`); break;
+      case Op.UNIT: s = set(`((${a} === 0 ? 0.5 : 0) + (${a} > 0 ? 1 : 0))`); break;
+      case Op.FLOOR: s = set(`Math.floor(${a})`); break;
+      case Op.CEIL: s = set(`Math.ceil(${a})`); break;
+      case Op.ROUND0: s = set(`(${a} >= 0 ? Math.floor(${a}) : -Math.floor(-${a}))`); break;
+      case Op.SIN: s = set(`Math.sin(${a})`); break;
+      case Op.COS: s = set(`Math.cos(${a})`); break;
+      case Op.TAN: s = set(`Math.tan(${a})`); break;
+      case Op.ASIN: s = set(`Math.asin(${a})`); break;
+      case Op.ACOS: s = set(`Math.acos(${a})`); break;
+      case Op.ATAN: s = set(`Math.atan(${a})`); break;
+      case Op.SQRT: s = set(`Math.sqrt(${a})`); break;
+      case Op.EXP: s = set(`Math.exp(${a})`); break;
+      case Op.FACT: s = set(`B.FACT(${a})`); break;
+      case Op.LOG: s = set(`Math.log(${a})`); break;
+      case Op.TIMES: s = set(`(${a} * ${b})`); break;
+      case Op.SLASH: s = set(`(${a} / ${b})`); break;
+      case Op.PERC: s = set(`(${a} - Math.floor(${a} / Math.abs(${b})) * Math.abs(${b}))`); break;
+      case Op.PLUS:
+      case Op.FADD: s = set(`(${a} + ${b})`); break;
+      case Op.MINUS: s = set(`(${a} - ${b})`); break;
+      case Op.POW: s = set(`Math.pow(${a}, ${b})`); break;
+      case Op.MIN: s = set(`(${b} < ${a} ? ${b} : ${a})`); break;
+      case Op.MAX: s = set(`(${b} > ${a} ? ${b} : ${a})`); break;
+      case Op.FMOD: s = set(`(${a} % ${b})`); break;
+      case Op.ATAN2: s = set(`Math.atan2(${a}, ${b})`); break;
+      case Op.LOGB: s = set(`(Math.log(${a}) / Math.log(${b}))`); break;
+      case Op.LES: s = set(`(${a} < ${b} ? 1 : 0)`); break;
+      case Op.LESEQ: s = set(`(${a} <= ${b} ? 1 : 0)`); break;
+      case Op.MOR: s = set(`(${a} > ${b} ? 1 : 0)`); break;
+      case Op.MOREQ: s = set(`(${a} >= ${b} ? 1 : 0)`); break;
+      case Op.EQU: s = set(`(${a} === ${b} ? 1 : 0)`); break;
+      case Op.NEQU: s = set(`(${a} !== ${b} ? 1 : 0)`); break;
+      case Op.LAND: s = set(`((${a} !== 0 && ${b} !== 0) ? 1 : 0)`); break;
+      case Op.LOR: s = set(`((${a} !== 0 || ${b} !== 0) ? 1 : 0)`); break;
+      case Op.PEEK: {
+        const base = jitBase(in_.in0);
+        s = set(`B.PRD(${base}, B.BND((${b}) | 0, ${in_.aux}))`);
+        break;
+      }
+      case Op.ADDR: {
+        const base = jitBase(in_.in0);
+        s = set(`B.MINT(${base})`);
+        break;
+      }
+      case Op.ADDRSLOT: {
+        let sv: string;
+        switch (in_.in0.fam) {
+          case Fam.LOCAL: sv = `_L.subarray(${in_.in0.off / 8}, ${in_.in0.off / 8 + 1})`; break;
+          case Fam.PARAM: sv = `_P.subarray(${in_.in0.off / 8}, ${in_.in0.off / 8 + 1})`; break;
+          case Fam.GLOBAL: sv = `_G.subarray(${in_.in0.off / 8}, ${in_.in0.off / 8 + 1})`; break;
+          case Fam.EXT: sv = `B.HV(_C[${in_.in0.off / 8}])`; break;
+          default: sv = 'null';
+        }
+        s = set(`B.MINT(${sv})`);
+        break;
+      }
+      case Op.POKE: {
+        const base = jitBase(in_.out);
+        s = `B.PWR(${base}, B.BND((${b}) | 0, ${in_.aux}), ${a});`;
+        break;
+      }
+      case Op.POKETIMES: {
+        const base = jitBase(in_.out);
+        s = `{var _j = B.BND((${b}) | 0, ${in_.aux}); B.PWR(${base}, _j, B.PRD(${base}, _j) * ${a});}`;
+        break;
+      }
+      case Op.POKESLASH: {
+        const base = jitBase(in_.out);
+        s = `{var _j = B.BND((${b}) | 0, ${in_.aux}); B.PWR(${base}, _j, B.PRD(${base}, _j) / ${a});}`;
+        break;
+      }
+      case Op.POKEPERC: {
+        const base = jitBase(in_.out);
+        s = `{var _j = B.BND((${b}) | 0, ${in_.aux}); var _v = B.PRD(${base}, _j); B.PWR(${base}, _j, _v - Math.floor(_v / Math.abs(${a})) * Math.abs(${a}));}`;
+        break;
+      }
+      case Op.POKEPLUS: {
+        const base = jitBase(in_.out);
+        s = `{var _j = B.BND((${b}) | 0, ${in_.aux}); B.PWR(${base}, _j, B.PRD(${base}, _j) + ${a});}`;
+        break;
+      }
+      case Op.POKEMINUS: {
+        const base = jitBase(in_.out);
+        s = `{var _j = B.BND((${b}) | 0, ${in_.aux}); B.PWR(${base}, _j, B.PRD(${base}, _j) - ${a});}`;
+        break;
+      }
+      case Op.CALL: {
+        const na = in_.nIn;
+        const args: string[] = [];
+        if (na > 0) args.push(jitRd(in_.in0));
+        if (na > 1) args.push(jitRd(in_.in1));
+        for (let k = 2; k < na; k++) args.push(jitRd(prog.extra[in_.extraIdx + k - 2]));
+        const alist = args.join(', ');
+        if (in_.aux <= -1000) {
+          const hidx = -1000 - in_.aux;
+          s = set(`(B.HF(${hidx}) ? B.HF(${hidx}).fn(${na}, [${alist}]) : 0)`);
+        } else if (in_.aux >= 0 && in_.aux < prog.funcs.length) {
+          s = set(`B.CAL(${in_.aux}, [${alist}])`);
+        } else {
+          s = set('0');
+        }
+        break;
+      }
+      default: s = ';'; break;
+    }
+    if (in_.op === Op.GOTO || in_.op === Op.RETURN) {
+      L.push(`  case ${i}: ${s} break;`);
+    } else if (in_.op === Op.IF0 || in_.op === Op.IF1) {
+      L.push(`  case ${i}: ${s} break;`);
+    } else {
+      L.push(`  case ${i}: ${s} pc=${i + 1}; break;`);
+    }
+  }
+  L.push('    default: return 0;');
+  L.push('  }');
+  L.push('}');
+  return L.join('\n');
+}
+
+function makeJitFn(prog: Program): JitFn {
+  const body = jitBody(prog);
+  const maker = new Function(
+    'P', 'G', 'C', 'SQ', 'RT', 'H', 'B',
+    body,
+  );
+  return maker as unknown as JitFn;
+}
+
+function jitCompileFunc(root: Program, idx: number): JitFn | null {
+  let arr = jitFuncs.get(root);
+  if (!arr) { arr = []; jitFuncs.set(root, arr); }
+  if (arr[idx] !== undefined) return arr[idx];
+  const fn = root.funcs[idx];
+  let f: JitFn | null = null;
+  try {
+    f = makeJitFn(fn);
+    if (typeof process !== 'undefined' && process.env.PD_JIT_DEBUG) {
+      console.error(`[jit] func[${idx}] compile ok: ${fn.instr.length} instrs`);
+    }
+  } catch (e) {
+    if (typeof process !== 'undefined' && process.env.PD_JIT_DEBUG) {
+      console.error(`[jit] func[${idx}] compile FAILED: ${e}`);
+    }
+    f = null;
+  }
+  arr[idx] = f;
+  return f;
+}
+
+// Bridge object injected into compiled bodies (they are built with
+// new Function and cannot capture module closures).
+export function makeJitBridge(root: Program, G: Float64Array, SQ: { value: boolean } | null, H: Host | null): JitBridge {
+  const B: JitBridge = {
+    KRAND: krand,
+    NRND: nrnd,
+    FACT: fact,
+    BND: bounds,
+    GV: (i: number) => G.subarray(i),
+    DEREF: ptrDeref,
+    PRD: (p: PtrView | null, j: number): number =>
+      p ? (p instanceof Float64Array ? p[j] : (j === 0 ? p.get() : 0)) : 0,
+    PWR: (p: PtrView | null, j: number, v: number): void => {
+      if (!p) return;
+      if (p instanceof Float64Array) p[j] = v;
+      else if (j === 0) p.set(v);
+    },
+    MINT: (v: PtrView | null) => (v ? ptrMint(v) : 0),
+    HV: (vi: number): PtrView | null => H?.vars.get('_' + (vi | 0)) ?? null,
+    HVG: (vi: number): number => {
+      const v = H?.vars.get('_' + (vi | 0));
+      return v ? v.get() : 0;
+    },
+    HF: (hidx: number) => H?.fns[hidx],
+    CAL: (idx: number, args: number[]): number => 0,
+  };
+  B.CAL = (idx: number, args: number[]): number => {
+    const fn = root.funcs[idx];
+    if (!fn) return 0;
+    let jf = jitFuncs.get(root)?.[idx];
+    if (jf === undefined) jf = jitCompileFunc(root, idx);
+    if (jf) return jf(Float64Array.from(args), G, fn.consts, SQ, root, H, B);
+    // interpreter fallback (compile failure)
+    const child: Ctx = {
+      prog: fn,
+      frame: new Float64Array(fn.nLocals || 1),
+      params: Float64Array.from(args),
+      globals: G,
+      shouldQuit: SQ,
+      parent: null,
+      root,
+    };
+    return runCtx(child);
+  };
+  return B;
 }

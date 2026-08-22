@@ -829,7 +829,6 @@ export class Parser {
     if (!(this.cur().kind === TokKind.PUNCT && this.cur().text === ';')) cond = this.parseExpr();
     if (!this.expectPunct(';')) return;
     const jEnd = this.b.emit1(Op.IF0, reg(Fam.VOID, 0), cond);
-    const stepLabel = this.b.labelHere();
     // save step token range; parse body; parse step after body
     const stepStart = this.tok;
     let depth = 0;
@@ -842,12 +841,18 @@ export class Parser {
     if (!this.expectPunct(')')) return;
     const saveBrk = this.breakLabel, saveCont = this.contLabel;
     const brkSentinel = -(jEnd + 1);
+    // continue must jump to the STEP statement (emitted after the body), not
+    // the loop top — otherwise the step is skipped and the loop never advances.
+    // Use a forward sentinel; repoint continue GOTOs to the step label once it
+    // is known (same pattern as break/brkSentinel above).
+    const contSentinel = -(jEnd + 1000003);
     this.breakLabel = brkSentinel;
-    this.contLabel = stepLabel;
+    this.contLabel = contSentinel;
     this.parseBlockOrStmt();
     // step
     const afterBody = this.tok;
     this.tok = stepStart;
+    const stepLbl = this.b.labelHere();
     if (stepEnd > stepStart) this.parseExprStmt();
     this.tok = afterBody;
     const goBack = this.b.emit0(Op.GOTO, reg(Fam.VOID, 0));
@@ -856,8 +861,9 @@ export class Parser {
     this.b.patchGotoTarget(jEnd, endLbl);
     for (let i = top; i < this.b.instr.length; i++) {
       const ins = this.b.instr[i];
-      if (ins.op === Op.GOTO && ins.out.fam === Fam.LABEL && ins.out.off === brkSentinel) {
-        ins.out.off = endLbl;
+      if (ins.op === Op.GOTO && ins.out.fam === Fam.LABEL) {
+        if (ins.out.off === brkSentinel) ins.out.off = endLbl;
+        else if (ins.out.off === contSentinel) ins.out.off = stepLbl;
       }
     }
     this.breakLabel = saveBrk; this.contLabel = saveCont;

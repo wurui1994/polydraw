@@ -322,9 +322,11 @@ export class FixedFunc {
       case GLCMD.LINEWIDTH: this.lineWidth = c.a; break;
       case GLCMD.ENABLE:
         if (c.mode === 0x0B71) this.depthTest = true; // GL_DEPTH_TEST
+        else if (c.mode === 0x0BE2) this.blend = true; // GL_BLEND
         break;
       case GLCMD.DISABLE:
         if (c.mode === 0x0B71) this.depthTest = false;
+        else if (c.mode === 0x0BE2) this.blend = false;
         break;
       case GLCMD.BLENDFUNC:
         this.blend = true;

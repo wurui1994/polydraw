@@ -753,7 +753,7 @@ export interface GLSLUniform { loc: string; kind: number; v: number[]; }
 // stage). Values are scalars or component arrays.
 export type GLSLVaryRecord = Record<string, number | number[]>;
 export interface GLSLProgram {
-  run(vary: GLSLVaryings, tex: GLSLTexFn | null, vmap?: Map<string, string>, uniforms?: GLSLUniform[], vr?: GLSLVaryRecord): [number, number, number] | null;
+  run(vary: GLSLVaryings, tex: GLSLTexFn | null, vmap?: Map<string, string>, uniforms?: GLSLUniform[], vr?: GLSLVaryRecord): [number, number, number, number] | null;
 }
 
 // Parse a vertex shader's `varying` declarations to map each name to the
@@ -835,26 +835,24 @@ export function compileGLSL(src: string, vmap?: Map<string, string>): GLSLProgra
     body.push(`env['gl_FragColor']=[0,0,0,0];`);
     body.push(`env['gl_FragDepth']=null;`);
     // Static varying bindings (baked at compile time when vmap is known).
+    // When the vertex shader exports a varying (vmap key != 'ndc'), the VR
+    // record overrides it at runtime anyway — so skip the array allocation
+    // for names VR will cover. 'ndc' varyings are NOT overridden (see below)
+    // and keep their baked NDC binding.
     const bind = (name: string, expr: string): string => `env[${JSON.stringify(name)}]=${expr};`;
-    body.push(bind('c', '[vary.r,vary.g,vary.b,vary.a]'));
-    body.push(bind('t', '[vary.s,vary.t,vary.p,vary.q]'));
-    body.push(bind('p', '[vary.px,vary.py,vary.pz,vary.pw]'));
-    body.push(bind('n', '[vary.nx,vary.ny,vary.nz]'));
+    const coveredByVR = (nm: string) => { const k = vmap?.get(nm); return k !== undefined && k !== 'ndc'; };
+    if (!coveredByVR('c')) body.push(bind('c', '[vary.r,vary.g,vary.b,vary.a]'));
+    if (!coveredByVR('t')) body.push(bind('t', '[vary.s,vary.t,vary.p,vary.q]'));
+    if (!coveredByVR('p')) body.push(bind('p', '[vary.px,vary.py,vary.pz,vary.pw]'));
+    if (!coveredByVR('n')) body.push(bind('n', '[vary.nx,vary.ny,vary.nz]'));
     body.push(bind('gl_Position', '[vary.ndx,vary.ndy,vary.ndz,vary.ndw]'));
     if (vmap) {
       for (const [name, key] of vmap) {
-        if (name === 'c' || name === 't' || name === 'n') continue; // already bound
-        const expr = key === 'color' ? '[vary.r,vary.g,vary.b,vary.a]'
-          : key === 'tex' ? '[vary.s,vary.t,vary.p,vary.q]'
-          : key === 'pos' ? '[vary.px,vary.py,vary.pz,vary.pw]'
-          : key === 'nrm' ? '[vary.nx,vary.ny,vary.nz]'
-          : key === 'ndc' ? '[vary.ndx,vary.ndy,vary.ndz,vary.ndw]'
-          // 'clip': p = gl_Position with mvp_bake=0 — gl_Position is the real
-          // clip-space output; VR already holds the correct interpolated value,
-          // so emit no binding and let VR override p.
-          : key === 'clip' ? null
-          : null;
-        if (expr) body.push(bind(name, expr));
+        if (name === 'c' || name === 't' || name === 'n') continue; // handled above
+        if (key !== 'ndc') continue; // non-ndc varyings are overridden by VR at runtime
+        // 'clip' needs no binding (VR holds the clip-space value); only
+        // 'ndc' (p = gl_Position with mvp_bake) keeps the baked NDC binding.
+        body.push(bind(name, '[vary.ndx,vary.ndy,vary.ndz,vary.ndw]'));
       }
     }
     // Declared samplers resolve to their texture unit by NAME (tex0->0,
@@ -885,7 +883,7 @@ export function compileGLSL(src: string, vmap?: Map<string, string>): GLSLProgra
     if (!parser.uniSamplers.includes('tex0')) body.push(bind('tex0', '0'));
     if (!parser.uniSamplers.includes('tex')) body.push(bind('tex', '0'));
     for (const st of stmts) genStmt(st, body);
-    body.push(`var _o = env['gl_FragColor']; var _r = [_o[0],_o[1],_o[2]]; if (env['gl_FragDepth'] !== null) _r.fd = _sc(env['gl_FragDepth']); return _r;`);
+    body.push(`var _o = env['gl_FragColor']; var _r = [_o[0],_o[1],_o[2],_o[3]]; if (env['gl_FragDepth'] !== null) _r.fd = _sc(env['gl_FragDepth']); return _r;`);
     if (process.env.PD_DUMP_BODY) console.error('[glsl] BODY:\n' + body.join('\n'));
     // RUNTIME defines the helpers inside the compiled fn (once per program,
     // zero per-pixel cost), so the generated code references them directly.

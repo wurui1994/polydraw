@@ -201,6 +201,32 @@ export class PolyHostImpl {
     addFn('GLSCALE', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.SCALE; c.a = n >= 1 ? a[0] : 1; c.b = n >= 2 ? a[1] : 1; c.c = n >= 3 ? a[2] : 1; return 0; });
     addFn('GLENABLE', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.ENABLE; c.mode = n >= 1 ? a[0] : 0; return 0; });
     addFn('GLDISABLE', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.DISABLE; c.mode = n >= 1 ? a[0] : 0; return 0; });
+    // glBlendFunc(src, dst) — pack two 16-bit GL enums into `mode` (hi=src, lo=dst),
+    // exactly as fixedfunc.replay unpacks it. Mirrors C qglBlendFunc.
+    addFn('GLBLENDFUNC', 0, (n, a) => {
+      const src = n >= 1 ? (a[0] | 0) : 0x0302;
+      const dst = n >= 2 ? (a[1] | 0) : 0x0303;
+      const c = this.glbuf.push(); c.op = GLCMD.BLENDFUNC; c.mode = ((src & 0xFFFF) << 16) | (dst & 0xFFFF);
+      return 0;
+    });
+    // glAlphaEnable()/glAlphaDisable() — deprecated polydraw convenience that
+    // the ken/ scripts use extensively. C's qglAlphaEnable does:
+    //   glDisable(GL_DEPTH_TEST); glEnable(GL_BLEND); glBlendFunc(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
+    // We record the equivalent command stream so the soft rasterizer turns on
+    // blending and disables depth testing — without this, volume renders like
+    // texture3d.pss paint empty (alpha=0) slices opaquely over the result and
+    // come out black.
+    addFn('GLALPHAENABLE', 0, () => {
+      let c = this.glbuf.push(); c.op = GLCMD.DISABLE; c.mode = 0x0B71; // GL_DEPTH_TEST
+      c = this.glbuf.push(); c.op = GLCMD.ENABLE; c.mode = 0x0BE2;      // GL_BLEND
+      c = this.glbuf.push(); c.op = GLCMD.BLENDFUNC; c.mode = ((0x0302 & 0xFFFF) << 16) | (0x0303 & 0xFFFF);
+      return 0;
+    });
+    addFn('GLALPHADISABLE', 0, () => {
+      let c = this.glbuf.push(); c.op = GLCMD.ENABLE; c.mode = 0x0B71;  // GL_DEPTH_TEST
+      c = this.glbuf.push(); c.op = GLCMD.DISABLE; c.mode = 0x0BE2;     // GL_BLEND
+      return 0;
+    });
     addFn('GLQUAD', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.QUAD; c.a = n >= 1 ? a[0] : 0; return 0; });
     addFn('GLLINEWIDTH', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.LINEWIDTH; c.a = n >= 1 ? a[0] : 1; return 0; });
     addFn('GLPOINTSIZE', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.POINTSIZE; c.a = n >= 1 ? a[0] : 1; return 0; });
@@ -261,6 +287,9 @@ export class PolyHostImpl {
     addVar('GL_QUAD_STRIP', c(PDGL.QUAD_STRIP));
     addVar('GL_POLYGON', c(PDGL.POLYGON));
     addVar('GL_DEPTH_TEST', c(0x0b71));
+    addVar('GL_BLEND', c(0x0be2));
+    addVar('GL_SRC_ALPHA', c(0x0302));
+    addVar('GL_ONE_MINUS_SRC_ALPHA', c(0x0303));
     addVar('GL_NONE', c(0));
     addVar('GL_FRONT', c(0x0404));
     addVar('GL_BACK', c(0x0405));
