@@ -1,0 +1,11 @@
+mut(&x)
+{
+  x = 2;
+  y = x + 3;
+  return y;
+}
+
+a = 0;
+last = mut(&a) + a;
+printf("%f\n", last);
+return last;

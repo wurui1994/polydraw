@@ -1,0 +1,8 @@
+glclear();
+glcolor(xres / yres - 1, yres / xres, 0.25, 1.0);
+glbegin(5);
+glvertex(-0.75, -0.75, 0.0);
+glvertex(0.75, -0.75, 0.0);
+glvertex(-0.75, 0.75, 0.0);
+glvertex(0.75, 0.75, 0.0);
+glend();

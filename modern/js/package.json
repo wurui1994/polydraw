@@ -1,0 +1,18 @@
+{
+  "name": "polydraw-modern-js",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/interpreter.test.js test/sections.test.js test/corpus.test.js",
+    "test:webgl": "node --test test/webgl-browser.test.js",
+    "conformance": "node src/cli/conformance.js",
+    "parse": "node src/cli/polydraw-js.js parse",
+    "run": "node src/cli/polydraw-js.js run"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.54.0",
+    "jpeg-js": "^0.4.4",
+    "pngjs": "^7.0.0"
+  }
+}

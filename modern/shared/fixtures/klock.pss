@@ -1,0 +1,7 @@
+t = klock();
+stamp = klock(1);
+y = klock(2);
+bad = klock(10);
+ms = klock(9);
+printf("%d\n", y >= 2020 && y < 2100 && t >= 0 && bad == 0 && stamp >= y * 10000000000 && stamp < (y + 1) * 10000000000 && ms >= 0 && ms < 1000);
+return(y >= 2020 && y < 2100 && t >= 0 && bad == 0 && stamp >= y * 10000000000 && stamp < (y + 1) * 10000000000 && ms >= 0 && ms < 1000);

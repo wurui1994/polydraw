@@ -1,0 +1,12 @@
+static a[8], total;
+a[0] = 5 % 3;
+a[1] = 2 ^ 3;
+a[2] = pow(3, 2);
+a[3] = max(4, min(9, 6));
+a[4] = int(sqrt(20));
+a[5] = (a[0] == 2 && a[1] == 8) || 0;
+a[6] = abs(-7);
+total = 0;
+for(i=0;i<7;i++) total += a[i];
+printf("%f\n", total);
+return total;

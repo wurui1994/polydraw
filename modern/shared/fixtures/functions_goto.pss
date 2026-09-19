@@ -1,0 +1,17 @@
+static last;
+last = sumto(5);
+printf("%f\n", last);
+return last;
+
+sumto(n)
+{
+  acc = 0;
+  i = 0;
+loop:
+  if (i > n) goto done;
+  acc += i;
+  i++;
+  goto loop;
+done:
+  return acc;
+}

@@ -1,0 +1,5 @@
+before = glklockelapsed();
+glklockstart();
+elapsed = glklockelapsed();
+printf("%d\n", before == -2 && elapsed >= 0);
+return(before == -2 && elapsed >= 0);

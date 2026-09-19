@@ -1,0 +1,19 @@
+glscale(0.5, 0.5, 1.0);
+glsetshader("pass", "color");
+glColor(0.2, 0.8, 0.4);
+glquad(1);
+
+@v:pass
+varying vec4 c;
+void main()
+{
+  gl_Position = ftransform();
+  c = gl_Color;
+}
+
+@f:color
+varying vec4 c;
+void main()
+{
+  gl_FragColor = c;
+}

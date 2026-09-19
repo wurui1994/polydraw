@@ -1,0 +1,14 @@
+fill(arr[4], scale)
+{
+  arr[0] = scale;
+  arr[1] = scale + 2;
+  arr[2] = arr[0] + arr[1];
+  arr[3] = arr[2] * 2;
+  return arr[3];
+}
+
+static data[4], total;
+total = fill(data, 3);
+total += data[0] + data[1] + data[2] + data[3];
+printf("%f\n", total);
+return total;

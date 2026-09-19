@@ -1,0 +1,57 @@
+{
+  "host": [
+    {
+      "path": "../fixtures/host_basic.pss",
+      "expectedReturn": 14,
+      "expectedPrint": "14.000000\n"
+    },
+    {
+      "path": "../fixtures/functions_goto.pss",
+      "expectedReturn": 15,
+      "expectedPrint": "15.000000\n"
+    },
+    {
+      "path": "../fixtures/reference_params.pss",
+      "expectedReturn": 7,
+      "expectedPrint": "7.000000\n"
+    },
+    {
+      "path": "../fixtures/control_flow.pss",
+      "expectedReturn": 12,
+      "expectedPrint": "12.000000\n"
+    },
+    {
+      "path": "../fixtures/if_else_blocks.pss",
+      "expectedReturn": 69,
+      "expectedPrint": "69.000000\n"
+    },
+    {
+      "path": "../fixtures/do_while.pss",
+      "expectedReturn": 9,
+      "expectedPrint": "9.000000\n"
+    },
+    {
+      "path": "../fixtures/array_params.pss",
+      "expectedReturn": 48,
+      "expectedPrint": "48.000000\n"
+    },
+    {
+      "path": "../fixtures/klock.pss",
+      "expectedReturn": 1,
+      "expectedPrint": "1\n"
+    },
+    {
+      "path": "../fixtures/glklock.pss",
+      "expectedReturn": 1,
+      "expectedPrint": "1\n"
+    }
+  ],
+  "sampleParse": [
+    "../../ken/balls.pss",
+    "../../ken/texture.pss",
+    "../../ken/gpgpu.pss",
+    "../../ken/geo_test.pss",
+    "../../ken/drawcone2.pss",
+    "../../tigrou/fractal.pss"
+  ]
+}

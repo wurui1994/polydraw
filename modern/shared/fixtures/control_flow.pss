@@ -1,0 +1,11 @@
+sum = 0;
+i = 0;
+while (i < 8)
+{
+  i++;
+  if (i == 3) continue;
+  if (i == 6) break;
+  sum += i;
+}
+printf("%f\n", sum);
+return sum;

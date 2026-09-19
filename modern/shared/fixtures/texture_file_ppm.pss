@@ -1,0 +1,21 @@
+glsettex(8, "checker.ppm");
+glactivetexture(GL_TEXTURE0);
+glbindtexture(8);
+glsetshader("pass", "sample");
+glquad(1);
+
+@v:pass
+varying vec4 t;
+void main()
+{
+  gl_Position = ftransform();
+  t = gl_MultiTexCoord0;
+}
+
+@f:sample
+varying vec4 t;
+uniform sampler2D tex0;
+void main()
+{
+  gl_FragColor = texture2D(tex0, t.xy);
+}

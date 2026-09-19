@@ -1,0 +1,19 @@
+glsetshader("pass", "color");
+glUniform3f(glgetuniformloc("tint"), 0.125, 0.5, 0.875);
+glquad(1);
+
+@v:pass
+varying vec4 c;
+void main()
+{
+  gl_Position = ftransform();
+  c = gl_Color;
+}
+
+@f:color
+varying vec4 c;
+uniform vec3 tint;
+void main()
+{
+  gl_FragColor = vec4(tint, 1.0) * c;
+}

@@ -1,0 +1,11 @@
+static phase;
+phase = phase + 0.25;
+if (phase > 1) phase = 0;
+glclear();
+glcolor(phase, 1 - phase, 0.25, 1.0);
+glbegin(5);
+glvertex(-0.75, -0.75, 0.0);
+glvertex(0.75, -0.75, 0.0);
+glvertex(-0.75, 0.75, 0.0);
+glvertex(0.75, 0.75, 0.0);
+glend();
