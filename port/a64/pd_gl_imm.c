@@ -235,9 +235,9 @@ static void addv (double x, double y, double z, double w)
 	float *d;
 	if (P_raw)
 	{
-		glColor4fv(C_col);
-		glTexCoord4fv(C_tex);
-		glNormal3fv(C_nrm);
+		/* 直通那一档：颜色/纹理坐标/法向在**脚本调它们的时候**就已经发过去了
+		   （见下面那几格的 `P_raw || !F_on` 那个条件），所以这儿只发顶点 ——
+		   与原文一样一格 `glVertex`，不多发三格。 */
 		glVertex4d(x,y,z,w);
 		return;
 	}
@@ -254,23 +254,23 @@ double pd_imm_vertex4d (double x, double y, double z, double w)    { addv(x,y,z,
 
 double pd_imm_texcoord2d (double u, double v)
 { C_tex[0] = (float)u; C_tex[1] = (float)v; C_tex[2] = 0.f; C_tex[3] = 1.f;
-  if (P_raw || !pd_imm_on()) glTexCoord4fv(C_tex); return(0.0); }
+  if (P_raw || !F_on || !pd_imm_on()) glTexCoord4fv(C_tex); return(0.0); }
 double pd_imm_texcoord3d (double u, double v, double s)
 { C_tex[0] = (float)u; C_tex[1] = (float)v; C_tex[2] = (float)s; C_tex[3] = 1.f;
-  if (P_raw || !pd_imm_on()) glTexCoord4fv(C_tex); return(0.0); }
+  if (P_raw || !F_on || !pd_imm_on()) glTexCoord4fv(C_tex); return(0.0); }
 double pd_imm_texcoord4d (double u, double v, double s, double t)
 { C_tex[0] = (float)u; C_tex[1] = (float)v; C_tex[2] = (float)s; C_tex[3] = (float)t;
-  if (P_raw || !pd_imm_on()) glTexCoord4fv(C_tex); return(0.0); }
+  if (P_raw || !F_on || !pd_imm_on()) glTexCoord4fv(C_tex); return(0.0); }
 
 double pd_imm_color3d (double r, double g, double b)
 { C_col[0] = (float)r; C_col[1] = (float)g; C_col[2] = (float)b; C_col[3] = 1.f;
-  if (P_raw || !pd_imm_on()) glColor4fv(C_col); return(0.0); }
+  if (P_raw || !F_on || !pd_imm_on()) glColor4fv(C_col); return(0.0); }
 double pd_imm_color4d (double r, double g, double b, double a)
 { C_col[0] = (float)r; C_col[1] = (float)g; C_col[2] = (float)b; C_col[3] = (float)a;
-  if (P_raw || !pd_imm_on()) glColor4fv(C_col); return(0.0); }
+  if (P_raw || !F_on || !pd_imm_on()) glColor4fv(C_col); return(0.0); }
 double pd_imm_normal3d (double x, double y, double z)
 { C_nrm[0] = (float)x; C_nrm[1] = (float)y; C_nrm[2] = (float)z;
-  if (P_raw || !pd_imm_on()) glNormal3fv(C_nrm); return(0.0); }
+  if (P_raw || !F_on || !pd_imm_on()) glNormal3fv(C_nrm); return(0.0); }
 
 /**
  * **这个宿主函数会动 GL 状态吗**（JIT 拿它决定要不要在调用点发 `pd_imm_break`）。
