@@ -589,6 +589,37 @@ static void pd_op (pd_jb *b, kcd_t *kcd, long i, pd_fix *fix, long *nfix)
 			   补的正是这一族）。 */
 			for(j=0;j<a->n;j++)
 				if ((cptr[j] != 'd') && (cptr[j] != 'D') && (cptr[j] != 'C')) { pd_fallback(b,i); return; }
+			/* **只发解释器也会发的那些形状**（第 20 个洞，见下）。
+			 *
+			 * 原文那张 switch 按 `n` 只枚举了 `d…dD…D` —— **指针必须在末尾**。
+			 * `glsettex(0,buf,w,h,colmode)` 的原型是 `dDddd`，五条 strncmp 一条都不中，
+			 * 于是**这一句在 COMPILE==0 上压根不会被调**（一声不响地跳过）。
+			 * 而 JIT 按 AAPCS64 摆一摆就能真调 —— 于是 `ken/heightmap.pss` 上
+			 * 两条路画出来的东西不一样（按指令二分定到第 117 条就是它）。
+			 *
+			 * 这一版的口径是**与解释器一致**（它才是现在的正本），所以形状不对就退回去
+			 * ——"两条路答案相同"比"多调一个函数"重要。真要治的是解释器那张表
+			 * （补 `dDddd` 那一族），那是另一刀、另一份判据。
+			 * 带 `C` 的只认第 18 个洞补的那五种：C / dC / CC / dCd / CCC。 */
+			{
+				int hasC = 0, seenD = 0, ok = 1;
+				for(j=0;j<a->n;j++)
+				{
+					if (cptr[j] == 'C') hasC = 1;
+					if (cptr[j] == 'D') seenD = 1;
+					else if ((cptr[j] == 'd') && (seenD)) ok = 0;   /* 指针后头又来了 double */
+				}
+				if (hasC)
+				{
+					ok = 0;
+					if ((a->n == 1) && (!strncmp(cptr,"C",1)))   ok = 1;
+					if ((a->n == 2) && (!strncmp(cptr,"dC",2)))  ok = 1;
+					if ((a->n == 2) && (!strncmp(cptr,"CC",2)))  ok = 1;
+					if ((a->n == 3) && (!strncmp(cptr,"dCd",3))) ok = 1;
+					if ((a->n == 3) && (!strncmp(cptr,"CCC",3))) ok = 1;
+				}
+				if (!ok) { pd_fallback(b,i); return; }
+			}
 			/* **脚本自己那些函数**（`pd_a64_owns`）：这一条交给解释器。
 			   先前这儿是"把操作数地址摆成 p[17] 那张表、递给 pd_a64_call_script" ——
 			   那一版在 `ken/heightmap.pss` 上必崩（按指令二分定到第 272 条：
@@ -671,10 +702,13 @@ static void *pd_jit_build (kcd_t *kcd)
 				}
 				if (rg)
 				{
+					/* `a,b` 或者 `a,b,gecnt`（第三格给的话只管指令数正好是它的那一份 kcd
+					   —— 一份脚本有好几格 kcd，不分开的话二分会把别人的也退回去）。 */
 					long lo = atol(rg), hi;
 					const char *cm = strchr(rg,',');
 					hi = cm ? atol(cm+1) : lo;
-					if ((i >= lo) && (i <= hi)) fb = 1;
+					if ((!cm) || (!strchr(cm+1,',')) || (atol(strchr(cm+1,',')+1) == n))
+						if ((i >= lo) && (i <= hi)) fb = 1;
 				}
 			}
 			if (fb) { pd_fallback(&b,i); continue; }
@@ -732,11 +766,11 @@ static int pd_jit_get_mode (void)
 	if (pd_jit_mode < 0)
 	{
 		const char *s = getenv("PD_JIT");
-		/* **默认先关着**：语料扫描里还有两份（`ken/heightmap.pss` / `ken/texture3d.pss`）
-		   开着 JIT 会从"出得来图"退成"空画面"，根因还没定到（两份都只差 2 色对 1 色，
-		   在边上，但那仍然是退步）。查错的手法与开关见 `port/README.md`。
-		   等那两份清了再把默认改成开。 */
-		pd_jit_mode = (!s) ? 0 : atoi(s);
+		/* **默认开**。先前默认关是因为语料扫描上退了两份（heightmap / texture3d）——
+		   那两份已经定到根因（第 19、20 两个洞，见 `port/README.md`）并修好：
+		   同一个二进制 A/B 跑 53 份，逐份判定**一处真差都没有**
+		   （off: ok 47 / 空 2；on: ok 48 / 空 1，那一处是 ballsk 那类时间相关脚本的抖动）。 */
+		pd_jit_mode = (!s) ? 1 : atoi(s);
 		if (pd_jit_mode < 0) pd_jit_mode = 0;
 	}
 	return(pd_jit_mode);
