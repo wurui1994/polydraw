@@ -1,15 +1,4 @@
 
-static long kasmoptimizations (long, long);
-
-	//This function helps find sequences like this which can be safely removed:
-	// fld qword ptr [esp+0x28]
-	// fstp qword ptr [esp+0x28]
-	// ... (qword ptr [esp+0x28] not used again)
-	//
-	// r0 = ? op ?;
-	//  ? = r0 + ?;
-	// (r0 written before read)
-static long anyreads1stop, anyreads1stinst;
 static long anyreadsbeforewritesrec (long i, rtyp r)
 {
 	for(;i<gecnt;i++)
@@ -69,6 +58,51 @@ static long anyreadsbeforewrites (long i, rtyp r, long firstop)
 	anyreads1stop = firstop;
 	anyreads1stinst = (i|0x80000000);
 	return(anyreadsbeforewritesrec(i,r));
+}
+
+static void put1stfld (long i, rtyp r)
+{
+	if ((gasm[i-1].f) && (gasmeq(gasm[i-1].r[0],r)))
+	{
+		long j = (putlen(gasm[i-1].r[0])+1);
+#if (COMPILE != 0)
+		if ((patchnum > 0) && (patch[patchnum-1].lptr >= (long *)&compcode[kasm87leng-j]) &&
+				  (putwrite) && (patch[patchnum-1].lptr <= (long *)&compcode[kasm87leng-4])) patchnum--;
+#endif
+		kasm87leng -= j;
+			//Replace fld...fstp to same location with fst
+		if (gasmeq(gasm[i].r[1],gasm[i].r[2]) || (anyreadsbeforewrites(i,r,1)))
+			putsib(0xdd,0x11,r); //fst qword ptr [?]
+	}
+	else
+		putsib(0xdd,0x00,r); //fld qword ptr [?]
+}
+
+void kasm87freeall ()
+{
+#if (COMPILE != 0)
+	if (patch)     { free(patch);     patch     = 0; } maxpatch = 0;
+#endif
+	if (jumpback)  { free(jumpback);  jumpback  = 0; } maxjumpbacks = 0;
+	if (rxi)       { free(rxi);       rxi       = 0; } maxrxi = 0;
+	if (enumnam)   { free(enumnam);   enumnam   = 0; } maxenumchars = 0;
+	if (enumval)   { free(enumval);   enumval   = 0; } maxenum = 0;
+	if (gasm)      { free(gasm);      gasm      = 0; }
+	if (lablinum)  { free(lablinum);  lablinum  = 0; }
+	if (jumpat)    { free(jumpat);    jumpat    = 0; }
+	if (labpat)    { free(labpat);    labpat    = 0; }
+	if (newlabind) { free(newlabind); newlabind = 0; } maxlabs = 0;
+	if (newlabnam) { free(newlabnam); newlabnam = 0; } maxlabchars = 0;
+	if (newvar)    { free(newvar);    newvar    = 0; } maxvars = 0;
+	if (newvarnam) { free(newvarnam); newvarnam = 0; } maxvarchars = 0;
+	if (gvl)       { free(gvl);       gvl       = 0; }
+	if (gstring)   { free(gstring);   gstring   = 0; } maxst = 0;
+	if (ginitval)  { free(ginitval);  ginitval  = 0; } maxinitval = 0;
+	if (globval)   { free(globval);   globval   = 0; }
+	if (gnext)     { free(gnext);     gnext     = 0; }
+	if (gop)       { free(gop);       gop       = 0; } maxops = 0;
+	if (funcst)    { free(funcst);    funcst    = 0; } maxfuncst = 0;
+	if (texttrans) { free(texttrans); texttrans = 0; } texttransmal = 0;
 }
 
 	//mingecnt: hack telling optimizer not to touch gasm[0 .. mingecnt-1]. Set it to 0 for standard behavior.
@@ -650,3 +684,10 @@ static long kasmoptimizations (long mingecnt, long duringparse)
 	} while (got);
 	return(0);
 }
+
+#if (COMPILE == 0)
+
+	//kasm87c: similar functionality to kasm87, but pure C code - making it slower and more portable
+
+	//ANSI va_arg: supported on all compilers
+#include <stdarg.h>

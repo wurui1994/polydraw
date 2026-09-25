@@ -1,28 +1,4 @@
 
-
-static long isvarchar (unsigned char ch)
-{
-	static const long isvarcharbuf[8] = {0,0x03ff0000,0x87fffffe,0x07fffffe,0,0,0,0};
-#if defined(_M_IX86) || defined(__i386__)
-	return(isvarcharbuf[ch>>5]&(1<<ch)); //WARNING: Shift auto-modulo`d by 32 trick only works on Intel CPUs!
-#elif 1
-	return(isvarcharbuf[ch>>5]&(1<<(ch&31)));
-#endif
-	//return(((ch >= '0') && (ch <= '9')) || ((ch >= 'A') && (ch <= 'Z')) || (ch == '_') || ((ch >= 'a') && (ch <= 'z')));
-}
-
-static long getnewvarhash (const char *st)
-{
-	long i, hashind;
-	char ch;
-
-	for(i=0,hashind=0;st[i];i++)
-	{
-		ch = st[i]; if ((ch >= 'a') && (ch <= 'z')) ch -= 32;
-		hashind = ch - hashind*3;
-	}
-	return(hashind&(sizeof(newvarhash)/sizeof(newvarhash[0])-1));
-}
 	//Helper function to compare 2 parameters on gasm
 static long gasmeq (rtyp g0, rtyp g1)
 {
@@ -111,9 +87,12 @@ static long findscope (char *st, long z, long *z0, long *z1)
 	return(z);
 }
 
+void kasm87addext (evalextyp *daeet, long n) { gevalext = daeet; gevalextnum = n; }
+
 	//NOTE: newvar must be written and 0-terminated first before calling this!
 	//Writes each dimension to newvar[newvarnum]; returns total array size (error=0), and new z in daz
 static void parsefunc (char *, long, long);
+static long kasmoptimizations (long, long);
 static long parse_dimensions (char *st, long *daz, long writenewvar)
 {
 	long i, j, k, p, z, arrind = 1;
@@ -1514,3 +1493,6 @@ begit:;
 	}
 #endif
 }
+
+static char fpustat;
+static long putwrite = 0;

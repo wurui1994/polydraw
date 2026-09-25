@@ -1,7 +1,4 @@
-
-static long round0msk[2048][2];
-//--------------------------------------------------
-static long cputype = 0, cpuinited = 0;static _inline long testflag (long c)
+static _inline long testflag (long c)
 {
 	_asm
 	{
@@ -38,8 +35,12 @@ static _inline void cpuid (long a, long *s)
 		pop esi
 		pop ebx
 	}
-}static _inline long testflag (long c) { return(0); }
+}
+#else
+static _inline long testflag (long c) { return(0); }
 static _inline void cpuid (long a, long *s) { return; }
+#endif
+
 	//Bit numbers of return value:
 	//0:FPU, 4:RDTSC, 15:CMOV, 22:MMX+, 23:MMX, 25:SSE, 26:SSE2, 27:SSE3, 30:3DNow!+, 31:3DNow!
 static long getcputype ()
@@ -60,3 +61,12 @@ static long getcputype ()
 	if (i&(1<<25)) i |= (1<<22); //SSE implies MMX+ support
 	return(i);
 }
+
+//--------------------------------------------------
+static unsigned char *compcode = 0;
+long kasm87leng, kasm87err0, kasm87err1, kasm87optimize = 1;
+char kasm87err[256] = "";
+
+static long *texttrans = 0, texttransn, texttransmal = 0; //keep track of removed whitespace for adjusting kasm87err0 & kasm87err1
+
+static long kholdrand = 1, snormstat = 0;

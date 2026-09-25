@@ -334,8 +334,35 @@ static char *gbmp = 0;
 static int gbmpmal = 0;
 
 #define SHADMAX 256
+static int shad[3][SHADMAX], shadn[3] = {0,0,0}, geo2blocki[SHADMAX];
+#define PROGMAX 256
+static int shadprog[PROGMAX], shadprogn = 0, gcurshader = 0;
+typedef struct { int v, g, f, ishw; } shadprogi_t;
+static shadprogi_t shadprogi[PROGMAX]; //remember linkages
 
+static OSVERSIONINFO osvi;
+static int supporttimerquery = 1;
+static GLint queries[1];
 
-#if 0
-!endif
-#endif
+static char *prognam = "PolyDraw";
+static int oxres = 0, oyres = 0, xres, yres, ActiveApp = 1, shkeystatus = 0;
+	//Omni benchmark (2026-09-25): "/bench:N" runs N frames (first 30 warm up and are not
+	//timed), appends "script<TAB>fps<TAB>ms_per_frame" to polydraw_bench.txt, then quits.
+	//Stock polydraw only shows fps in the title bar, which cannot be batched.
+static int gbenchn = 0, gbenchi = 0; static __int64 gbenchq0 = 0;
+static int gshaderstuck = 0, gshadercrashed = 0;
+static double gfov, dbstatus = 0.0, dkeystatus[256] = {0}, dnumframes = 0.0;
+static __int64 qper, qtim0;
+static int oglxres, oglyres, songtime = 0, gmehax = 0, dorecompile = 0;
+static char gsavfilnam[MAX_PATH] = "", *gsavfilnamptr = 0;
+static HWND ghwnd = 0, hWndDraw = 0, hWndCons = 0, hWndLine = 0, hWndEdit = 0;
+static HFONT hfont = 0;
+static HINSTANCE ghinst;
+
+enum
+{
+	MENU_FILENEW=0,MENU_FILEOPEN=MENU_FILENEW+4,MENU_FILESAVE,MENU_FILESAVEAS,MENU_FILEEXIT,
+	MENU_EDITFIND,MENU_EDITFINDNEXT,MENU_EDITFINDPREV,MENU_EDITREPLACE,
+	MENU_COMPCONTENT,MENU_EVALHIGHLIGHT,MENU_RENDPLC,MENU_FULLSCREEN=MENU_RENDPLC+4,MENU_CLEARBUFFER,MENU_FONT,
+	MENU_HELPTEXT,MENU_HELPABOUT
+};

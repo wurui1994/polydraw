@@ -1,11 +1,3 @@
-#if 0 //To compile as a stand-alone test program, type "nmake eval.c"
-!ifndef COMP
-COMP=1
-!endif
-eval.exe: eval.c; cl eval.c /Ox /G6Fy /Gs /MD /nologo /DEVALTEST /DCOMPILE=$(COMP) /link /opt:nowin98 /nologo kernel32.lib
-	del eval.obj
-!if 0
-#endif
 
 
 //------------------------------------------ KASM87 ENDS ------------------------------------------
@@ -87,6 +79,8 @@ begfpstk:fdecstp
 	}
 #endif
 }
+
+static char debuf[16384];
 
 	//NOTE: Non-VC compilers only support up to 3 params - else crash.
 void testcode (char *st, double *v, long vnum)

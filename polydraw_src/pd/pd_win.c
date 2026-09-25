@@ -1,40 +1,6 @@
 
 //--------------------------------------------------------------------------------------------------
 
-static HANDLE /*gmainthread,*/ gthand, ghevent[3];
-static double (__cdecl *gevalfunc)(void) = 0;
-static int gevalfuncleng = 0;
-static int showtimeout = 0;
-static unsigned int __stdcall watchthread (void *_)
-{
-	while (1)
-	{
-		WaitForSingleObject(ghevent[0],INFINITE);
-
-			//if script takes too long, temporarily apply self-modifying code to force it to finish much faster
-		if (WaitForSingleObject(ghevent[1],popts.timeout) == WAIT_TIMEOUT)
-		{
-			showtimeout = 1;
-			kasm87jumpback(gevalfunc,0);
-			WaitForSingleObject(ghevent[1],INFINITE);
-			kasm87jumpback(gevalfunc,1);
-		}
-
-		SetEvent(ghevent[2]);
-	}
-}
-
-HMENU gmenu = 0;
-static short *menustart (short *sptr) { *sptr++ = 0; *sptr++ = 0; return(sptr); } //MENUITEMTEMPLATEHEADER
-static short *menuadd (short *sptr, char *st, int flags, int id)
-{
-	*sptr++ = flags; //MENUITEMTEMPLATE
-	if (!(flags&MF_POPUP)) *sptr++ = id;
-	sptr += MultiByteToWideChar(CP_ACP,0,st,-1,(LPWSTR)sptr,strlen(st)+1);
-	return(sptr);
-}
-//--------------------------------------------------------------------------------------------------
-
 	//Hacks to make text editor nicer :)
 static LRESULT (CALLBACK *ohWndEdit)(HWND, UINT, WPARAM, LPARAM);
 static LRESULT CALLBACK nhWndEdit (HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -821,3 +787,7 @@ quitit:;
 
 	return(0);
 }
+
+#if 0
+!endif
+#endif

@@ -1,11 +1,5 @@
 
 
-//==============================  KPEGILIB ends ==============================
-//================================ GIF begins ================================
-
-static unsigned char suffix[4100], filbuffer[768], tempstack[4096];
-static int prefix[4100];
-
 static int kgifrend (const char *kfilebuf, int kfilelength,
 	INT_PTR daframeplace, int dabytesperline, int daxres, int dayres,
 	int daglobxoffs, int daglobyoffs)

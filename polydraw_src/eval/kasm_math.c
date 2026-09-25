@@ -1,7 +1,9 @@
- //keep track of removed whitespace for adjusting kasm87err0 & kasm87err1
 
-static long kholdrand = 1, snormstat = 0;
-void ksrand (long val) { kholdrand = val; snormstat = 0; }static long krand () { kholdrand = (unsigned long)((kholdrand*(214013*2)+2531011*2)>>1); return(kholdrand); }__declspec(naked) static long krand ()
+void ksrand (long val) { kholdrand = val; snormstat = 0; }
+#ifndef _MSC_VER
+static long krand () { kholdrand = (unsigned long)((kholdrand*(214013*2)+2531011*2)>>1); return(kholdrand); }
+#else
+__declspec(naked) static long krand ()
 {
 	_asm
 	{
@@ -13,6 +15,8 @@ void ksrand (long val) { kholdrand = val; snormstat = 0; }static long krand () {
 		ret
 	}
 }
+#endif
+
 static double nrnd ()
 {
 	static double srand2;
@@ -28,7 +32,10 @@ static double nrnd ()
 	} while (r >= 1);
 	snormstat = 1; r = sqrt(-2.0*log(r)/r); srand2 = x*r;
 	return(y*r);
-}static double fact (double num)
+}
+
+#ifndef _MSC_VER
+static double fact (double num)
 {
 	if ((num <= -.99999999999999996) || (num >= 170.6243769562767)) return(*(float *)&pinf);
 	num++; //2^, 14*, 1/, 15+  (Ken optimized out most divides - wasn`t easy!)
@@ -36,7 +43,9 @@ static double nrnd ()
 		(((((((num*2.506628275107298 + 83.8676043423952)*num + 1168.926494792211)*num +
 		 8687.245297053594)*num + 36308.29514770109)*num + 80916.62789524846)*num + 75122.63315304522) /
 		 (((((((num + 21)*num + 175)*num + 735)*num + 1624)*num + 1764)*num + 720)*num)));
-}__declspec(naked) static double __cdecl fact (double num)
+}
+#else
+__declspec(naked) static double __cdecl fact (double num)
 {
 	static const double maxval = 170.6243769562767;
 	static const double factconsts[15] = {2.506628275107298,83.8676043423952,1168.926494792211,8687.245297053594,
@@ -148,7 +157,14 @@ factinf:
 		fld dword ptr [pinf]
 		ret
 	}
-}static double kpow(double x, double y) { return pow(x,y); }__declspec(naked) static double __cdecl kpow (double x, double y)
+}
+#endif
+
+	//Ken`s replacement for pow...
+#ifndef _MSC_VER
+static double kpow(double x, double y) { return pow(x,y); }
+#else
+__declspec(naked) static double __cdecl kpow (double x, double y)
 {
 	_asm //WARNING: CAN MODIFY ONLY EAX!
 	{
@@ -216,3 +232,4 @@ bad2: fldz
 		ret
 	}
 }
+#endif

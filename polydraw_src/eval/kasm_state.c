@@ -1,5 +1,62 @@
 
-static unsigned char oprio[PARAMEND] = {0};__declspec(align(16)) static long kexptval[4] = {0,0x80000000,0,0};
+//----------------------------------------- KASM87 BEGINS -----------------------------------------
+
+#ifndef COMPILE
+	//if `COMPILE` is not specified in the makefile, choose the fastest supported option
+#if defined(_M_IX86) || defined(__i386__)
+#define COMPILE 1 //True compile (Windows/Linux)
+#else
+#define COMPILE 0 //Virtual machine (PowerPC)
+#endif
+#endif
+
+enum
+{
+	PARAM0=0,NUL=PARAM0,GOTO,RETURN, RND,NRND,
+	PARAM1,  NOP=PARAM1,MOV,NEGMOV,NEQU0, IF0,IF1,
+				FABS,SGN,UNIT,FLOOR,CEIL,ROUND0,ROUND0_32,SIN,COS,TAN,ASIN,ACOS,ATAN,SQRT,EXP,FACT,LOG,
+	PARAM2,  TIMES=PARAM2,SLASH,PERC,PLUS,MINUS,LES,LESEQ,MOR,MOREQ,EQU,NEQU,LAND,LOR,
+				POW,MIN,MAX,FADD,FMOD,ATAN2,LOGB,PEEK,
+	PARAM3,  POKE,POKETIMES,POKESLASH,POKEPERC,POKEPLUS,POKEMINUS,
+				USERFUNC,
+	PARAMEND
+};
+static unsigned char oprio[PARAMEND] = {0};
+#define KEAX 0x00000000 // -
+#define KECX 0x10000000 //Local variable (moved to KFST/KESP for compiled)
+#define KEDX 0x20000000 //Constants (doubles/strings/arrays)
+#define KEBX 0x30000000 // -
+#define KESP 0x40000000 //Function parameter
+#define KEBP 0x50000000 // -
+#define KESI 0x60000000 // -
+#define KEDI 0x70000000 // -
+#define KEIP 0x80000000 //Jump location for GOTO/USERFUNC/IF*
+#define KFST 0x90000000 //Floating point stack (lowest 4 local variables)
+#define KPTR 0xa0000000 //Pointer to function parameter (addressed by ESP)
+#define KIMM 0xb0000000 //Immediate address from evalextyp[?].ptr
+#define KSTR 0xc0000000 //String table (moved to end of KEDX for compiled)
+#define KARR 0xd0000000 //Array table (moved to end of KEDX for compiled)
+#define KGLB 0xe0000000 //Global static (behaves similar to KARR&KIMM, but separate list)
+#define KUNUSED (KEDX+1)        //Make parameter act like constant (best for optimization) and not match anything
+
+	//min/max values for exp: -745.13321910194116528 (-log(2)*(1024+51)) and 709.78271289338396 (log(2)*1024)
+#define PI 3.14159265358979323
+#ifdef _MSC_VER
+__declspec(align(16)) static long kexptval[4] = {0,0x80000000,0,0};
+#define LL(l) l##i64
+#define PRINTF64 "I64d"
+#else
+//#define __cdecl __attribute__((cdecl))
+#define __cdecl
+#define _inline __inline__
+#define LL(l) l##ll
+#define PRINTF64 "lld"
+typedef long long __int64;
+#define _snprintf snprintf
+#define lnglng(x) x ## ll
+#define stricmp strcasecmp
+#endif
+
 static const long pinf = 0x7f800000, ninf = 0xff800000, pind = 0x7fc00000, nind = 0xffc00000;
 static const float posone = 1.f, negone = -1.f, pointfive = .5f, oneover2_31 = 1.f/2147483648.f;
 //static const float threeup51 = 6755399441055744;
@@ -22,6 +79,8 @@ static long gccnt;
 
 static char *gstring; //maxst
 static long gstnum, maxst = 0;
+
+typedef struct { long i; double v; } initval_t;
 static initval_t *ginitval;
 static long ginitvalnum, maxinitval = 0;
 
@@ -32,6 +91,15 @@ static double *gvlp;
 static long maxvars = 0, maxvarchars = 0;
 static char *newvarnam; //maxvarchars (variable name buffer; strings separated by NULL terminator)
 static long newvarhash[256], newvarhash_glob[256];
+typedef struct
+{
+	long r;      //pointer to register family & offset
+	long maxind; //Maximum index for arrays (0 if not an array)
+	long parnum; //>=0: # parameters for user functions. <0: not a function; # = 1's complement of # dimensions
+	long proti;  //For funcs/arrays: newvarnam index. FuncProto:{d=double,D=double*}, ArrayDims:{(~parnum)*4}
+	long nami;   //index to start of variable/function`s name string in newvarnam
+	long hashn;  //hash index for variable/function name (for faster string finding & function overloading)
+} newvartyp;
 static newvartyp *newvar;
 static long newvarnum, newvarplc; //maxvars
 
@@ -41,120 +109,46 @@ static double *enumval; static long maxenum = 0, enumnum;        //Enum value li
 static long maxlabs = 0, maxlabchars = 0;
 static char *newlabnam; //maxlabchars
 static long *newlabind, newlabnum, newlabplc; //maxlabs
-static long *labpat, *jumpat, *lablinum, numlabels;
+static long *labpat, *jumpat, *lablinum, numlabels; //maxlabs
+
+typedef struct { long addr, val; } jumpback_t;
 static jumpback_t *jumpback = 0;
 static long jumpbacknum = 0, maxjumpbacks = 0;
+
+#define MAXPARMS (1+2) //Output + #Inputs (for > 2 inputs, use rxi)
+typedef struct
+{
+	long r; //register family (EAX,ECX,EDX,ESP,etc...) in highest 4 bits, and offset in lower 28 bits
+	long q; //additional info (array index, which user function)
+	long nv; //newvar index
+} rtyp;
+typedef struct
+{
+	long f;           //function enum index
+	long g;           //additional info for function
+	long n;           //Number of inputs
+	rtyp r[MAXPARMS]; //register description
+	long rxi;         //Register eXtra Index
+} gasmtyp;
 static gasmtyp *gasm; //maxops
 
 static rtyp *rxi;
 static long numrxi, maxrxi = 0;
+
+#if (COMPILE != 0)
+#define FUNCBYTEOFFS 16 //Should be multiple of 16 for alignment speed. Pointer to jumpback table.
+#define CODEDATADIST 1024 //Number of bytes separate code and data blocks
+
+	//if (?.ind >= 0) ?.ptr = gevalext[?.ind].ptr (must look up later for user function pointers)
+typedef struct { long *lptr; long ind; } patch_t;
 static patch_t *patch = 0;
 static long patchnum = 0, maxpatch = 0;
+#else
+#define FUNCBYTEOFFS 0
+#endif
 
-static void checkfuncst (long i) //note: i is per long, not function
-{
-	if (i < maxfuncst) return;
-	if (!i) { maxfuncst = 256; } else { while (i >= maxfuncst) maxfuncst += (maxfuncst>>2); }
-	//printf("maxfuncst=%d\n",maxfuncst);
-	if (!(funcst = (long *)realloc(funcst,sizeof(funcst[0])*maxfuncst))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-}
+static long round0msk[2048][2];
+//--------------------------------------------------
+static long cputype = 0, cpuinited = 0;
 
-static void checkops (long i)
-{
-	if (i < maxops) return;
-	if (!i) { maxops = 1024; } else { while (i >= maxops) maxops += (maxops>>2); }
-	//printf("maxops=%d\n",maxops);
-	if (!(      gop = (   long *)realloc(      gop,sizeof(long)   *maxops))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-	if (!(    gnext = (   long *)realloc(    gnext,sizeof(long)   *maxops))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-	if (!(  globval = ( double *)realloc(  globval,sizeof(double) *maxops))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-	if (!(     gasm = (gasmtyp *)realloc(     gasm,sizeof(gasmtyp)*maxops))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-}
-
-static void checkstrings (long i)
-{
-	if (i < maxst) return;
-	if (!i) { maxst = 1024; } else { while (i >= maxst) maxst += (maxst>>2); }
-	//printf("maxst=%d\n",maxst);
-	if (!(  gstring = (   char *)realloc(  gstring,sizeof(char)   *maxst))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-}
-
-static void checkinitvals (long i)
-{
-	if (i < maxinitval) return;
-	if (!i) { maxinitval = 256; } else { while (i >= maxinitval) maxinitval += (maxinitval>>2); }
-	//printf("maxinitval=%d\n",maxinitval);
-	if (!(ginitval = (initval_t *)realloc(ginitval,sizeof(initval_t)*maxinitval))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-}
-
-static void checkrxi (long i)
-{
-	if (i < maxrxi) return;
-	if (!i) { maxrxi = 256; } else { while (i >= maxrxi) maxrxi += (maxrxi>>2); }
-	//printf("maxrxi=%d\n",maxrxi);
-	if (!(rxi = (rtyp *)realloc(rxi,sizeof(rtyp)*maxrxi))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-}
-
-static void checkvarchars (long i)
-{
-	if (i < maxvarchars) return;
-	if (!i) { maxvarchars = 1024; } else { while (i >= maxvarchars) maxvarchars += (maxvarchars>>2); }
-	//printf("maxvarchars=%d\n",maxvarchars);
-	if (!(newvarnam = (char *)realloc(newvarnam,sizeof(char)*maxvarchars))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-}
-
-static void checkvars (long i)
-{
-	if (i < maxvars) return;
-	if (!i) { maxvars = 256; } else { while (i >= maxvars) maxvars += (maxvars>>2); }
-	//printf("maxvars=%d\n",maxvars);
-	if (!(newvar = (newvartyp *)realloc(newvar,sizeof(newvartyp)*maxvars))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-}
-
-static void checkenumchars (long i)
-{
-	if (i < maxenumchars) return;
-	if (!i) { maxenumchars = 1024; } else { while (i >= maxenumchars) maxenumchars += (maxenumchars>>2); }
-	//printf("maxenumchars=%d\n",maxenumchars);
-	if (!(enumnam = (char *)realloc(enumnam,sizeof(char)*maxenumchars))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-}
-
-static void checkenum (long i)
-{
-	if (i < maxenum) return;
-	if (!i) { maxenum = 256; } else { while (i >= maxenum) maxenum += (maxenum>>2); }
-	//printf("maxenum=%d\n",maxenum);
-	if (!(enumval = (double *)realloc(enumval,sizeof(double)*maxenum))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-}
-
-static void checklabchars (long i)
-{
-	if (i < maxlabchars) return;
-	if (!i) { maxlabchars = 1024; } else { while (i >= maxlabchars) maxlabchars += (maxlabchars>>2); }
-	//printf("maxlabchars=%d\n",maxlabchars);
-	if (!(newlabnam = (   char *)realloc(newlabnam,sizeof(char)   *maxlabchars))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-}
-
-static void checklabs (long i)
-{
-	if (i < maxlabs) return;
-	if (!i) { maxlabs = 256; } else { while (i >= maxlabs) maxlabs += (maxlabs>>2); }
-	//printf("maxlabs=%d\n",maxlabs);
-	if (!(newlabind = (   long *)realloc(newlabind,sizeof(long)   *maxlabs))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-	if (!(   labpat = (   long *)realloc(labpat   ,sizeof(long)   *maxlabs))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-	if (!(   jumpat = (   long *)realloc(jumpat   ,sizeof(long)   *maxlabs))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-	if (!( lablinum = (   long *)realloc(lablinum ,sizeof(long)   *maxlabs))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-}
-
-static void checkjumpbacks (long i)
-{
-	if (i < maxjumpbacks) return;
-	if (!i) { maxjumpbacks = 256; } else { while (i >= maxjumpbacks) maxjumpbacks += (maxjumpbacks>>2); }
-	//printf("maxjumpbacks=%d\n",maxjumpbacks);
-	if (!(jumpback = (jumpback_t *)realloc(jumpback,sizeof(jumpback_t)*maxjumpbacks))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-}static void checkpatch (long i)
-{
-	if (i < maxpatch) return;
-	if (!i) { maxpatch = 256; } else { while (i >= maxpatch) maxpatch += (maxpatch>>2); }
-	//printf("maxpatch=%d\n",maxpatch);
-	if (!(patch = (patch_t *)realloc(patch,sizeof(patch_t)*maxpatch))) { globi = -1; strcpy(kasm87err,"ERROR: malloc failed"); return; }
-}
+#ifdef _MSC_VER

@@ -1,18 +1,4 @@
-, dnumframes = 0.0;
-static __int64 qper, qtim0;
-static int oglxres, oglyres, songtime = 0, gmehax = 0, dorecompile = 0;
-static char gsavfilnam[MAX_PATH] = "", *gsavfilnamptr = 0;
-static HWND ghwnd = 0, hWndDraw = 0, hWndCons = 0, hWndLine = 0, hWndEdit = 0;
-static HFONT hfont = 0;
-static HINSTANCE ghinst;
 
-enum
-{
-	MENU_FILENEW=0,MENU_FILEOPEN=MENU_FILENEW+4,MENU_FILESAVE,MENU_FILESAVEAS,MENU_FILEEXIT,
-	MENU_EDITFIND,MENU_EDITFINDNEXT,MENU_EDITFINDPREV,MENU_EDITREPLACE,
-	MENU_COMPCONTENT,MENU_EVALHIGHLIGHT,MENU_RENDPLC,MENU_FULLSCREEN=MENU_RENDPLC+4,MENU_CLEARBUFFER,MENU_FONT,
-	MENU_HELPTEXT,MENU_HELPABOUT
-};
 
 //--------------------------------------------------------------------------------------------------
 static char gexefullpath[MAX_PATH] = "", gexedironly[MAX_PATH] = "", ginifilnam[MAX_PATH] = "";

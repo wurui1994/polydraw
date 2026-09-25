@@ -350,3 +350,6 @@ static int getcputype ()
 	if (i&(1<<25)) i |= (1<<22); //SSE implies MMX+ support
 	return(i);
 }
+
+static unsigned char fakebuf[8], *nfilptr;
+static int nbitpos;

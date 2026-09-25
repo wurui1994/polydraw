@@ -48,5 +48,3 @@ enum //kpgetdim() return values:
 #endif
 
 #ifdef BIGENDIAN
-
-//====================== HANDY PICTURE function ends =========================

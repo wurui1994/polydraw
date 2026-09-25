@@ -347,3 +347,5 @@ kcd_t *kasm87c_copyglob2struct (long stackdoubs)
 
 	return(kcd);
 }
+
+#endif

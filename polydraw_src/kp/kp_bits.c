@@ -1,7 +1,4 @@
 
-
-static unsigned char fakebuf[8], *nfilptr;
-static int nbitpos;
 static void suckbitsnextblock ()
 {
 	int n;
@@ -51,6 +48,59 @@ static int hufgetsym (int *hitab, int *hbmax)
 	return(hitab[hbmax[n]+v]);
 }
 
+	//This did not result in a speed-up on P4-3.6Ghz (02/22/2005)
+//static int hufgetsym_skipb (int *hitab, int *hbmax, int n, int addit)
+//{
+//   int v;
+//
+//   v = bitrev(getbits(n),n)+addit;
+//   do { v = (v<<1)+getbits(1)+hbmax[n]-hbmax[n+1]; n++; } while (v >= 0);
+//   return(hitab[hbmax[n]+v]);
+//}
+
+static void qhufgencode (int *hitab, int *hbmax, int *qhval, unsigned char *qhbit, int numbits)
+{
+	int i, j, k, n, r;
+
+		//r is the bit reverse of i. Ex: if: i = 1011100111, r = 1110011101
+	i = r = 0;
+	for(n=1;n<=numbits;n++)
+		for(k=hbmax[n-1];k<hbmax[n];k++)
+			for(j=i+pow2mask[numbits-n];i<=j;i++)
+			{
+				r = bitrev(i,numbits);
+				qhval[r] = hitab[k];
+				qhbit[r] = (char)n;
+			}
+	for(j=pow2mask[numbits];i<=j;i++)
+	{
+		r = bitrev(i,numbits);
+
+		//k = 0;
+		//for(n=0;n<numbits;n++)
+		//   k = (k<<1) + ((r>>n)&1) + hbmax[n]-hbmax[n+1];
+		//
+		//n = numbits;
+		//k = hbmax[n]-r;
+		//
+		//j = peekbits(LOGQHUFSIZ); i = qhufval[j]; j = qhufbit[j];
+		//
+		//i = j = 0;
+		//do
+		//{
+		//   i = (i<<1)+getbits(1)+nbuf0[j]-nbuf0[j+1]; j++;
+		//} while (i >= 0);
+		//i = ibuf0[nbuf0[j]+i];
+		//qhval[r] = k;
+
+		qhbit[r] = 0; //n-32;
+	}
+
+	//   //hufgetsym_skipb related code:
+	//for(k=n=0;n<numbits;n++) k = (k<<1)+hbmax[n]-hbmax[n+1];
+	//return(k);
+}
+
 	//inbuf[inum] : Bit length of each symbol
 	//inum        : Number of indices
 	//hitab[inum] : Indices from size-ordered list to original symbol
@@ -64,25 +114,4 @@ static void hufgencode (int *inbuf, int inum, int *hitab, int *hbmax)
 	tbuf[0] = hbmax[0] = 0; //Hack to remove symbols of length 0?
 	for(i=0;i<31;i++) hbmax[i+1] = hbmax[i]+tbuf[i];
 	for(i=0;i<inum;i++) if (inbuf[i]) hitab[hbmax[inbuf[i]]++] = i;
-}
-
-static void huffgetval (int index, int curbits, int num, int *daval, int *dabits)
-{
-	int b, v, pow2, *hmax;
-
-	hmax = &hufmaxatbit[index][0];
-	pow2 = pow2long[curbits-1];
-	if (num&pow2) v = 1; else v = 0;
-	for(b=1;b<=16;b++)
-	{
-		if (v < hmax[b])
-		{
-			*dabits = b;
-			*daval = huftable[index][hufvalatbit[index][b]+v];
-			return;
-		}
-		pow2 >>= 1; v <<= 1;
-		if (num&pow2) v++;
-	}
-	*dabits = 16; *daval = 0;
 }

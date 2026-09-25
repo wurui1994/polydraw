@@ -1,97 +1,4 @@
 
-
-	//This did not result in a speed-up on P4-3.6Ghz (02/22/2005)
-//static int hufgetsym_skipb (int *hitab, int *hbmax, int n, int addit)
-//{
-//   int v;
-//
-//   v = bitrev(getbits(n),n)+addit;
-//   do { v = (v<<1)+getbits(1)+hbmax[n]-hbmax[n+1]; n++; } while (v >= 0);
-//   return(hitab[hbmax[n]+v]);
-//}
-
-static void qhufgencode (int *hitab, int *hbmax, int *qhval, unsigned char *qhbit, int numbits)
-{
-	int i, j, k, n, r;
-
-		//r is the bit reverse of i. Ex: if: i = 1011100111, r = 1110011101
-	i = r = 0;
-	for(n=1;n<=numbits;n++)
-		for(k=hbmax[n-1];k<hbmax[n];k++)
-			for(j=i+pow2mask[numbits-n];i<=j;i++)
-			{
-				r = bitrev(i,numbits);
-				qhval[r] = hitab[k];
-				qhbit[r] = (char)n;
-			}
-	for(j=pow2mask[numbits];i<=j;i++)
-	{
-		r = bitrev(i,numbits);
-
-		//k = 0;
-		//for(n=0;n<numbits;n++)
-		//   k = (k<<1) + ((r>>n)&1) + hbmax[n]-hbmax[n+1];
-		//
-		//n = numbits;
-		//k = hbmax[n]-r;
-		//
-		//j = peekbits(LOGQHUFSIZ); i = qhufval[j]; j = qhufbit[j];
-		//
-		//i = j = 0;
-		//do
-		//{
-		//   i = (i<<1)+getbits(1)+nbuf0[j]-nbuf0[j+1]; j++;
-		//} while (i >= 0);
-		//i = ibuf0[nbuf0[j]+i];
-		//qhval[r] = k;
-
-		qhbit[r] = 0; //n-32;
-	}
-
-	//   //hufgetsym_skipb related code:
-	//for(k=n=0;n<numbits;n++) k = (k<<1)+hbmax[n]-hbmax[n+1];
-	//return(k);
-}
-
-//============================= KPNGILIB ends ================================
-//============================ KPEGILIB begins ===============================
-
-	//11/01/2000: This code was originally from KPEG.C
-	//   All non 32-bit color drawing was removed
-	//   "Motion" JPG code was removed
-	//   A lot of parameters were added to kpeg() for library usage
-static int kpeginited = 0;
-static int clipxdim, clipydim;
-
-static int hufmaxatbit[8][20], hufvalatbit[8][20], hufcnt[8];
-static unsigned char hufnumatbit[8][20], huftable[8][256];
-static int hufquickval[8][1024], hufquickbits[8][1024], hufquickcnt[8];
-static int quantab[4][64], dct[12][64], lastdc[4], unzig[64], zigit[64]; //dct:10=MAX (says spec);+2 for hacks
-static unsigned char gnumcomponents, dcflagor[64];
-static int gcompid[4], gcomphsamp[4], gcompvsamp[4], gcompquantab[4], gcomphsampshift[4], gcompvsampshift[4];
-static int lnumcomponents, lcompid[4], lcompdc[4], lcompac[4], lcomphsamp[4], lcompvsamp[4], lcompquantab[4];
-static int lcomphvsamp0, lcomphsampshift0, lcompvsampshift0;
-static int colclip[1024], colclipup8[1024], colclipup16[1024];
-static unsigned char pow2char[8] = {1,2,4,8,16,32,64,128};
-
-#if defined(__WATCOMC__) && !defined(NOASM)
-
-static int mulshr24 (int, int);
-#pragma aux mulshr24 =\
-	"imul edx"\
-	"shrd eax, edx, 24"\
-	parm nomemory [eax][edx]\
-	modify exact [eax edx]
-
-static int mulshr32 (int, int);
-#pragma aux mulshr32 =\
-	"imul edx"\
-	parm nomemory [eax][edx]\
-	modify exact [eax edx]\
-	value [edx]
-
-#elif defined(_MSC_VER) && !defined(NOASM)
-
 static _inline int mulshr24 (int a, int d)
 {
 	_asm
@@ -186,6 +93,27 @@ static void initkpeg ()
 	}
 
 	memset((void *)&dct[10][0],0,64*2*sizeof(dct[0][0]));
+}
+
+static void huffgetval (int index, int curbits, int num, int *daval, int *dabits)
+{
+	int b, v, pow2, *hmax;
+
+	hmax = &hufmaxatbit[index][0];
+	pow2 = pow2long[curbits-1];
+	if (num&pow2) v = 1; else v = 0;
+	for(b=1;b<=16;b++)
+	{
+		if (v < hmax[b])
+		{
+			*dabits = b;
+			*daval = huftable[index][hufvalatbit[index][b]+v];
+			return;
+		}
+		pow2 >>= 1; v <<= 1;
+		if (num&pow2) v++;
+	}
+	*dabits = 16; *daval = 0;
 }
 
 static void invdct8x8 (int *dc, unsigned char dcflag)
@@ -721,3 +649,9 @@ kpegrend_break2:;
 
 	free(dctbuf); return(0);
 }
+
+//==============================  KPEGILIB ends ==============================
+//================================ GIF begins ================================
+
+static unsigned char suffix[4100], filbuffer[768], tempstack[4096];
+static int prefix[4100];

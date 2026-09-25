@@ -132,24 +132,65 @@ int kprender (const char *buf, int leng, INT_PTR frameptr, int bpl,
 	return(-1);
 }
 
-//====================== ZIP decompression code ends =========================
-//===================== HANDY PICTURE function begins ========================
+//==================== External picture interface ends =======================
 
-void kpzload (const char *filnam, INT_PTR *pic, int *bpl, int *xsiz, int *ysiz)
+	//Brute-force case-insensitive, slash-insensitive, * and ? wildcard matcher
+	//Given: string i and string j. string j can have wildcards
+	//Returns: 1:matches, 0:doesn't match
+static int wildmatch (const char *i, const char *j)
 {
-	char *buf;
-	int leng;
+	const char *k;
+	char c0, c1;
 
-	(*pic) = 0;
-	if (!kzopen(filnam)) return;
-	leng = kzfilelength();
-	buf = (char *)malloc(leng); if (!buf) { kzclose(); return; }
-	kzread(buf,leng);
-	kzclose();
-
-	kpgetdim(buf,leng,xsiz,ysiz);
-	(*bpl) = ((*xsiz)<<2);
-	(*pic) = (INT_PTR)malloc((*ysiz)*(*bpl)); if (!(*pic)) { free(buf); return; }
-	if (kprender(buf,leng,*pic,*bpl,*xsiz,*ysiz,0,0) < 0) { free(buf); free((void *)*pic); (*pic) = 0; return; }
-	free(buf);
+	if (!*j) return(1);
+	do
+	{
+		if (*j == '*')
+		{
+			for(k=i,j++;*k;k++) if (wildmatch(k,j)) return(1);
+			continue;
+		}
+		if (!*i) return(0);
+		if (*j == '?') { i++; j++; continue; }
+		c0 = *i; if ((c0 >= 'a') && (c0 <= 'z')) c0 -= 32;
+		c1 = *j; if ((c1 >= 'a') && (c1 <= 'z')) c1 -= 32;
+		if (c0 == '/') c0 = '\\';
+		if (c1 == '/') c1 = '\\';
+		if (c0 != c1) return(0);
+		i++; j++;
+	} while (*j);
+	return(!*i);
 }
+
+	//Same as: stricmp(st0,st1) except: '/' == '\'
+static int filnamcmp (const char *st0, const char *st1)
+{
+	int i;
+	char ch0, ch1;
+
+	for(i=0;st0[i];i++)
+	{
+		ch0 = st0[i]; if ((ch0 >= 'a') && (ch0 <= 'z')) ch0 -= 32;
+		ch1 = st1[i]; if ((ch1 >= 'a') && (ch1 <= 'z')) ch1 -= 32;
+		if (ch0 == '/') ch0 = '\\';
+		if (ch1 == '/') ch1 = '\\';
+		if (ch0 != ch1) return(-1);
+	}
+	if (!st1[i]) return(0);
+	return(-1);
+}
+
+//===================== ZIP decompression code begins ========================
+
+	//format: (used by kzaddstack/kzopen to cache file name&start info)
+	//[char zipnam[?]\0]
+	//[next hashindex/-1][next index/-1][zipnam index][fileoffs][fileleng][iscomp][char filnam[?]\0]
+	//[next hashindex/-1][next index/-1][zipnam index][fileoffs][fileleng][iscomp][char filnam[?]\0]
+	//...
+	//[char zipnam[?]\0]
+	//[next hashindex/-1][next index/-1][zipnam index][fileoffs][fileleng][iscomp][char filnam[?]\0]
+	//[next hashindex/-1][next index/-1][zipnam index][fileoffs][fileleng][iscomp][char filnam[?]\0]
+	//...
+#define KZHASHINITSIZE 8192
+static char *kzhashbuf = 0;
+static int kzhashead[256], kzhashpos, kzlastfnam, kzhashsiz, kzdirnamhead = -1;
