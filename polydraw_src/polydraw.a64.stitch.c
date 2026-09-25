@@ -27,7 +27,19 @@
 #include "pd/pd_wingl.c"
 #include "pd/pd_font.c"
 #include "pd/pd_noise.c"
+/* 第 24 个洞：`kglsettexarray*` 那句范围检查把 64 位指针截成 32 位（`(int)p`），
+   于是 `glsettex(贴图号,数组,…)` 一声不响地回 -1、贴图从来没上传过。
+   原文那三个名字改掉，真名归 `port/a64/pd_gl_settexarr_a64.c` —— 它要
+   `tex[]`/`gbmp`/`CreateEmptyTexture` 那些 file-static，所以必须在同一个翻译单元里、
+   紧跟在 `pd_host_gl.c` 后头。`pd_script.c` 里那张 myext[] 于是指到修好的那一份。 */
+#define kglsettexarray1 kglsettexarray1_win32
+#define kglsettexarray2 kglsettexarray2_win32
+#define kglsettexarray3 kglsettexarray3_win32
 #include "pd/pd_host_gl.c"
+#undef kglsettexarray1
+#undef kglsettexarray2
+#undef kglsettexarray3
+#include "../port/a64/pd_gl_settexarr_a64.c"
 #include "pd/pd_midi.c"
 #include "pd/pd_zip.c"
 #include "pd/pd_script.c"

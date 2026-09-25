@@ -143,12 +143,40 @@ static void pd_bindfb_wrap (GLenum target, GLuint fb)
 	if (pd_real_bindfb) pd_real_bindfb(target,fb);
 }
 
+/* 三维贴图那两格的诊断（`PD_TEXDBG=1`）：它们走 `glfp[]` 那张表，`pd_gl_texdbg.c`
+   里 `#define` 那一招钩不到 —— 只能在**解析那一刻**把落点换成包了一层的。 */
+static void (*pd_real_teximg3d)(GLenum,GLint,GLint,GLsizei,GLsizei,GLsizei,GLint,GLenum,GLenum,const void *) = 0;
+static void (*pd_real_texsub3d)(GLenum,GLint,GLint,GLint,GLint,GLsizei,GLsizei,GLsizei,GLenum,GLenum,const void *) = 0;
+
+static void pd_teximg3d_wrap (GLenum tar, GLint lev, GLint ifmt, GLsizei w, GLsizei h, GLsizei d,
+	GLint bord, GLenum fmt, GLenum typ, const void *px)
+{
+	if (pd_real_teximg3d) pd_real_teximg3d(tar,lev,ifmt,w,h,d,bord,fmt,typ,px);
+	if (getenv("PD_TEXDBG"))
+		fprintf(stderr,"[tex] image3D tar=%x lev=%d ifmt=%d %dx%dx%d fmt=%x typ=%x px=%p err=%x\n",
+			tar,lev,ifmt,(int)w,(int)h,(int)d,fmt,typ,px,glGetError());
+}
+static void pd_texsub3d_wrap (GLenum tar, GLint lev, GLint xo, GLint yo, GLint zo,
+	GLsizei w, GLsizei h, GLsizei d, GLenum fmt, GLenum typ, const void *px)
+{
+	if (pd_real_texsub3d) pd_real_texsub3d(tar,lev,xo,yo,zo,w,h,d,fmt,typ,px);
+	if (getenv("PD_TEXDBG"))
+		fprintf(stderr,"[tex] sub3D tar=%x lev=%d at=%d,%d,%d %dx%dx%d fmt=%x typ=%x px=%p err=%x\n",
+			tar,lev,xo,yo,zo,(int)w,(int)h,(int)d,fmt,typ,px,glGetError());
+}
+
 /* `wglGetProcAddress`：polydraw 靠它填那张 GL 2.0 的函数指针表。
    macOS 没有对应的 API —— 但 legacy GL 的符号全在 OpenGL.framework 里，
    所以 `dlsym(RTLD_DEFAULT, 名字)` 就是答案。 */
 void *wglGetProcAddress (LPCSTR nam)
 {
 	void *p = dlsym(RTLD_DEFAULT,nam);
+	if (!strcmp(nam,"glTexImage3D") && p)
+		{ pd_real_teximg3d = (void (*)(GLenum,GLint,GLint,GLsizei,GLsizei,GLsizei,GLint,GLenum,GLenum,const void *))p;
+		  return((void *)pd_teximg3d_wrap); }
+	if (!strcmp(nam,"glTexSubImage3D") && p)
+		{ pd_real_texsub3d = (void (*)(GLenum,GLint,GLint,GLint,GLint,GLsizei,GLsizei,GLsizei,GLenum,GLenum,const void *))p;
+		  return((void *)pd_texsub3d_wrap); }
 	if (!strcmp(nam,"glBindFramebufferEXT") || !strcmp(nam,"glBindFramebuffer"))
 	{
 		if (!p) p = dlsym(RTLD_DEFAULT,"glBindFramebufferEXT");

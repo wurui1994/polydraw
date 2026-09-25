@@ -599,37 +599,7 @@ static void pd_op (pd_jb *b, kcd_t *kcd, long i, pd_fix *fix, long *nfix)
 			   补的正是这一族）。 */
 			for(j=0;j<a->n;j++)
 				if ((cptr[j] != 'd') && (cptr[j] != 'D') && (cptr[j] != 'C')) { pd_fallback(b,i); return; }
-			/* **只发解释器也会发的那些形状**（第 20 个洞，见下）。
-			 *
-			 * 原文那张 switch 按 `n` 只枚举了 `d…dD…D` —— **指针必须在末尾**。
-			 * `glsettex(0,buf,w,h,colmode)` 的原型是 `dDddd`，五条 strncmp 一条都不中，
-			 * 于是**这一句在 COMPILE==0 上压根不会被调**（一声不响地跳过）。
-			 * 而 JIT 按 AAPCS64 摆一摆就能真调 —— 于是 `ken/heightmap.pss` 上
-			 * 两条路画出来的东西不一样（按指令二分定到第 117 条就是它）。
-			 *
-			 * 这一版的口径是**与解释器一致**（它才是现在的正本），所以形状不对就退回去
-			 * ——"两条路答案相同"比"多调一个函数"重要。真要治的是解释器那张表
-			 * （补 `dDddd` 那一族），那是另一刀、另一份判据。
-			 * 带 `C` 的只认第 18 个洞补的那五种：C / dC / CC / dCd / CCC。 */
-			{
-				int hasC = 0, seenD = 0, ok = 1;
-				for(j=0;j<a->n;j++)
-				{
-					if (cptr[j] == 'C') hasC = 1;
-					if (cptr[j] == 'D') seenD = 1;
-					else if ((cptr[j] == 'd') && (seenD)) ok = 0;   /* 指针后头又来了 double */
-				}
-				if (hasC)
-				{
-					ok = 0;
-					if ((a->n == 1) && (!strncmp(cptr,"C",1)))   ok = 1;
-					if ((a->n == 2) && (!strncmp(cptr,"dC",2)))  ok = 1;
-					if ((a->n == 2) && (!strncmp(cptr,"CC",2)))  ok = 1;
-					if ((a->n == 3) && (!strncmp(cptr,"dCd",3))) ok = 1;
-					if ((a->n == 3) && (!strncmp(cptr,"CCC",3))) ok = 1;
-				}
-				if (!ok) { pd_fallback(b,i); return; }
-			}
+			/* **形状不再挑**（第 22 个洞）：见下面那段注。 */
 			/* **脚本自己那些函数**（`pd_a64_owns`）：这一条交给解释器。
 			   先前这儿是"把操作数地址摆成 p[17] 那张表、递给 pd_a64_call_script" ——
 			   那一版在 `ken/heightmap.pss` 上必崩（按指令二分定到第 272 条：

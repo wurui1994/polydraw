@@ -317,6 +317,22 @@ double kasm87c_run (char *parmdat, kcd_t *kcd)
 					if (pd_run_dbg) fprintf(stderr,"[run] 带字符串的原型没接：|%.*s| n=%ld\n",(int)cn,cptr,(long)cn);
 				}
 
+				//—— 第 22 个洞：**指针不在末尾**那一族也一个都没被调 ——
+				//原文那张 switch 只枚举了 `d…dD…D`（指针必须是后缀），而 myext[] 里
+				//`glsettex(0,buf,w,h,colmode)` 是 `dDddd`、三维那档是 `dDdddd`、
+				//`glsettex(0,buf,w,h)` 是 `dDdd`、`glgettex` 也是 `dDddd` ——
+				//五条 strncmp 一条都不中 ⇒ **这些调用在 COMPILE==0 上一声不响地跳过**。
+				//量到的（ken/texture3d.pss）：驱动报
+				//"GLD_TEXTURE_INDEX_3D is unloadable ... using zero texture"，
+				//因为那张三维贴图压根没上传。JIT 那侧按 AAPCS64 摆一摆本来就能调，
+				//所以这三格补上之后两条路才对得上（`PD_JIT=2` 差分才有意义）。
+				if ((kcd->gasm[i].n == 4) && (!strncmp(cptr,"dDdd",4)))
+					{ (*p[0]) = ((double (__cdecl *)(double,double *,double,double))dafunc)(*p[1],p[2],*p[3],*p[4]); break; }
+				if ((kcd->gasm[i].n == 5) && (!strncmp(cptr,"dDddd",5)))
+					{ (*p[0]) = ((double (__cdecl *)(double,double *,double,double,double))dafunc)(*p[1],p[2],*p[3],*p[4],*p[5]); break; }
+				if ((kcd->gasm[i].n == 6) && (!strncmp(cptr,"dDdddd",6)))
+					{ (*p[0]) = ((double (__cdecl *)(double,double *,double,double,double,double))dafunc)(*p[1],p[2],*p[3],*p[4],*p[5],*p[6]); break; }
+
 				switch(kcd->gasm[i].n) //This seems to be the only way to do pure C implementation; it sucks!
 				{
 					case 1:

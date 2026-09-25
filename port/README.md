@@ -501,7 +501,74 @@ Apple 对"装不进去的贴图"的回答。教训：**先确认那个宿主调�
   整个扇面被近平面裁掉。`PD_MOUSE=x,y` 可以改（要复现某一帧时用）。
   就是这一格让 `ken/texture.pss` 从空画面变成 98 色。
 
-## 立即模式**攒批**（`port/a64/pd_gl_imm.c`）：`balls` 40.7 -> 4.87 ms/帧
+## 第 22~24 个洞：**`glsettex(号,数组,…)` 这一族从来没有真的上传过**
+
+用户报的两件事（`ken/texture3d.pss` 驱动喊 "GLD_TEXTURE_INDEX_3D is unloadable …
+using zero texture"、`curvybuild`/`heightmap` 画面不对）是**同一条链**上的三个洞。
+
+### 22：指针不在末尾的原型，一个都没被调
+
+`glsettex(0,buf,w,h,颜色档)` 的原型是 `dDddd`、三维那档 `dDdddd`、两参那档 `dDdd`。
+原文那张解释器 switch（`kasm_interp.c`）**只枚举了 `d…dD…D`（指针必须是后缀）**，
+五条 `strncmp` 一条都不中 ⇒ 一声不响地跳过。先前 JIT 那侧为了"与解释器一致"也把
+这些形状退回去（那是第 20 个洞的结论），于是两条路都不调。
+
+正本是原版那台 x87 JIT（`COMPILE==1`），**它是调的**。所以两头都补：
+`tools/mkrun.mjs` 给解释器加了那三格（`dDdd`/`dDddd`/`dDdddd`），
+`pd_a64_jitc.c` 把形状那道门**整个去掉** —— JIT 摆实参本来就是按 AAPCS64
+（`d` 走 d0..d7、`D`/`C` 走 x0..x7，两条独立序列），任意次序都对。
+**真变参那一族自动排除**：`myprintf`/`myprintg` 的原型里有 `e`
+（`kasm_comp.c:244` 把 `.` 记成 `e`），"只认 d/D/C"那个循环挡住了。
+
+### 23：名字 0 那格贴图在 Apple 上装不进去
+
+polydraw 不走 `glGenTextures`，拿"第几格贴图"当 GL 名字用（14 处调用点全是
+`glBindTexture(tex[itex].tar,itex)` 或 `fontid`，**没有一处是"绑 0 去解绑"**）。
+于是第 0 格绑的是**默认贴图对象**，Windows 那些驱动许、Apple 的 Metal 后端不许。
+`port/a64/pd_gl_texdbg.c` 那一层把**名字 0 换成一格真的 `glGenTextures` 名字**
+（按 target 各一格 —— 同一个名字不许换 target）。
+
+### 24：那句范围检查在这条路上永远是假
+
+`kglsettexarray3`（`pd_host_gl.c`）拷数据之前要确认"数组在脚本自己那块内存里"：
+
+```c
+if ((((int)p) < ((int)gevalfunc)) || (((int)p)+((xs*ys*zs*evalvalperpix)<<3) >
+     ((int)gevalfunc)+gevalfuncleng)) return(-1.0);
+```
+
+两层问题：三处 `(int)` 在 LP64 上把地址截成低 32 位；**就算按真指针比也过不去** ——
+它比的是 `gevalfunc` 那块（`COMPILE==1` 的布局：static 数据跟代码块一起分配），
+而 `COMPILE==0` 这条路上 static 在 `gstatmem`（`kasm_state.c:68`，还是 eval 那个
+翻译单元里的 static，polydraw 这边看不见）。所以这一档**把它去掉**：这个指针是
+我们自己的解释器/JIT 从操作数表里取的，与别的实参一样可信；尺寸那两道门还在。
+
+分身在 `port/a64/pd_gl_settexarr_a64.c`（原文一个字节没动，缝合文件里把那三个名字
+改成 `*_win32`）。**查法**：`PD_TEXDBG=1` 下只有 `CreateEmptyTexture` 那趟
+`image3D`、**没有 `sub3D`` ——那就是在这一句退出去了（三维那两格的钩子在
+`pd_gl_cgl.c` 的 `wglGetProcAddress` 里，它们走 `glfp[]`，`#define` 那一招钩不到）。
+
+### 这三刀之后（`bench/scan-a64.sh`）
+
+* **`curvybuild` 2 色 -> 19579 色**（用户报的"渲染不对"就是它）；
+* **`texture3d` 2 色 -> 454 色**，驱动那句 unloadable 没了；
+* `heightmap` 2 -> 1 色：它的 256×256 贴图现在真上去了（`sub2D 256x256`），
+  画面仍是空的 —— 那是**另一件事**（几何/相机那一半），不是这三刀的退步；
+* 分类：ok 49 / 空画面 2 / 着色器错 2 / 崩 0 / 超时 0
+  （`heightmap` 从"2 色算 ok"掉进"空画面"——那个 2 色本来也是空的，
+  这张表的 `ok` 判据是"颜色数 ≥ 2"，太松，见下）。
+
+### 判据本身的一个洞（自己踩的）
+
+攒批那一轮我拿四份探针脚本的 PNG md5 当"逐字节相同"的判据，其中两份
+（`many` / `one`，没有 `@f` 段）**两档都是全黑** —— 那是"两边都不画"白拿分。
+根因：`polydraw.c:3589` 是 `if (shadn[2]) Draw(…)` —— **没有片元着色器段就压根不画**
+（原版就这样；语料 53 份每一份都有 `@f`，所以只有我的探针踩到了）。
+带 `@f` 的那两份（`many_sh`/`one_sh`）是真画了（2 色、1324 格白），那一半的结论仍然成立。
+**以后写探针必须带 `@f`，而且先确认它非黑再拿它当判据。**
+
+
+## 立即模式**攒批**（`port/a64/pd_gl_imm.c`）：`balls` 窗口里 30 -> 115 fps
 
 ### 为什么慢（两个探针量出来的，前一个结论是错的）
 

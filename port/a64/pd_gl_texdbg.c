@@ -34,8 +34,46 @@ static const char *pd_gl_errnam (GLenum e)
 	return("?");
 }
 
+/**
+ * **第 23 个洞：名字 0 那格贴图在 Apple 上装不进去**（这一格不是诊断，是真补丁）。
+ *
+ * polydraw 的贴图**不走 `glGenTextures`**：它拿"第几格用户贴图"当 GL 的名字用
+ * （`glBindTexture(tex[itex].tar,itex)` —— `pd_host_gl.c` 里六处都是这么写的）。
+ * 于是第 0 格贴图绑的是**名字 0**，那是"默认贴图对象"。Windows 那些驱动上往默认
+ * 对象上传是许的（原版就这么跑），Apple 的 Metal 后端**不许**：
+ *   `unit 0 GLD_TEXTURE_INDEX_3D is unloadable and bound to sampler type (Float)
+ *    - using zero texture because texture unloadable`
+ * 于是 `ken/texture3d.pss` 采出来全是 0。
+ *
+ * 这一层把**名字 0 换成一格真的 `glGenTextures` 名字**（按 target 各一格 ——
+ * 同一个名字不许换 target）。别的名字（1、2、…）照旧：兼容档里"绑一个没用过的名字"
+ * 本来就等于就地建一个对象。
+ *
+ * 为什么可以在这儿换：这份源码里 `glBindTexture` 的**每一处**调用点都是
+ * `fontid`（`glGenTextures` 给的）或者 `tex[itex].tar,itex` —— **没有一处是
+ * "绑 0 去解绑"**（grep 过全部 14 处）。所以"名字 0 一定是第 0 格用户贴图"成立。
+ */
+#define PD_TEXZ 8
+static struct { GLenum tar; GLuint nam; } pd_texz[PD_TEXZ];
+static int pd_texzn = 0;
+
+static GLuint pd_zero_name (GLenum tar)
+{
+	int i;
+	for(i=0;i<pd_texzn;i++) if (pd_texz[i].tar == tar) return(pd_texz[i].nam);
+	if (pd_texzn >= PD_TEXZ) return(0);
+	pd_texz[pd_texzn].nam = 0;
+	glGenTextures(1,&pd_texz[pd_texzn].nam);
+	if (!pd_texz[pd_texzn].nam) return(0);
+	pd_texz[pd_texzn].tar = tar;
+	if (pd_texdbg_on())
+		fprintf(stderr,"[tex] 名字 0（target %x）换成真名 %u\n",tar,pd_texz[pd_texzn].nam);
+	return(pd_texz[pd_texzn++].nam);
+}
+
 static void pd_dbg_glBindTexture (GLenum tar, GLuint tex)
 {
+	if (!tex) tex = pd_zero_name(tar);
 	glBindTexture(tar,tex);
 	if (pd_texdbg_on())
 		fprintf(stderr,"[tex] bind tar=%x name=%u err=%s\n",tar,tex,pd_gl_errnam(glGetError()));
