@@ -15,4 +15,5 @@
 #include "eval/kasm_opt.c"
 #include "eval/kasm_interp.c"
 #include "eval/kasm_comp.c"
+#include "eval/kasm_main.c"
 #include "eval/eval_test.c"

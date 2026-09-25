@@ -19,7 +19,8 @@
 #    2549  eval/kasm_emit.c     往字节流里写机器码 + ModRM/SIB：put1/2/4byte / putsib / putlen（3061 字节）
 #    2640  eval/kasm_opt.c      gasm[] 上的窥孔优化：anyreadsbeforewrites / kasmoptimizations（24KB）（27965 字节）
 #    3326  eval/kasm_interp.c   COMPILE==0 那条纯 C 的解释器（照 gasm[] 走）：kasm87c 一族（17878 字节）
-#    3686  eval/kasm_comp.c     主编译流程：kasm87comp（62KB）/ kasm87（16KB）/ setecurs / free / jumpback（80570 字节）
+#    3686  eval/kasm_comp.c     单个函数的编译：kasm87comp（62KB）/ setecurs / kasm87free / kasm87jumpback（64530 字节）
+#    5126  eval/kasm_main.c     kasm87 —— 整份脚本的入口（切文本、逐个函数调 kasm87comp、把产物合起来）（16040 字节）
 #    5550  eval/eval_test.c     KASM87 ENDS 之后 Ken 自带的那个 main（EVALTEST）（15596 字节）
 eval/kasm_head.h	skip	if	1
 eval/kasm_head.h	skip	if	10
@@ -221,7 +222,7 @@ eval/kasm_comp.c	func	kasm87free	3704
 eval/kasm_comp.c	func	kasm87comp	3716
 eval/kasm_comp.c	func	kasm87_findfirstfuncparen	5079
 eval/kasm_comp.c	func	setecurs	5119
-eval/kasm_comp.c	func	kasm87	5126
+eval/kasm_main.c	func	kasm87	5126
 eval/eval_test.c	pp	ifdef	5550
 eval/eval_test.c	pp	if	5552
 eval/eval_test.c	func	rdtsc64	5553

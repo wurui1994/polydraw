@@ -2,3 +2,4 @@
 *.obj
 polydraw.exe
 polydraw_bench.txt
+bench/out/
