@@ -26,3 +26,13 @@ $CC -arch arm64 $OPT -I polydraw_src \
 
 echo "-> $OUT/eval_a64"
 "$OUT/eval_a64" "1+2*3" | tail -1
+
+# 量尺那一份：把 Ken 自带的 main 换成 port/a64/eval_bench.c。
+# 为什么要换：自带那个的 `rdtsc64()` 在非 x86 上是 `return(LL(0))`
+# （eval_test.c:35），所以它印的永远是 `0 cc` —— 量不出东西。
+echo "== eval_bench（量尺）"
+$CC -arch arm64 $OPT -I polydraw_src \
+	-include port/pd_port.h -DCOMPILE=0 -w \
+	polydraw_src/eval.a64bench.stitch.c -o "$OUT/eval_bench" -lm
+echo "-> $OUT/eval_bench"
+"$OUT/eval_bench" '(x){s=0;for(i=0;i<x;i++)s=s+i*i;s}' 1000 | tail -1

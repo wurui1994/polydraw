@@ -63,5 +63,24 @@ $ bench/test-a64.sh           # 判据：16/16
 那 16 格压的是：算术与优先级、`for` 循环、`*=`/`-=`、多函数脚本、
 **递归**（`f(5)=120`、`fib(7)=13`）、`static`、内建函数。
 
+量尺（`bench/out/eval_bench`，换掉了 Ken 那个永远印 `0 cc` 的 main）——
+这台机器（arm64 macOS，clang -O2，**纯 C 解释器**，不是 JIT）：
+
+```
+(x)x+1                                0.0140 us/趟
+(x)sin(x)*cos(x)+sqrt(x)              0.0385 us/趟
+(x){s=0;for(i=0;i<x;i++)s=s+i*i;s} 1000  28.80 us/趟（≈ 28.8ns 一圈，一圈三个算子）
+kasm87() 编译本身                     0.0137 ms/趟
+```
+
+**这不是 x87 JIT 那把尺子** —— 那把尺子只在 Windows/x86 上（`bench/build.cmd`
+加 `/bench:N`）。这一列是"解释器在 arm64 上的地板"，真的 arm64 JIT 要拿它当参照物。
+
 下一步（ADR-0045 D2）：真的 arm64 后端 —— 不再走解释器，把 `gasm[]` 直接
 落成 arm64 机器码。thunk 这一格已经把"生成可执行内存"这条路走通了。
+
+再往后（出图那一半）：`kplib.c` 在 arm64 上**零错误**直接编过了；`polydraw.c`
+只差 `windows.h`（`pd/pd_head.h:10`）。计划是给 `port/a64/winshim/` 放几份
+**假头文件**（`windows.h` / `process.h` / `gl/gl.h`），这样 `pd_head.h` 那 18KB
+一个字节都不用改；win32 的实现（78 个函数，绝大多数在 `pd_win.c` 那份编辑器里）
+按"出图只要 `pd_host_gl.c` + `pd_script.c`"的口径挑着补。
