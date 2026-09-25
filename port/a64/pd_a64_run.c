@@ -28,6 +28,26 @@
 /* 下面那个 `pd_a64_call_script` 要递归调它，所以先报个名。 */
 double kasm87c_run (char *parmdat, kcd_t *kcd);
 
+/* —— 本机补的诊断（`PD_RUNDBG=1` 打开）——
+ *
+ * `plst[]` 只填了六族（KECX/KEDX/KESP/KPTR/KIMM/KGLB），十六格里剩下的从来没人写。
+ * 要是有操作数带着别的族进到这儿，算出来的 `p[j]` 就是栈上的垃圾 ——
+ * 语料里十份脚本崩在 TIMES / PEEK / POKE 上，形状正是这个。
+ * 所以先把十六格全填成毒值，再逐个操作数查：撞上毒值就把族号印出来（每族只印一次）。
+ */
+#define PD_PLST_POISON ((long)0x5bad5bad5bad5badLL)
+static int pd_run_dbg = -1;
+static void pd_a64_chk (const long *plst, long r, long op, long which)
+{
+	static int seen[16];
+	long fam = ((unsigned long)r)>>28;
+	if (plst[fam] != PD_PLST_POISON) return;
+	if (seen[fam]) return;
+	seen[fam] = 1;
+	fprintf(stderr,"[run] plst 那一族没人填：fam=%lx r=%08lx（第 %ld 条指令的第 %ld 个操作数）\n",
+		fam,(unsigned long)r,op,which);
+}
+
 /* 脚本函数那一档：按原型串摊一份 parmdat（指针原样放，double 取值），
    然后直接递归调 `kasm87c_run` —— kcd 记在 thunk 那一格的尾巴上。 */
 static double pd_a64_call_script (void *thunk, const char *proto, double **p, long n)
@@ -53,12 +73,17 @@ double kasm87c_run (char *parmdat, kcd_t *kcd)
 
 	if (kcd->gecnt <= 0) return(0.0);
 
+
+		//—— 本机补的：先把十六格填成毒值（见上面 pd_a64_chk 的注） ——
+	if (pd_run_dbg < 0) pd_run_dbg = (getenv("PD_RUNDBG") != 0);
+	if (pd_run_dbg) { for(i=0;i<16;i++) plst[i] = PD_PLST_POISON; }
+
 	plst[((unsigned long)KECX)>>28] = ((long)gvlp        -KECX);
 	plst[((unsigned long)KEDX)>>28] = ((long)kcd->globval-KEDX);
 	plst[((unsigned long)KESP)>>28] = ((long)parmdat     -KESP);
 	plst[((unsigned long)KPTR)>>28] = ((long)parmdat     -KPTR);
 	plst[((unsigned long)KIMM)>>28] = ((long)            -KIMM);
-	plst[((unsigned long)KGLB)>>28] = ((long)gstatmem    -KGLB);
+	plst[((unsigned long)KGLB)>>28] = -((long)KGLB) /*本机改：原文把 gstatmem 算了两遍*/;
 
 	gvlp += kcd->stackdoubs; //FIX:could do stack overflow check here
 	for(i=0;i<kcd->gecnt;i++)
@@ -71,6 +96,7 @@ double kasm87c_run (char *parmdat, kcd_t *kcd)
 		for(j=2;j>=0;j--)
 		{
 			p[j] = (double *)(plst[((unsigned long)kcd->gasm[i].r[j].r)>>28]+(long)kcd->gasm[i].r[j].r);
+			if (pd_run_dbg) pd_a64_chk(plst,kcd->gasm[i].r[j].r,i,j);
 			if ((kcd->gasm[i].r[j].r&0xf0000000) == KPTR) p[j] = (*(double **)p[j]) + (kcd->gasm[i].r[j].q);
 			if ((kcd->gasm[i].r[j].r&0xf0000000) == KIMM) p[j] = (double *)(((long)kcd->gevalext[((long)p[j])].ptr)+kcd->gasm[i].r[j].q*8);
 			if ((kcd->gasm[i].r[j].r&0xf0000000) == KGLB) p[j] = (double *)((gstatmem + ((long)p[j]))+kcd->gasm[i].r[j].q*8);
@@ -136,6 +162,7 @@ double kasm87c_run (char *parmdat, kcd_t *kcd)
 				{
 				rtyp *rp = &kcd->rxi[kcd->gasm[i].rxi];
 				p[3] = (double *)(plst[((unsigned long)rp->r)>>28]+(long)rp->r);
+				if (pd_run_dbg) pd_a64_chk(plst,rp->r,i,3);
 				if ((rp->r&0xf0000000) == KPTR) p[3] = (*(double **)p[3]) + (rp->q);
 				if ((rp->r&0xf0000000) == KIMM) p[3] = (double *)(((long)kcd->gevalext[((long)p[3])].ptr)+rp->q*8);
 				if ((rp->r&0xf0000000) == KGLB) p[3] = (double *)((gstatmem + ((long)p[3]))+rp->q*8);
@@ -164,6 +191,7 @@ double kasm87c_run (char *parmdat, kcd_t *kcd)
 				{
 					rp = &kcd->rxi[kcd->gasm[i].rxi+j-3];
 					p[j] = (double *)(plst[((unsigned long)rp->r)>>28]+(long)rp->r);
+					if (pd_run_dbg) pd_a64_chk(plst,rp->r,i,j);
 					if ((rp->r&0xf0000000) == KPTR) p[j] = (*(double **)p[j]) + (rp->q);
 					if ((rp->r&0xf0000000) == KIMM) p[j] = (double *)(((long)kcd->gevalext[((long)p[j])].ptr)+rp->q*8);
 					if ((rp->r&0xf0000000) == KGLB) p[j] = (double *)((gstatmem + ((long)p[j]))+rp->q*8);

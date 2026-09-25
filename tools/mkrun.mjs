@@ -58,10 +58,45 @@ const SCRIPT_PATH = [
   '',
 ];
 
+const POISON_FILL = [
+  '',
+  '\t\t//—— 本机补的：先把十六格填成毒值（见上面 pd_a64_chk 的注） ——',
+  '\tif (pd_run_dbg < 0) pd_run_dbg = (getenv("PD_RUNDBG") != 0);',
+  '\tif (pd_run_dbg) { for(i=0;i<16;i++) plst[i] = PD_PLST_POISON; }',
+  '',
+];
+const CHK = (ind, r, op, which) => `${ind}if (pd_run_dbg) pd_a64_chk(plst,${r},${op},${which});`;
+
+/* 第 12 个洞：`plst[KGLB]` 把 `gstatmem` 算了**两遍**。
+ *
+ * 原文（`kasm_interp.c:41`）是 `plst[KGLB>>28] = ((long)gstatmem - KGLB)`，
+ * 于是 `p[j] = plst[…] + r = gstatmem + 偏移`；可紧接着那条 KGLB 分支又写
+ * `p[j] = (double *)((gstatmem + (long)p[j]) + q*8)` —— `gstatmem` 加了两次。
+ * 量到的证据：崩的地址正好是 kcd 那块堆地址的**两倍**
+ * （kcd=0x78e91e9000、崩在 0xf1d18cc680）。
+ *
+ * 按 KIMM 那一格的对称写法，plst 这一格本该只是 `-KGLB`（基址由分支那一句加）。
+ * 顺带把 `-KGLB` 写成 `-((long)KGLB)`：`KGLB` 是 unsigned int，直接取负会走无符号
+ * 算术（与第 6 个洞 KIMM 同一个坑）。
+ *
+ * 十份脚本崩在 TIMES / PEEK / POKE 上，全是这一格 —— 它们都带 `static` 数组，
+ * 所以 `gstatmem != 0`；不带 static 的脚本 gstatmem 是 0，加两遍也看不出来。
+ */
+const fixKglb = (line) => (line.includes('plst[((unsigned long)KGLB)>>28]')
+  ? line.replace('((long)gstatmem    -KGLB)', '-((long)KGLB) /*本机改：原文把 gstatmem 算了两遍*/')
+  : line);
+
 const out = [];
 for (const line of body) {
+  if (line.includes('plst[((unsigned long)KECX)>>28]')) out.push(...POISON_FILL);
   if (line.includes('switch(kcd->gasm[i].n)')) out.push(...SCRIPT_PATH);
-  out.push(fixCall(line));
+  out.push(fixKglb(fixCall(line)));
+  if (line.includes('p[j] = (double *)(plst[((unsigned long)kcd->gasm[i].r[j].r)>>28]'))
+    out.push(CHK('\t\t\t', 'kcd->gasm[i].r[j].r', 'i', 'j'));
+  else if (line.includes('p[3] = (double *)(plst[((unsigned long)rp->r)>>28]'))
+    out.push(CHK('\t\t\t\t', 'rp->r', 'i', '3'));
+  else if (line.includes('p[j] = (double *)(plst[((unsigned long)rp->r)>>28]'))
+    out.push(CHK('\t\t\t\t\t', 'rp->r', 'i', 'j'));
 }
 if (patched !== 52) throw new Error(`应当改 52 处 dafunc(…)，实际 ${patched} 处`);
 
@@ -95,6 +130,26 @@ const HEAD = [
   '',
   '/* 下面那个 `pd_a64_call_script` 要递归调它，所以先报个名。 */',
   'double kasm87c_run (char *parmdat, kcd_t *kcd);',
+  '',
+  '/* —— 本机补的诊断（`PD_RUNDBG=1` 打开）——',
+  ' *',
+  ' * `plst[]` 只填了六族（KECX/KEDX/KESP/KPTR/KIMM/KGLB），十六格里剩下的从来没人写。',
+  ' * 要是有操作数带着别的族进到这儿，算出来的 `p[j]` 就是栈上的垃圾 ——',
+  ' * 语料里十份脚本崩在 TIMES / PEEK / POKE 上，形状正是这个。',
+  ' * 所以先把十六格全填成毒值，再逐个操作数查：撞上毒值就把族号印出来（每族只印一次）。',
+  ' */',
+  '#define PD_PLST_POISON ((long)0x5bad5bad5bad5badLL)',
+  'static int pd_run_dbg = -1;',
+  'static void pd_a64_chk (const long *plst, long r, long op, long which)',
+  '{',
+  '\tstatic int seen[16];',
+  '\tlong fam = ((unsigned long)r)>>28;',
+  '\tif (plst[fam] != PD_PLST_POISON) return;',
+  '\tif (seen[fam]) return;',
+  '\tseen[fam] = 1;',
+  '\tfprintf(stderr,"[run] plst 那一族没人填：fam=%lx r=%08lx（第 %ld 条指令的第 %ld 个操作数）\\n",',
+  '\t\tfam,(unsigned long)r,op,which);',
+  '}',
   '',
   '/* 脚本函数那一档：按原型串摊一份 parmdat（指针原样放，double 取值），',
   '   然后直接递归调 `kasm87c_run` —— kcd 记在 thunk 那一格的尾巴上。 */',
