@@ -268,6 +268,36 @@ double kasm87c_run (char *parmdat, kcd_t *kcd)
 				if (pd_a64_owns((void *)dafunc))
 					{ (*p[0]) = pd_a64_call_script((void *)dafunc,cptr,p,kcd->gasm[i].n); break; }
 
+				//—— 第 18 个洞：原文那个 switch 只认 `d`/`D`，**没有 `C`（char *）那一档** ——
+				//于是 `glsettex(0,"earth.jpg")` / `glsetshader("v","f")` 这些带字符串的宿主
+				//函数在 COMPILE==0 那条路上**压根不会被调**（switch 一路 strncmp 全不中，
+				//直接 break）—— 而且一声不响：`tex[0].tar` 还是 0，接着 `glbindtexture(0)`
+				//拿 tar=0 去调，GL 报 INVALID_ENUM，采样器读到默认贴图 -> 采出来是白的。
+				//量到的（PD_TEXDBG=1）：`[tex] bind tar=0 name=0 err=INVALID_ENUM`。
+				//带字符串的原型全语料只有五种（`pd_script.c` 那张 myext[] 里数过）：
+				//  C（mountzip/glgetuniformloc/glgetattribloc）、dC（glsettex）、
+				//  dCd（glsettex 三参）、CC（glsetshader 两参）、CCC（glsetshader 三参）。
+				//注意：原型串**不是 NUL 结尾**的，后面紧跟着函数名（量到 |dCGLSETTEX|），
+				//所以只能像原文那样按长度 strncmp，strcmp 会全不中。
+				//字符串操作数在 globval 里（KSTR 在 kasm_comp.c:313 被改成 KEDX+gccnt*8），
+				//所以 p[j] 本身就是串的地址，强转 char * 即可。
+				//printf 那一族仍然不接：`myprintf` 自己是真变参，按定参强转不对。
+				if (strchr(cptr,'C'))
+				{
+					long cn = kcd->gasm[i].n;
+					if ((cn == 1) && (!strncmp(cptr,"C",1)))
+						{ (*p[0]) = ((double (__cdecl *)(char *))dafunc)((char *)p[1]); break; }
+					if ((cn == 2) && (!strncmp(cptr,"dC",2)))
+						{ (*p[0]) = ((double (__cdecl *)(double,char *))dafunc)(*p[1],(char *)p[2]); break; }
+					if ((cn == 2) && (!strncmp(cptr,"CC",2)))
+						{ (*p[0]) = ((double (__cdecl *)(char *,char *))dafunc)((char *)p[1],(char *)p[2]); break; }
+					if ((cn == 3) && (!strncmp(cptr,"dCd",3)))
+						{ (*p[0]) = ((double (__cdecl *)(double,char *,double))dafunc)(*p[1],(char *)p[2],*p[3]); break; }
+					if ((cn == 3) && (!strncmp(cptr,"CCC",3)))
+						{ (*p[0]) = ((double (__cdecl *)(char *,char *,char *))dafunc)((char *)p[1],(char *)p[2],(char *)p[3]); break; }
+					if (pd_run_dbg) fprintf(stderr,"[run] 带字符串的原型没接：|%s| n=%ld\n",cptr,(long)cn);
+				}
+
 				switch(kcd->gasm[i].n) //This seems to be the only way to do pure C implementation; it sucks!
 				{
 					case 1:

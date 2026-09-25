@@ -15,6 +15,15 @@
 #undef kputs
 #include "../port/a64/pd_cons_a64.c"
 #include "pd/pd_hilite.c"
+
+/* 纹理上传那一路的诊断（`PD_TEXDBG=1`）—— 定义留在这份里用真名，
+   宏一开，后面那些 pd 文件里的**调用点**就走包了一层的那个。 */
+#include "../port/a64/pd_gl_texdbg.c"
+#define glBindTexture    pd_dbg_glBindTexture
+#define glTexImage2D     pd_dbg_glTexImage2D
+#define glTexSubImage2D  pd_dbg_glTexSubImage2D
+#define glTexParameteri  pd_dbg_glTexParameteri
+
 #include "pd/pd_wingl.c"
 #include "pd/pd_font.c"
 #include "pd/pd_noise.c"

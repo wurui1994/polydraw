@@ -77,8 +77,8 @@
    补完之后 `qglColor3d(1,0,0)` / `qglVertex3d(-1,-1,-2)` 逐个对上。
 
    原文的既有缺口（不是我们弄的）：那个 switch 的原型只认 `d`/`D`，没有 `C`
-   （char *）—— 所以 `printf("…")` 这种带字符串的宿主函数在 COMPILE==0 那条路上
-   本来就不会被调（而且 `myprintf` 自己是真变参，按定参强转也不对）。
+   （char *）—— 这一格后来单独补了，见下面**第 18 个洞**（它是"空画面"的总根）。
+   `printf` 那一族仍然不接（`myprintf` 自己是真变参，按定参强转也不对）。
 
 8. **polydraw 的控制台要转到 stderr**。`kputs`（`pd/pd_cons.c:4`）往编辑器那个
    控制台窗口写，我们的窗口是空壳 —— 于是着色器编译错误、脚本编译错误、
@@ -145,6 +145,51 @@
 abort 那一族则要另一条路：`lldb -o "b malloc_error_break"` 看是谁在 free ——
 它把"堆被写坏"与"free 了不是 malloc 来的东西"分开了，后者直接指到清理路径。
 
+## 第 18 个洞：带字符串的宿主函数**一个都没被调**（`glsettex` / `glsetshader`）
+
+这一格把"空画面"从 7 份降到 1 份（ok 42 -> **48**）。
+
+原文那个 USERFUNC 的 switch（`kasm_interp.c:242` 起）只认原型里的 `d`（double）与
+`D`（double *），**没有 `C`（char *）那一档** —— 一路 `strncmp` 全不中，
+然后 `break`：函数**不调、不报错、返回值也不写**。于是：
+
+* `glsettex(0,"earth.jpg")` 从来没执行 -> `tex[0]` 没建 -> `tex[0].tar` 还是 0；
+* 接着脚本 `glbindtexture(0)` 拿 `tar=0` 去调 GL，`GL_INVALID_ENUM`；
+* 采样器落在**默认贴图**上 —— Apple 对"装不进去的贴图"回的是常量白。
+  所以 `texture2D()` 一律白，整幅图看着就是空的。
+
+量到的（新加的 `PD_TEXDBG=1`，见 `port/a64/pd_gl_texdbg.c`）：
+
+```
+[tex] bind tar=0 name=0 err=INVALID_ENUM      <- glsettex 没跑，tar 还是 0
+```
+
+补完之后同一句变成建贴图 + 上传，`512x256 err=-`：
+
+```
+[tex] bind tar=de1 name=0 err=-
+[tex] image2D tar=de1 lev=0 ifmt=4 512x256 fmt=80e1 typ=1401 px=0x0 err=-
+```
+
+带字符串的原型全语料只有五种（`pd_script.c` 那张 `myext[]` 里数过）：
+`C`（mountzip / glgetuniformloc / glgetattribloc）、`dC`（glsettex）、
+`dCd`（glsettex 三参）、`CC`（glsetshader 两参）、`CCC`（glsetshader 三参）。
+五种全补在 `tools/mkrun.mjs` 里（字符串操作数本身就是串的地址 —— KSTR 在
+`kasm_comp.c:313` 被改成 `KEDX+gccnt*8`，指进 globval，强转 `char *` 即可）。
+
+**一个坑**：原型串**不是 NUL 结尾**的，后面紧跟着函数名（量到 `|dCGLSETTEX|`）——
+所以只能像原文那样按长度 `strncmp`。先头用 `strcmp` 写，五条全不中，
+现象与没补一模一样（"改了没效果"先怀疑这个）。
+
+`printf` 那一族仍然不接：`myprintf` 自己是真变参，按定参强转不对。
+
+### 两把新诊断
+
+* `PD_TEXDBG=1` —— 贴图那一路的 `glBindTexture`/`glTexImage2D`/`glTexSubImage2D`/
+  `glTexParameteri` 逐个记参数 + 紧跟着的 `glGetError()`（`port/a64/pd_gl_texdbg.c`，
+  缝合文件用 `#define` 把调用点换过去，定义那边仍是真名）；
+* `PD_RUNDBG=1` 多了一行"带字符串的原型没接：|…|" —— 以后再冒出别的原型直接点名。
+
 ## 出图那一半：现在到哪儿了
 
 `bench/build-a64.sh` 一路走到 **`bench/out/polydraw_a64`（连上了）**。三份新实现：
@@ -164,9 +209,8 @@ abort 那一族则要另一条路：`lldb -o "b malloc_error_break"` 看是谁�
   `WinMain`。命令行给 `/bench:N` —— 那是先前给 `polydraw.c` 加的插桩，它自己会
   第 30 帧起计时、跑满 N 帧退出，于是**不用重写帧循环，只要喂它**。
 
-**现状**：`ken/ceilflor2.pss`（1086 种颜色）与 `tigrou/clock.pss`（159 种）
-**真出图了**，而且是**每一帧都在画**（默认存最后一帧）。判据
-`bench/render-a64.sh` **2/5**。
+**现状**：53 份语料里 **48 份真出图**（判据 `bench/render-a64.sh` **4/4**），
+而且是**每一帧都在画**（默认存最后一帧）。
 
 最后那一格（已补）：**看门狗**。`pd_script.c:554-568` 里那条线程只负责"脚本超时
 就报 stuck" —— 脚本本来就是主线程自己调的（`:564` 的 `safeevalfunc()`）。
@@ -191,25 +235,30 @@ tigrou/clock.pss      1322 fps   0.756 ms/帧
 
 ## 整份语料的账（`bench/scan-a64.sh`，53 份）
 
-**ok 42 / 空画面 7 / 着色器错 2 / 崩 0 / 超时 2**（上两轮是 ok 34 / 崩 10、
-ok 37 / 崩 6）。表落 `bench/out/scan.tsv`，每份的 polydraw 诊断落
+**ok 48 / 空画面 1 / 着色器错 2 / 崩 0 / 超时 2**（三轮前是 ok 34 / 崩 10，
+上一轮 ok 42 / 空画面 7）。表落 `bench/out/scan.tsv`，每份的 polydraw 诊断落
 `bench/out/scanlog/`。
 
 * **崩 0** —— 第 14~17 个洞清完，整份语料**再没有崩的**；
-* **空画面 7**：`cubetex` / `drawcone2` / `geo_duptris` / `geo_test` /
-  `orthoglobe` / `ballsk` / `metaballs`（`drawcone2` 是从"崩"变成"空画面"的，
-  等于往前挪了一格，还欠一刀）；
+* **空画面 1**：只剩 `geo_duptris`。注意它的**参考本身也几乎是空的**
+  （c_impl 出的 `geo_duptris.pss_f30.png` 只有 **2 种颜色**）—— 这一份别当洞追，
+  先去看参考画的是什么；
 * **着色器错 2**：`gspiral`（`&` 用在 int 上）、`mipmap`（`texture2DLod` 没声明）
   —— 都是 GLSL 1.20 的上限（macOS legacy profile），不是移植的洞；
 * **超时 2**：`balls`（16384 个球在解释器上跑）、`particules_sparks`。
 
 ms/帧（离屏 320x240 + 纯 C 解释器，`/bench:30` 的口径 = 30 帧暖机 + 30 帧计时）：
-最快一档 `sphere_ellipsis` 0.355、`ceilflor2` 0.476、`driftbox` 0.490；
-最慢一档 `curvybuild` 36.9、`tree` 19.1、`gpgpu` 17.3、`disco_ball` 14.0、
-`balls2k` 9.1。
+最快一档 `multiarb_asm` 0.379、`cubetex` 0.437、`ceilflor2` 0.448；
+最慢一档 `curvybuild` 38.8、`tree` 24.7、`gpgpu` 14.7、`disco_ball` 10.3、
+`balls2k` 8.1。
 
-> 这一栏先前是**错的**：`polydraw_bench.txt` 每行是 `\tfps\tms/帧`，开头那个 tab
-> 让 `$1` 是空串，而 scan 取的是 `$2` —— 于是"ms/帧"印的其实是 **fps**
+> 语料目录（`~/Documents/polydraw/{ken,tigrou}/`）里每份 `.pss` 旁边都有一张
+> **`*.pss_f30.png`** —— 那是 **c_impl** 出的（`c_impl/src/render_main.c:214`
+> 的 `"%s_f%d.png"`），不在 git 里。它只有约 80% 正确，但拿来判"这份到底该不该
+> 画出东西"很好使：`geo_duptris` 那 2 色就是这么看出来的。
+
+> ms/帧这一栏先前是**错的**：`polydraw_bench.txt` 每行是 `\tfps\tms/帧`，开头那个
+> tab 让 `$1` 是空串，而 scan 取的是 `$2` —— 于是印的其实是 **fps**
 > （"tree 39 ms/帧"实为 39 fps）。现在取 `$3`。量毫秒级的东西，列没对上就整栏失真。
 
 ### 查"解释器里的野指针"用 `PD_RUNDBG=1`
@@ -228,42 +277,32 @@ abort（rc=134）那一族别用这把：走 `lldb -o "b malloc_error_break"`。
 它把"堆被写坏"与"free 了不是 malloc 来的东西"分开，后者直接指到清理路径
 （第 17 个洞就是这么定位的）。
 
-## 出图判据现在的账## 出图判据现在的账（`bench/render-a64.sh` 3 过 / 1 红 / 1 不计）
+## 出图判据现在的账（`bench/render-a64.sh` **4 过 / 0 红 / 1 不计**）
 
-* `ken/ceilflor2.pss` 1096 色、`ken/texture.pss` 98 色、`tigrou/clock.pss` 167 色 —— 过；
-* `ken/orthoglobe.pss` —— **红**。已经量清的一半：把它的片元着色器换成一句
-  `gl_FragColor = vec4(1,.5,0,1)`，画面就出来了（52 个抽样点是橙的）——
-  所以**几何是落上去的**，问题在那句 `texture2D(tex0,…)` 取回来是空的。
-  两步探针跑过了，**已经把锅定到 texcoord 那一头**：
-    - 探针 A（把采样换成 `texture2D(tex0, t.xy*0.5+0.5)`）：出现白与黑两种非背景色
-      —— **纹理是上去了、采得到东西**，所以 `GL_BGRA_EXT` + `GL_UNSIGNED_BYTE`
-      那个上传组合没问题；
-    - 探针 B（原式不动，只把 alpha 强制成 1）：全是 `(0,0,0,255)` ——
-      **原式那组 texcoord 采回来就是黑的**。
-    - 探针 C（把 `t` 直接当颜色输出）：`t.x`/`t.y` 逐点在变 ——
-      **`gl_MultiTexCoord0` 传对了**；
-    - 探针 D（把算出来的 `u`/`v` 当颜色，并用 `u!=u` 检 NaN）：u/v 都在变，
-      **蓝通道全 0 = 没有 NaN**。于是"NaN 采回黑"那条也排掉了。
-  现在最像的一条：**u 与 v 都是负数**（`u = acos(…)/(-2π) - panx ∈ [-0.5,0]-panx`、
-  `v = acos(t.y)/(-π) ∈ [-1,0]`），而 `pd_host_gl.c:147` 那一句会把
-  wrap 强制成 `KGL_CLAMP_TO_EDGE`（NPOT 纹理那条规矩）—— 负的 texcoord 一律
-  夹到边缘那一列/行上，采出来就是一条黑边。
-  量过了：**earth.jpg 是 512x256（正好是 2 的幂）**，`pd_host_gl.c:140-150` 那条
-  强制 CLAMP 的规矩只对 cubemap（`xs*6 == ys`）生效 —— 所以 wrap 没被按，
-  CLAMP 那条猜错了。
-
-  试过并**退掉**的一刀（记在这儿免得再试一遍）：把 `glTexImage2D`/`glTexSubImage2D`/
-  `gluBuild2DMipmaps` 也按那 43 个名字的办法改名，包一层把
-  `GL_BGRA + GL_UNSIGNED_BYTE` 换成 `GL_UNSIGNED_INT_8_8_8_8_REV`
-  （Apple 的驱动偏爱后者）。结果**四个例子一起挂**，而且只在 stdout 不是终端时挂
-  （tty 下与 lldb 下都正常）—— 那种"看起来与 I/O 有关"的崩通常是别处的内存问题被
-  时序放大了。已经 `git checkout` 退回去，绿的状态保住。真要做这一刀得先把那个崩查清，
-  不能揣着一个会挂的改动往前走。
+* `ken/ceilflor2.pss` 1082 色、`ken/texture.pss` 99 色、`tigrou/clock.pss` 161 色、
+  `ken/orthoglobe.pss` 53 色 —— 全过；
 * `ken/gspiral.pss` —— **不计**。片元着色器用了 `&` / `>>`（整数位运算），
   那是 GLSL 1.30 起才有的；macOS 的 legacy profile 最高 GL 2.1 / GLSL 1.20，
   编译期就报 `'&' does not operate on 'int' and 'int'`。要它得换 core profile（3.2+），
   可是 core 里没有固定管线，而 polydraw 的 `glBegin/glEnd` 一族要固定管线 ——
   那是另一条路，不在这一轴里。
+
+### `orthoglobe` 那一红的教训：四步探针全指错了方向
+
+它红了好几轮，根因其实是**第 18 个洞**（`glsettex` 压根没被调用）。先前那四步探针
+（把采样式换掉、把 texcoord 当颜色输出、查 NaN、查 wrap 模式）得出的全部结论都是
+**在默认贴图上量的**，所以"纹理是上去了、采得到东西"那一条是假的 —— 采到的白正是
+Apple 对"装不进去的贴图"的回答。教训：**先确认那个宿主调用真的发生了**
+（一行 `PD_TEXDBG=1` 就够），再去推着色器与采样参数。猜过并排掉的三条
+（BGRA 上传组合、NaN、CLAMP_TO_EDGE）现在看全是白费。
+
+试过并**退掉**的一刀（记在这儿免得再试一遍）：把 `glTexImage2D`/`glTexSubImage2D`/
+`gluBuild2DMipmaps` 也按那 43 个名字的办法改名，包一层把
+`GL_BGRA + GL_UNSIGNED_BYTE` 换成 `GL_UNSIGNED_INT_8_8_8_8_REV`
+（以为 Apple 的驱动偏爱后者）。结果**四个例子一起挂**，而且只在 stdout 不是终端时挂
+（tty 下与 lldb 下都正常）—— 那种"看起来与 I/O 有关"的崩通常是别处的内存问题被
+时序放大了。已经 `git checkout` 退回去。现在知道 BGRA 那个组合本来就没问题
+（`PD_TEXDBG` 下 `err=-`），这一刀不必再做。
 
 这一轮补的两格（都不是脚本的欠账，是移植的洞）：
 
