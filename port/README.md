@@ -124,6 +124,20 @@
 就是这一格。改成回非 0 句柄 + `WAIT_OBJECT_0` 即可（代价：没有看门狗了，
 脚本死循环会挂住进程；出图这条路可以接受）。
 
+## 性能：`/bench:N` 那把插桩在 arm64 上也通了
+
+`polydraw_bench.txt`（`/bench:N` 自己写的，两列是 fps 与 ms/帧，
+口径是 30 帧暖机 + N 帧计时）：
+
+```
+ken/ceilflor2.pss     1779 fps   0.562 ms/帧
+tigrou/clock.pss      1322 fps   0.756 ms/帧
+```
+
+注意口径：这是**离屏 320x240 + 纯 C 解释器**，与 Windows 上那把
+（x87 JIT + 真窗口 + vsync 关掉）不是同一件事，**不能直接对比**。
+它现在能当的是"arm64 这条腿自己的前后对比"。
+
 还红的三份是**脚本功能的欠账**，不是移植的洞：`texture` 要从文件读图、
 `gspiral` / `orthoglobe` 用到还没走通的东西。下一步逐份看它们的
 `bench/out/png/*.log`（polydraw 自己的诊断现在都在里头）。
