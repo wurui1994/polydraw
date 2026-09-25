@@ -277,9 +277,16 @@ tigrou/clock.pss      1322 fps   0.756 ms/帧
 `bench/out/scanlog/`。
 
 * **崩 0** —— 第 14~17 个洞清完，整份语料**再没有崩的**；
-* **空画面 1**：只剩 `geo_duptris`。注意它的**参考本身也几乎是空的**
-  （c_impl 出的 `geo_duptris.pss_f30.png` 只有 **2 种颜色**）—— 这一份别当洞追，
-  先去看参考画的是什么；
+* **空画面 1**：只剩 `geo_duptris`（几何着色器那一族）。已经量清的三件事：
+  1. 参考（c_impl 的 `geo_duptris.pss_f30.png`）**只有 214 个非黑像素**（细白线），
+     所以这一格的收益很小；
+  2. **不是"macOS 没有几何着色器"** —— 探针（`/tmp/glext.c` 那十行）查过
+     legacy 2.1 的扩展串：`GL_EXT_geometry_shader4` **有**，`framebuffer_blit` 也有；
+     polydraw 也确实印了 `compile geom g`（着色器编译过了）；
+  3. 线头是 `PD_GLDBG=1` 下第 0 帧的 **`err=0500`（GL_INVALID_ENUM）** ——
+     最像 `glProgramParameteriEXT(…, GL_GEOMETRY_INPUT_TYPE_EXT, geo_in)` 那三句里
+     某个枚举不被接（`pd_host_gl.c:84-86`），或者画的图元与几何着色器的入口类型不配。
+     要补得单开一趟，别混在别的活里；
 * **着色器错 2**：`gspiral`（`&` 用在 int 上）、`mipmap`（`texture2DLod` 没声明）
   —— 都是 GLSL 1.20 的上限（macOS legacy profile），不是移植的洞；
 * **超时 2**：`balls`（16384 个球）、`particules sparks`。**不是卡死，是真的在算** ——
