@@ -48,6 +48,58 @@ static void pd_a64_chk (const long *plst, long r, long op, long which)
 		fam,(unsigned long)r,op,which);
 }
 
+/* 第二格诊断：**算完的 p[j] 落在哪儿**。`plst` 那一格只能查"族有没有人填"，
+ * 查不出"族对、偏移不对"。这儿把已知的几块地盘列出来（kcd 那一大块、gvl 值栈、
+ * parmdat、gstatmem），不落在里头就印一行。每个"族+指令"只印一次，免得刷屏。 */
+static void pd_a64_chkp (const kcd_t *kcd, const char *parmdat, long r, const double *q, long op, long which)
+{
+	static long seen[64]; static int nseen = 0;
+	long fam = ((unsigned long)r)>>28, key = (fam<<20)+(op&0xfffff), i;
+	const char *pc = (const char *)q;
+	const char *lo, *hi;
+	if (!q) return;
+	/* kcd 那一大块（头 + data 里的 globval/gasm/rxi/gevalext/newvar/newvarnam） */
+	lo = (const char *)kcd; hi = lo + sizeof(kcd_t)
+		+ kcd->gccnt*(long)sizeof(double) + kcd->gstnum + kcd->arrnum
+		+ kcd->gecnt*(long)sizeof(gasmtyp) + kcd->numrxi*(long)sizeof(rtyp)
+		+ kcd->gevalextnum*(long)sizeof(evalextyp) + kcd->newvarnum*(long)sizeof(newvartyp)
+		+ kcd->newvarplc;
+	if ((pc >= lo) && (pc < hi)) return;
+	if ((pc >= (const char *)gvl) && (pc < (const char *)(gvl+65536))) return;   /* 值栈 */
+	if ((pc >= parmdat) && (pc < parmdat+sizeof(double)*16)) return;             /* 参数区 */
+	if (gstatmem && (pc >= (const char *)gstatmem) && (pc < (const char *)gstatmem+kcd->arrnum)) return;
+	for(i=0;i<nseen;i++) if (seen[i] == key) return;
+	if (nseen < 64) seen[nseen++] = key;
+	fprintf(stderr,"[run] 指针落在地盘外：fam=%lx r=%08lx p=%p（第 %ld 条指令的第 %ld 个操作数）"
+		" gstatmem=%p arrnum=%ld\n",
+		fam,(unsigned long)r,(const void *)q,op,which,(const void *)gstatmem,(long)kcd->arrnum);
+}
+
+/* 第三格诊断：**执行前** p[0..2] 里有没有落在头一页的（基址 0 + 小偏移）。
+ * 崩的地址是 0x0 / 0x12 这种，说明某一族的基址压根是 0（最可能是 gstatmem==0
+ * 却仍有 KGLB 操作数，或 gevalext[].ptr 是空）。这儿把指令号、opcode 和三个
+ * 操作数的 r/q 原样印出来，印完直接 return 免得真的崩。 */
+static int pd_a64_chk0 (const kcd_t *kcd, long i, double **p)
+{
+	long j, bad = -1;
+	for(j=0;j<3;j++) if (((unsigned long)p[j]) < 4096UL) { bad = j; break; }
+	if (bad < 0) return(0);
+	fprintf(stderr,"[run] 操作数落在头一页：第 %ld 条指令 f=%d 的第 %ld 个操作数 p=%p\n",
+		i,(int)kcd->gasm[i].f,bad,(void *)p[bad]);
+	for(j=0;j<3;j++)
+		fprintf(stderr,"[run]   r[%ld]: r=%08lx q=%ld p=%p\n",
+			j,(unsigned long)kcd->gasm[i].r[j].r,(long)kcd->gasm[i].r[j].q,(void *)p[j]);
+	fprintf(stderr,"[run]   gstatmem=%p kcd->arrnum=%ld kcd->globval=%p gccnt=%ld gstnum=%ld\n",
+		(void *)gstatmem,(long)kcd->arrnum,(void *)kcd->globval,(long)kcd->gccnt,(long)kcd->gstnum);
+	fprintf(stderr,"[run]   gnumarg=%ld newvarnum=%ld\n",(long)kcd->gnumarg,(long)kcd->newvarnum);
+	for(j=0;j<kcd->gnumarg;j++)
+		fprintf(stderr,"[run]   newvar[%ld]: r=%08lx parnum=%d maxind=%d nam=%s\n",
+			j,(unsigned long)kcd->newvar[j].r,(int)kcd->newvar[j].parnum,(int)kcd->newvar[j].maxind,
+			&kcd->newvarnam[kcd->newvar[j].nami]);
+	fflush(stderr);
+	return(1);
+}
+
 /* 脚本函数那一档：按原型串摊一份 parmdat（指针原样放，double 取值），
    然后直接递归调 `kasm87c_run` —— kcd 记在 thunk 那一格的尾巴上。 */
 static double pd_a64_call_script (void *thunk, const char *proto, double **p, long n)
@@ -101,7 +153,12 @@ double kasm87c_run (char *parmdat, kcd_t *kcd)
 			if ((kcd->gasm[i].r[j].r&0xf0000000) == KIMM) p[j] = (double *)(((long)kcd->gevalext[((long)p[j])].ptr)+kcd->gasm[i].r[j].q*8);
 			if ((kcd->gasm[i].r[j].r&0xf0000000) == KGLB) p[j] = (double *)((gstatmem + ((long)p[j]))+kcd->gasm[i].r[j].q*8);
 			if ((kcd->gasm[i].r[j].r&0xf0000000) == KEDX) p[j] += kcd->gasm[i].r[j].q;
+			if (pd_run_dbg) pd_a64_chkp(kcd,parmdat,kcd->gasm[i].r[j].r,p[j],i,j);
 		}
+
+		//—— 本机补的诊断（PD_RUNDBG=1）：基址是 0 的操作数，印完就退出这一趟 ——
+		if (pd_run_dbg && pd_a64_chk0(kcd,i,p)) { gvlp -= kcd->stackdoubs; return(0.0); }
+
 		switch(kcd->gasm[i].f)
 		{
 			case NUL:   break;
@@ -166,6 +223,7 @@ double kasm87c_run (char *parmdat, kcd_t *kcd)
 				if ((rp->r&0xf0000000) == KPTR) p[3] = (*(double **)p[3]) + (rp->q);
 				if ((rp->r&0xf0000000) == KIMM) p[3] = (double *)(((long)kcd->gevalext[((long)p[3])].ptr)+rp->q*8);
 				if ((rp->r&0xf0000000) == KGLB) p[3] = (double *)((gstatmem + ((long)p[3]))+rp->q*8);
+				if (pd_run_dbg) pd_a64_chkp(kcd,parmdat,rp->r,p[3],i,3);
 
 				j = (long)(*p[2]);
 				k = kcd->newvar[kcd->gasm[i].r[1].nv].maxind; //quick&dirty bounds check; if 2^x, use "and"
@@ -195,6 +253,7 @@ double kasm87c_run (char *parmdat, kcd_t *kcd)
 					if ((rp->r&0xf0000000) == KPTR) p[j] = (*(double **)p[j]) + (rp->q);
 					if ((rp->r&0xf0000000) == KIMM) p[j] = (double *)(((long)kcd->gevalext[((long)p[j])].ptr)+rp->q*8);
 					if ((rp->r&0xf0000000) == KGLB) p[j] = (double *)((gstatmem + ((long)p[j]))+rp->q*8);
+					if (pd_run_dbg) pd_a64_chkp(kcd,parmdat,rp->r,p[j],i,j);
 				}
 				if ((kcd->newvar[kcd->gasm[i].g].r&0xf0000000) == KIMM)
 					  dafunc = ((double (__cdecl *)(double,...))kcd->gevalext[kcd->newvar[kcd->gasm[i].g].r&0x0fffffff].ptr);

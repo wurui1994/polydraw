@@ -67,6 +67,14 @@ const POISON_FILL = [
 ];
 const CHK = (ind, r, op, which) => `${ind}if (pd_run_dbg) pd_a64_chk(plst,${r},${op},${which});`;
 
+/* 执行前那一格：见 pd_a64_chk0 的注。只插外层那个大 switch（两个 tab 的那句）。 */
+const NULL_GUARD = [
+  '',
+  '\t\t//—— 本机补的诊断（PD_RUNDBG=1）：基址是 0 的操作数，印完就退出这一趟 ——',
+  '\t\tif (pd_run_dbg && pd_a64_chk0(kcd,i,p)) { gvlp -= kcd->stackdoubs; return(0.0); }',
+  '',
+];
+
 /* 第 12 个洞：`plst[KGLB]` 把 `gstatmem` 算了**两遍**。
  *
  * 原文（`kasm_interp.c:41`）是 `plst[KGLB>>28] = ((long)gstatmem - KGLB)`，
@@ -87,9 +95,11 @@ const fixKglb = (line) => (line.includes('plst[((unsigned long)KGLB)>>28]')
   : line);
 
 const out = [];
+let guarded = 0;
 for (const line of body) {
   if (line.includes('plst[((unsigned long)KECX)>>28]')) out.push(...POISON_FILL);
   if (line.includes('switch(kcd->gasm[i].n)')) out.push(...SCRIPT_PATH);
+  if (line === '\t\tswitch(kcd->gasm[i].f)' || (guarded === 0 && line.trim() === 'switch(kcd->gasm[i].f)')) { out.push(...NULL_GUARD); guarded++; }
   out.push(fixKglb(fixCall(line)));
   if (line.includes('p[j] = (double *)(plst[((unsigned long)kcd->gasm[i].r[j].r)>>28]'))
     out.push(CHK('\t\t\t', 'kcd->gasm[i].r[j].r', 'i', 'j'));
@@ -97,6 +107,13 @@ for (const line of body) {
     out.push(CHK('\t\t\t\t', 'rp->r', 'i', '3'));
   else if (line.includes('p[j] = (double *)(plst[((unsigned long)rp->r)>>28]'))
     out.push(CHK('\t\t\t\t\t', 'rp->r', 'i', 'j'));
+  /* fixup 链的尾巴：这时候 p[] 已经是最终地址了，查"落在哪儿"。 */
+  else if (line.includes('== KEDX) p[j] += kcd->gasm[i].r[j].q;'))
+    out.push('\t\t\tif (pd_run_dbg) pd_a64_chkp(kcd,parmdat,kcd->gasm[i].r[j].r,p[j],i,j);');
+  else if (line.includes('== KGLB) p[3] = '))
+    out.push('\t\t\t\tif (pd_run_dbg) pd_a64_chkp(kcd,parmdat,rp->r,p[3],i,3);');
+  else if (line.includes('== KGLB) p[j] = ') && line.includes('rp->q*8'))
+    out.push('\t\t\t\t\tif (pd_run_dbg) pd_a64_chkp(kcd,parmdat,rp->r,p[j],i,j);');
 }
 if (patched !== 52) throw new Error(`应当改 52 处 dafunc(…)，实际 ${patched} 处`);
 
@@ -149,6 +166,58 @@ const HEAD = [
   '\tseen[fam] = 1;',
   '\tfprintf(stderr,"[run] plst 那一族没人填：fam=%lx r=%08lx（第 %ld 条指令的第 %ld 个操作数）\\n",',
   '\t\tfam,(unsigned long)r,op,which);',
+  '}',
+  '',
+  '/* 第二格诊断：**算完的 p[j] 落在哪儿**。`plst` 那一格只能查"族有没有人填"，',
+  ' * 查不出"族对、偏移不对"。这儿把已知的几块地盘列出来（kcd 那一大块、gvl 值栈、',
+  ' * parmdat、gstatmem），不落在里头就印一行。每个"族+指令"只印一次，免得刷屏。 */',
+  'static void pd_a64_chkp (const kcd_t *kcd, const char *parmdat, long r, const double *q, long op, long which)',
+  '{',
+  '\tstatic long seen[64]; static int nseen = 0;',
+  '\tlong fam = ((unsigned long)r)>>28, key = (fam<<20)+(op&0xfffff), i;',
+  '\tconst char *pc = (const char *)q;',
+  '\tconst char *lo, *hi;',
+  '\tif (!q) return;',
+  '\t/* kcd 那一大块（头 + data 里的 globval/gasm/rxi/gevalext/newvar/newvarnam） */',
+  '\tlo = (const char *)kcd; hi = lo + sizeof(kcd_t)',
+  '\t\t+ kcd->gccnt*(long)sizeof(double) + kcd->gstnum + kcd->arrnum',
+  '\t\t+ kcd->gecnt*(long)sizeof(gasmtyp) + kcd->numrxi*(long)sizeof(rtyp)',
+  '\t\t+ kcd->gevalextnum*(long)sizeof(evalextyp) + kcd->newvarnum*(long)sizeof(newvartyp)',
+  '\t\t+ kcd->newvarplc;',
+  '\tif ((pc >= lo) && (pc < hi)) return;',
+  '\tif ((pc >= (const char *)gvl) && (pc < (const char *)(gvl+65536))) return;   /* 值栈 */',
+  '\tif ((pc >= parmdat) && (pc < parmdat+sizeof(double)*16)) return;             /* 参数区 */',
+  '\tif (gstatmem && (pc >= (const char *)gstatmem) && (pc < (const char *)gstatmem+kcd->arrnum)) return;',
+  '\tfor(i=0;i<nseen;i++) if (seen[i] == key) return;',
+  '\tif (nseen < 64) seen[nseen++] = key;',
+  '\tfprintf(stderr,"[run] 指针落在地盘外：fam=%lx r=%08lx p=%p（第 %ld 条指令的第 %ld 个操作数）"',
+  '\t\t" gstatmem=%p arrnum=%ld\\n",',
+  '\t\tfam,(unsigned long)r,(const void *)q,op,which,(const void *)gstatmem,(long)kcd->arrnum);',
+  '}',
+  '',
+  '/* 第三格诊断：**执行前** p[0..2] 里有没有落在头一页的（基址 0 + 小偏移）。',
+  ' * 崩的地址是 0x0 / 0x12 这种，说明某一族的基址压根是 0（最可能是 gstatmem==0',
+  ' * 却仍有 KGLB 操作数，或 gevalext[].ptr 是空）。这儿把指令号、opcode 和三个',
+  ' * 操作数的 r/q 原样印出来，印完直接 return 免得真的崩。 */',
+  'static int pd_a64_chk0 (const kcd_t *kcd, long i, double **p)',
+  '{',
+  '\tlong j, bad = -1;',
+  '\tfor(j=0;j<3;j++) if (((unsigned long)p[j]) < 4096UL) { bad = j; break; }',
+  '\tif (bad < 0) return(0);',
+  '\tfprintf(stderr,"[run] 操作数落在头一页：第 %ld 条指令 f=%d 的第 %ld 个操作数 p=%p\\n",',
+  '\t\ti,(int)kcd->gasm[i].f,bad,(void *)p[bad]);',
+  '\tfor(j=0;j<3;j++)',
+  '\t\tfprintf(stderr,"[run]   r[%ld]: r=%08lx q=%ld p=%p\\n",',
+  '\t\t\tj,(unsigned long)kcd->gasm[i].r[j].r,(long)kcd->gasm[i].r[j].q,(void *)p[j]);',
+  '\tfprintf(stderr,"[run]   gstatmem=%p kcd->arrnum=%ld kcd->globval=%p gccnt=%ld gstnum=%ld\\n",',
+  '\t\t(void *)gstatmem,(long)kcd->arrnum,(void *)kcd->globval,(long)kcd->gccnt,(long)kcd->gstnum);',
+  '\tfprintf(stderr,"[run]   gnumarg=%ld newvarnum=%ld\\n",(long)kcd->gnumarg,(long)kcd->newvarnum);',
+  '\tfor(j=0;j<kcd->gnumarg;j++)',
+  '\t\tfprintf(stderr,"[run]   newvar[%ld]: r=%08lx parnum=%d maxind=%d nam=%s\\n",',
+  '\t\t\tj,(unsigned long)kcd->newvar[j].r,(int)kcd->newvar[j].parnum,(int)kcd->newvar[j].maxind,',
+  '\t\t\t&kcd->newvarnam[kcd->newvar[j].nami]);',
+  '\tfflush(stderr);',
+  '\treturn(1);',
   '}',
   '',
   '/* 脚本函数那一档：按原型串摊一份 parmdat（指针原样放，double 取值），',
