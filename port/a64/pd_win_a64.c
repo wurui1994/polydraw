@@ -63,9 +63,27 @@ BOOL GetVersionEx (OSVERSIONINFO *v)
 extern int _NSGetExecutablePath (char *, unsigned int *);
 DWORD GetModuleFileName (HMODULE h, LPSTR buf, DWORD n)
 {
-	unsigned int sz = (unsigned int)n;
+	char exe[1024];
+	unsigned int sz = (unsigned int)sizeof(exe);
+	const char *base = "polydraw";
+	long i;
 	(void)h;
-	if (_NSGetExecutablePath(buf,&sz) != 0) { if (n) buf[0] = 0; return(0); }
+
+	/* **报"当前目录 + 可执行文件名"，不是可执行文件的真路径。**
+	   polydraw 拿这个路径切出 `gexedironly`，然后 `kzaddstack(gexedironly)`
+	   （`pd_win.c:528`）—— 脚本里 `glsettex(0,"earth.jpg")` 就是从那儿找图的。
+	   我们的二进制在 `bench/out/` 下，而数据（earth.jpg / ken/ / tigrou/）在仓库根，
+	   照真路径报的话图一张都找不到（现象：`GLD_TEXTURE_INDEX_2D is unloadable`，
+	   画面全黑）。报 cwd 才是 Unix 上"在哪儿跑就从哪儿找数据"的常规。
+	   顺带 `polydraw.ini` 也落在 cwd。 */
+	if (_NSGetExecutablePath(exe,&sz) == 0)
+	{
+		for(i=(long)strlen(exe)-1;i>=0;i--) if (exe[i] == '/') { base = &exe[i+1]; break; }
+	}
+	if (!getcwd(buf,(size_t)n)) { if (n) buf[0] = 0; return(0); }
+	i = (long)strlen(buf);
+	if (i+1+(long)strlen(base)+1 > (long)n) return((DWORD)i);
+	buf[i++] = '/'; strcpy(&buf[i],base);
 	return((DWORD)strlen(buf));
 }
 void ExitProcess (UINT c) { exit((int)c); }
@@ -181,7 +199,21 @@ BOOL SetWindowText (HWND h, LPCSTR s) { (void)h;(void)s; return(1); }
 LONG_PTR SetWindowLong (HWND h, int i, LONG_PTR v) { (void)h;(void)i;(void)v; return(0); }
 HWND SetFocus (HWND h) { return(h); }
 BOOL ClientToScreen (HWND h, POINT *p) { (void)h;(void)p; return(1); }
-BOOL GetCursorPos (POINT *p) { p->x = p->y = 0; return(1); }
+/* 鼠标位置：**默认报渲染窗格的正中**，不是 (0,0)。
+   为什么：不少脚本拿 `mousx/mousy` 定位几何 —— `ken/orthoglobe.pss` 是
+   `z = mousy/yres*4`，报 0 的话 z=0，而 `gluPerspective` 的近平面是 0.1，
+   整个扇面被近平面裁掉，画面就是空的。报正中是无头出图最讲得通的默认。
+   `PD_MOUSE=x,y` 可以改（要复现某一帧时用）。 */
+extern int pd_gl_size (int *w, int *h);
+BOOL GetCursorPos (POINT *p)
+{
+	const char *m = getenv("PD_MOUSE");
+	int w = 640, h = 480, mx = -1, my = -1;
+	pd_gl_size(&w,&h);
+	if (m && (sscanf(m,"%d,%d",&mx,&my) == 2)) { p->x = mx; p->y = my; return(1); }
+	p->x = w/2; p->y = h/2;
+	return(1);
+}
 BOOL PeekMessage (MSG *m, HWND h, UINT a, UINT b, UINT c) { (void)m;(void)h;(void)a;(void)b;(void)c; return(0); }
 BOOL TranslateMessage (const MSG *m) { (void)m; return(0); }
 LRESULT DispatchMessage (const MSG *m) { (void)m; return(0); }

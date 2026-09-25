@@ -138,7 +138,15 @@ void *wglGetProcAddress (LPCSTR nam)
 		char buf[256];
 		snprintf(buf,sizeof(buf),"%sEXT",nam); p = dlsym(RTLD_DEFAULT,buf);
 		if (!p) { snprintf(buf,sizeof(buf),"%sARB",nam); p = dlsym(RTLD_DEFAULT,buf); }
+		if (!p)
+		{
+			/* 再试一次去掉 EXT/ARB 后缀的名字（macOS 上有些只有无后缀那一版）。 */
+			long l = (long)strlen(nam);
+			if ((l > 3) && !strcmp(&nam[l-3],"EXT")) { snprintf(buf,sizeof(buf),"%.*s",(int)(l-3),nam); p = dlsym(RTLD_DEFAULT,buf); }
+			else if ((l > 3) && !strcmp(&nam[l-3],"ARB")) { snprintf(buf,sizeof(buf),"%.*s",(int)(l-3),nam); p = dlsym(RTLD_DEFAULT,buf); }
+		}
 	}
+	if (!p && getenv("PD_GLDBG")) fprintf(stderr,"[proc] 没找到 %s\n",nam);
 	return(p);
 }
 

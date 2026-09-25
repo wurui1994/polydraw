@@ -138,6 +138,29 @@ tigrou/clock.pss      1322 fps   0.756 ms/帧
 （x87 JIT + 真窗口 + vsync 关掉）不是同一件事，**不能直接对比**。
 它现在能当的是"arm64 这条腿自己的前后对比"。
 
-还红的三份是**脚本功能的欠账**，不是移植的洞：`texture` 要从文件读图、
-`gspiral` / `orthoglobe` 用到还没走通的东西。下一步逐份看它们的
-`bench/out/png/*.log`（polydraw 自己的诊断现在都在里头）。
+## 出图判据现在的账（`bench/render-a64.sh` 3 过 / 1 红 / 1 不计）
+
+* `ken/ceilflor2.pss` 1096 色、`ken/texture.pss` 98 色、`tigrou/clock.pss` 167 色 —— 过；
+* `ken/orthoglobe.pss` —— **红**。已经量清的一半：把它的片元着色器换成一句
+  `gl_FragColor = vec4(1,.5,0,1)`，画面就出来了（52 个抽样点是橙的）——
+  所以**几何是落上去的**，问题在那句 `texture2D(tex0,…)` 取回来是空的。
+  还没定的是哪一头：earth.jpg 的上传（`glTexSubImage2D` 用 `GL_BGRA_EXT` +
+  `GL_UNSIGNED_BYTE`，Apple 的实现对这个组合挑食），还是它那句
+  `acos(t.x*inversesqrt(1.0-t.y*t.y))` 在 |t.y|>1 处出 NaN（扇面顶点的半径是
+  `1/cos(PI/12)≈1.035`，确实会越界）。**下一步用平色 + 直接 `t.xy` 采样的两步探针分开它们。**
+* `ken/gspiral.pss` —— **不计**。片元着色器用了 `&` / `>>`（整数位运算），
+  那是 GLSL 1.30 起才有的；macOS 的 legacy profile 最高 GL 2.1 / GLSL 1.20，
+  编译期就报 `'&' does not operate on 'int' and 'int'`。要它得换 core profile（3.2+），
+  可是 core 里没有固定管线，而 polydraw 的 `glBegin/glEnd` 一族要固定管线 ——
+  那是另一条路，不在这一轴里。
+
+这一轮补的两格（都不是脚本的欠账，是移植的洞）：
+
+* **数据文件要按 cwd 找**。`GetModuleFileName` 原先报可执行文件的真路径，
+  polydraw 拿它切出 `gexedironly` 再 `kzaddstack(gexedironly)`（`pd_win.c:528`）——
+  二进制在 `bench/out/` 下，而 `earth.jpg` / `ken/` / `tigrou/` 在仓库根，图一张都找不到。
+  改成报 **cwd + 可执行文件名**（Unix 上"在哪儿跑就从哪儿找数据"的常规）；
+* **鼠标默认报渲染窗格的正中**，不是 (0,0)。不少脚本拿 `mousx/mousy` 定位几何 ——
+  `orthoglobe` 是 `z = mousy/yres*4`，报 0 的话 z=0，而 `gluPerspective` 的近平面是 0.1，
+  整个扇面被近平面裁掉。`PD_MOUSE=x,y` 可以改（要复现某一帧时用）。
+  就是这一格让 `ken/texture.pss` 从空画面变成 98 色。

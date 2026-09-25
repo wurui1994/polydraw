@@ -35,9 +35,17 @@ PY
 	else fail=$((fail+1)); printf '  FAIL %-22s 空画面（%s 种颜色）\n' "$nm" "${n:-?}"; fi
 }
 
-for f in ken/ceilflor2.pss ken/texture.pss ken/gspiral.pss ken/orthoglobe.pss tigrou/clock.pss; do
+for f in ken/ceilflor2.pss ken/texture.pss ken/orthoglobe.pss tigrou/clock.pss; do
 	[ -f "$f" ] && one "$f"
 done
+
+# 不计分的那一族：**本机 GL 的上限挡住的**，不是移植的洞。
+#   * ken/gspiral.pss —— 片元着色器用了 `&` / `>>`（整数位运算），那是 GLSL 1.30 起才有的；
+#     macOS 的 legacy profile 最高到 GL 2.1 / GLSL 1.20，编译期就报
+#     `'&' does not operate on 'int' and 'int'`。要它得换 core profile（3.2+），
+#     可是 core 里没有固定管线，而 polydraw 的 glBegin/glEnd 一族要固定管线 ——
+#     这是一整条另外的路，不在这一轴里。
+echo "  skip gspiral                GLSL 1.20 没有整数位运算（macOS legacy GL 的上限）"
 
 echo
 echo "$pass passed, $fail failed（出图：PNG 不是空画面）"
