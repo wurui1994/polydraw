@@ -244,7 +244,10 @@ static void pd_spadd (pd_jb *b, long v)
 static void pd_spsub (pd_jb *b, long v)
 	{ pd_e(b,0xD10003FFu | ((unsigned)v<<10)); }
 
-#define PD_FRAME 112
+#define PD_FRAME 256
+/* 栈上给 `double *p[17]` 留的那一段（脚本函数那一支要把操作数地址摆成一张表，
+   然后原样递给 `pd_a64_call_script` —— 那一份是现成的、已经判过的）。 */
+#define PD_POFF 112
 
 /* SUB Xd,Xn,Xm */
 static void pd_subx (pd_jb *b, int rd, int rn, int rm)
@@ -533,10 +536,29 @@ static void pd_op (pd_jb *b, kcd_t *kcd, long i, pd_fix *fix, long *nfix)
 			if ((a->n < 1) || (a->n > 8)) { b->bad = 1; return; }
 			if ((kcd->newvar[a->g].r & 0xf0000000) != KIMM) { b->bad = 1; return; }
 			dafunc = (void *)kcd->gevalext[kcd->newvar[a->g].r & 0x0fffffff].ptr;
-			if (pd_a64_owns(dafunc)) { b->bad = 1; return; }   /* 脚本函数：下一刀 */
 			cptr = &kcd->newvarnam[kcd->newvar[a->g].proti];
 			/* 原型串**不是 NUL 结尾**的（后面紧跟函数名），所以只看前 n 个字符。 */
 			for(j=0;j<a->n;j++) if ((cptr[j] != 'd') && (cptr[j] != 'D')) { b->bad = 1; return; }
+			/* **脚本自己那些函数**（`pd_a64_owns`）：入口是真变参（`kasm87c(double,...)`），
+			   Apple 上变参实参全走栈 —— 与其在这儿重铺一遍，不如把操作数地址摆成
+			   `double *p[17]` 那张表，原样递给现成的 `pd_a64_call_script`
+			   （它就是为这件事写的，已经判过）。省下来的仍然是"每次调用一趟 strncmp"。 */
+			if (pd_a64_owns(dafunc))
+			{
+				for(j=1;j<=a->n;j++)
+				{
+					rtyp *rp = (j <= 2) ? &a->r[j] : &kcd->rxi[a->rxi+j-3];
+					pd_addrof(b,kcd,rp,PD_XS1,PD_XS0);
+					pd_strx(b,PD_XS1,31,PD_POFF+j*8);
+				}
+				pd_imm64(b,0,(unsigned long long)(unsigned long)dafunc);
+				pd_imm64(b,1,(unsigned long long)(unsigned long)cptr);
+				pd_addimm(b,2,31,PD_POFF);
+				pd_imm64(b,3,(unsigned long long)a->n);
+				pd_call(b,(const void *)pd_a64_call_script);
+				pd_store(b,kcd,&a->r[0],0,PD_XS0);
+				return;
+			}
 			for(j=1;j<=a->n;j++)
 			{
 				rtyp *rp = (j <= 2) ? &a->r[j] : &kcd->rxi[a->rxi+j-3];

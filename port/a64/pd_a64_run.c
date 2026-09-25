@@ -27,6 +27,8 @@
 
 /* 下面那个 `pd_a64_call_script` 要递归调它，所以先报个名。 */
 double kasm87c_run (char *parmdat, kcd_t *kcd);
+/* JIT 在这个文件**后头**才 include 进来（它要 kcd_t），所以也先报个名。 */
+static void *pd_a64_jitfn (kcd_t *kcd);
 
 /* —— 本机补的诊断（`PD_RUNDBG=1` 打开）——
  *
@@ -114,6 +116,13 @@ static double pd_a64_call_script (void *thunk, const char *proto, double **p, lo
 		if (proto[i-1] == 'D') *(void **)&parmdat[j] = (void *)p[i];
 		else                   *(double *)&parmdat[j] = *p[i];
 		j += 8;
+	}
+	/* **这儿也要问一句 JIT**（`port/a64/pd_a64_jitc.c`）：脚本函数的递归全走这条路，
+	   不问的话被调那一份永远在解释器上跑 —— `fib(20)` 量出来只快 1.18 倍就是这个。
+	   那一份在这个文件后头才 include 进来，所以上头报了个名。 */
+	{
+		double (*jf)(char *, kcd_t *) = (double (*)(char *, kcd_t *))pd_a64_jitfn(kcd);
+		if (jf) return(jf(parmdat,kcd));
 	}
 	return(kasm87c_run(parmdat,kcd));
 }
