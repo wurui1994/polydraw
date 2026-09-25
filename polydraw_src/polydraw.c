@@ -346,6 +346,10 @@ static GLint queries[1];
 
 static char *prognam = "PolyDraw";
 static int oxres = 0, oyres = 0, xres, yres, ActiveApp = 1, shkeystatus = 0;
+	//Omni benchmark (2026-09-25): "/bench:N" runs N frames (first 30 warm up and are not
+	//timed), appends "script<TAB>fps<TAB>ms_per_frame" to polydraw_bench.txt, then quits.
+	//Stock polydraw only shows fps in the title bar, which cannot be batched.
+static int gbenchn = 0, gbenchi = 0; static __int64 gbenchq0 = 0;
 static int gshaderstuck = 0, gshadercrashed = 0;
 static double gfov, dbstatus = 0.0, dkeystatus[256] = {0}, dnumframes = 0.0;
 static __int64 qper, qtim0;
@@ -3395,6 +3399,7 @@ int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLin
 	for(i=argc-1;i>0;i--)
 	{
 		if ((argv[i][0] != '/') && (argv[i][0] != '-')) { argfilindex = i; continue; }
+		if (!memicmp(&argv[i][1],"bench",5)) { gbenchn = atol(&argv[i][7]); continue; } //Omni benchmark
 		if (!stricmp(&argv[i][1],"qme")) { gmehax = 1; popts.fullscreen = 1; continue; } //for integration with MoonEdit
 		if (!memicmp(&argv[i][1],"setsel0",7)) { setsel0 = atol(&argv[i][9]); continue; } //hack for seamless pipe restart
 		if (!memicmp(&argv[i][1],"setsel1",7)) { setsel1 = atol(&argv[i][9]); continue; } //hack for seamless pipe restart
@@ -3567,7 +3572,7 @@ int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLin
 			if ((gfind_wnd) && (IsWindow(gfind_wnd)) && (IsDialogMessage(gfind_wnd,&msg))) continue; //Needed for FindText/ReplaceText (keyboard shortcuts)
 			TranslateMessage(&msg); DispatchMessage(&msg);
 		}
-		if (!ActiveApp) { Sleep(100); continue; }
+		if ((!ActiveApp) && (!gbenchn)) { Sleep(100); continue; } //Omni benchmark: no focus wait
 
 		glClearColor(0.f,0.f,0.f,0.f);
 		if(popts.clearbuffer)
@@ -3584,7 +3589,9 @@ int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLin
 		if (shadn[2]) Draw(ghwnd,hWndEdit);
 		if ((!shadn[2]) || (!gevalfunc))
 		{
-			Sleep(1);
+			if (!gbenchn) Sleep(1); //Omni benchmark: this politeness sleep is 15.6ms with the
+			                        //default timer granularity, which pins shader-less scripts
+			                        //to ~63fps and hides their real cost.
 			if ((popts.rendcorn == 4) && (gmehax))
 			{
 				CheckMenuItem(gmenu,MENU_FULLSCREEN,0);
@@ -3594,6 +3601,27 @@ int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLin
 		strcpy(otext,text); otsecn = tsecn; memcpy(otsec,tsec,tsecn*sizeof(tsec_t));
 
 		SwapBuffers(hDC);
+
+			//Omni benchmark: 30 warmup frames (script compile, textures), then wall clock.
+		if (gbenchn)
+		{
+			gbenchi++;
+			if (gbenchi == 1) ((PFNWGLSWAPINTERVALEXTPROC)glfp[wglSwapIntervalEXT])(0); //vsync off
+			if (gbenchi == 30) QueryPerformanceCounter((LARGE_INTEGER *)&gbenchq0);
+			if (gbenchi >= gbenchn+30)
+			{
+				__int64 qq; double dt; FILE *fp;
+				QueryPerformanceCounter((LARGE_INTEGER *)&qq);
+				dt = ((double)(qq-gbenchq0))/((double)qper);
+				fp = fopen("polydraw_bench.txt","a");
+				if (fp)
+				{
+					fprintf(fp,"%s\t%.2f\t%.3f\n",gsavfilnam,((double)gbenchn)/dt,dt*1000.0/((double)gbenchn));
+					fclose(fp);
+				}
+				goto quitit;
+			}
+		}
 
 		QueryPerformanceCounter((LARGE_INTEGER *)&q); qnum++;
 		if ((q-qlast > qper) || (!gsavfilnamptr))
