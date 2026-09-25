@@ -158,8 +158,17 @@ tigrou/clock.pss      1322 fps   0.756 ms/帧
   `v = acos(t.y)/(-π) ∈ [-1,0]`），而 `pd_host_gl.c:147` 那一句会把
   wrap 强制成 `KGL_CLAMP_TO_EDGE`（NPOT 纹理那条规矩）—— 负的 texcoord 一律
   夹到边缘那一列/行上，采出来就是一条黑边。
-  **下一步**：印出 earth.jpg 的尺寸与 `CreateEmptyTexture` 实际选的 wrap 模式，
-  看是不是 NPOT 把它按到了 CLAMP（Windows 上如果是 REPEAT，这就是差异点）。
+  量过了：**earth.jpg 是 512x256（正好是 2 的幂）**，`pd_host_gl.c:140-150` 那条
+  强制 CLAMP 的规矩只对 cubemap（`xs*6 == ys`）生效 —— 所以 wrap 没被按，
+  CLAMP 那条猜错了。
+
+  试过并**退掉**的一刀（记在这儿免得再试一遍）：把 `glTexImage2D`/`glTexSubImage2D`/
+  `gluBuild2DMipmaps` 也按那 43 个名字的办法改名，包一层把
+  `GL_BGRA + GL_UNSIGNED_BYTE` 换成 `GL_UNSIGNED_INT_8_8_8_8_REV`
+  （Apple 的驱动偏爱后者）。结果**四个例子一起挂**，而且只在 stdout 不是终端时挂
+  （tty 下与 lldb 下都正常）—— 那种"看起来与 I/O 有关"的崩通常是别处的内存问题被
+  时序放大了。已经 `git checkout` 退回去，绿的状态保住。真要做这一刀得先把那个崩查清，
+  不能揣着一个会挂的改动往前走。
 * `ken/gspiral.pss` —— **不计**。片元着色器用了 `&` / `>>`（整数位运算），
   那是 GLSL 1.30 起才有的；macOS 的 legacy profile 最高 GL 2.1 / GLSL 1.20，
   编译期就报 `'&' does not operate on 'int' and 'int'`。要它得换 core profile（3.2+），
