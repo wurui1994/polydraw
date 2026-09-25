@@ -128,7 +128,21 @@ FBO，画完会 bind 回 0，而离屏根本没有"0"那张）—— 绑了还�
    `.pss`（`ken/balls.pss`、`ceilflor2.pss` 都是）恰好成立，于是 `shadn[2]` 一直是 0。
    所以要么 Windows 上有别处给它塞了一个**默认片元着色器**（`setshader_int(0,-1,0)`
    那一句最可疑），要么我们喂进去的文本没被 `txt2sec` 当成一段。
-   **下一步就量这一格**：把 `tsecn` / `tsec[0].typ` / `shadn[0..2]` 印出来。
-2. 真 `.pss` 会崩在 `kasm87c_run + 428`（一条 `ldr x9,[x9,#8]`）—— 那是
-   USERFUNC/KPTR 那条路，八成还是第 5 个洞（指针在 `parmdat` 里占 4 字节）。
-   `/tmp/t1.pss` 那种只有 `glBegin/glVertex/glEnd` 的不崩，说明分界就在参数形状上。
+   **量过了**（lldb 直接读那几个 static，没碰原文）：
+   `tsecn=1 / tsec[0].typ=0 / shadn={0,0,0} / gevalfunc=0` ——
+   假编辑框是好的（`tsec[0]` 的 120 字节就是我们喂的脚本），拦住的就是 `shadn[2]`。
+2. **给脚本补一个 `@f` 段，`Draw` 就进去了** —— 然后崩在 `kasm87c_run + 428`，
+   与真 `.pss`（`ken/ceilflor2.pss`）**同一处**。那一行是 `kasm_interp.c:79`：
+
+   ```c
+   if ((r&0xf0000000) == KPTR) p[j] = (*(double **)p[j]) + q;
+   ```
+
+   `plst[KPTR>>28] = (long)parmdat-KPTR`，于是 `p[j]` 指着 `parmdat` 里某一格，
+   再按 `double **` 解引用 —— 在 arm64 上读 **8 个字节**，而写那一格的
+   `kasm87cp` 是按"指针 4 字节"排的偏移（`j += 4`），编译期给参数分偏移那一段
+   （`newvar[].r` 的 KESP 偏移）也是 4。反汇编 `ldr x9,[x9,#8]` 正好对上。
+
+   **所以出图剩下的就是第 5 个洞那一件事**：参数区的指针宽度 4 -> 8。
+   要动"编译期分偏移"与 `kasm87cp`/`kasm87c` 写变参那两处 —— 都在原文里，
+   得按现在这套办法（缝合文件里 `#define` 改名 + 新文件）换掉那几格。
