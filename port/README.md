@@ -283,10 +283,13 @@ tigrou/clock.pss      1322 fps   0.756 ms/帧
   2. **不是"macOS 没有几何着色器"** —— 探针（`/tmp/glext.c` 那十行）查过
      legacy 2.1 的扩展串：`GL_EXT_geometry_shader4` **有**，`framebuffer_blit` 也有；
      polydraw 也确实印了 `compile geom g`（着色器编译过了）；
-  3. 线头是 `PD_GLDBG=1` 下第 0 帧的 **`err=0500`（GL_INVALID_ENUM）** ——
-     最像 `glProgramParameteriEXT(…, GL_GEOMETRY_INPUT_TYPE_EXT, geo_in)` 那三句里
-     某个枚举不被接（`pd_host_gl.c:84-86`），或者画的图元与几何着色器的入口类型不配。
-     要补得单开一趟，别混在别的活里；
+  3. 线头是 `PD_GLDBG=1` 下第 0 帧的 **`err=0500`（GL_INVALID_ENUM）**。查下去最像的
+     一条已经很具体了：脚本发的是 **`glBegin(GL_QUADS)`**（第 9 行），而它的几何着色器
+     声明的入口类型是 **`GL_TRIANGLES`**（`@g,GL_TRIANGLES,GL_TRIANGLE_STRIP,12:g`）。
+     `EXT_geometry_shader4` 里这两样必须配 —— NVIDIA 在 Windows 上会先把 QUADS 拆成
+     三角再进几何着色器，Apple 这条驱动不拆，于是那一趟画不出东西。
+     **这不是移植的洞，是驱动语义的差**：要它得在宿主那一层把 QUADS 拆成三角，
+     那就改了原版的行为（而且只为这一份、214 个像素）。先记着，别顺手做。
 * **着色器错 2**：`gspiral`（`&` 用在 int 上）、`mipmap`（`texture2DLod` 没声明）
   —— 都是 GLSL 1.20 的上限（macOS legacy profile），不是移植的洞；
 * **超时 2**：`balls`（16384 个球）、`particules sparks`。**不是卡死，是真的在算** ——
