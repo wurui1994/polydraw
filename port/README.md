@@ -144,10 +144,16 @@ tigrou/clock.pss      1322 fps   0.756 ms/帧
 * `ken/orthoglobe.pss` —— **红**。已经量清的一半：把它的片元着色器换成一句
   `gl_FragColor = vec4(1,.5,0,1)`，画面就出来了（52 个抽样点是橙的）——
   所以**几何是落上去的**，问题在那句 `texture2D(tex0,…)` 取回来是空的。
-  还没定的是哪一头：earth.jpg 的上传（`glTexSubImage2D` 用 `GL_BGRA_EXT` +
-  `GL_UNSIGNED_BYTE`，Apple 的实现对这个组合挑食），还是它那句
-  `acos(t.x*inversesqrt(1.0-t.y*t.y))` 在 |t.y|>1 处出 NaN（扇面顶点的半径是
-  `1/cos(PI/12)≈1.035`，确实会越界）。**下一步用平色 + 直接 `t.xy` 采样的两步探针分开它们。**
+  两步探针跑过了，**已经把锅定到 texcoord 那一头**：
+    - 探针 A（把采样换成 `texture2D(tex0, t.xy*0.5+0.5)`）：出现白与黑两种非背景色
+      —— **纹理是上去了、采得到东西**，所以 `GL_BGRA_EXT` + `GL_UNSIGNED_BYTE`
+      那个上传组合没问题；
+    - 探针 B（原式不动，只把 alpha 强制成 1）：全是 `(0,0,0,255)` ——
+      **原式那组 texcoord 采回来就是黑的**。
+  所以剩下的是它那句 `acos(t.x*inversesqrt(1.0-t.y*t.y))`：扇面顶点的半径是
+  `1/cos(PI/12)≈1.035`，`1.0-t.y*t.y` 会变负 -> `inversesqrt` 出 NaN ->
+  Apple 的 GPU 上 NaN 的 texcoord 采回黑。**下一步**：把 `t` 在片元里直接输出成颜色，
+  看它到底是多少（顺带验 `gl_MultiTexCoord0` 有没有传对）。
 * `ken/gspiral.pss` —— **不计**。片元着色器用了 `&` / `>>`（整数位运算），
   那是 GLSL 1.30 起才有的；macOS 的 legacy profile 最高 GL 2.1 / GLSL 1.20，
   编译期就报 `'&' does not operate on 'int' and 'int'`。要它得换 core profile（3.2+），
