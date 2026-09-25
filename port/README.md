@@ -138,7 +138,34 @@ tigrou/clock.pss      1322 fps   0.756 ms/帧
 （x87 JIT + 真窗口 + vsync 关掉）不是同一件事，**不能直接对比**。
 它现在能当的是"arm64 这条腿自己的前后对比"。
 
-## 出图判据现在的账（`bench/render-a64.sh` 3 过 / 1 红 / 1 不计）
+## 整份语料的账（`bench/scan-a64.sh`，53 份）
+
+**ok 37 / 空画面 6 / 着色器错 2 / 崩 6 / 超时 2**（上一轮是 ok 34 / 崩 10）。
+表落 `bench/out/scan.tsv`，每份的 polydraw 诊断落 `bench/out/scanlog/`。
+
+* **崩 6**：`curvybuild` / `drawcone2` / `drawcone2_asm` / `heightmap` 是段错误
+  （crash 地址很小，像"基址 0 + 偏移"），`balls2k` / `metaballs_cube` 是
+  **rc=134（abort）** —— 那是 malloc 发现堆被写坏，形状与段错误不同族，
+  最像 PEEK/POKE 那个"quick&dirty bounds check"里 `newvar[…].maxind` 取到了
+  不对的那一格（`kcd->newvar` 是抄本，`nv` 下标若过期，`k` 就是垃圾、界就没了）；
+* **空画面 6**：`cubetex` / `geo_duptris` / `geo_test` / `orthoglobe` /
+  `ballsk` / `metaballs`；
+* **着色器错 2**：`gspiral`（`&` 用在 int 上）、`mipmap`（`texture2DLod` 没声明）
+  —— 都是 GLSL 1.20 的上限（macOS legacy profile），不是移植的洞；
+* **超时 2**：`balls`（16384 个球在解释器上跑）、`particules_sparks`。
+
+一组 ms/帧（离屏 320x240 + 纯 C 解释器）：`tree` 39、`gpgpu` 96、`disco_ball` 100、
+`drawsph_asm` 146、`snake_tube` 239、`menger_sponge` 370 … `interference_asm` 1310、
+`sphere_ellipsis` 1526、`texture3d` 1652。
+
+### 查"解释器里的野指针"用 `PD_RUNDBG=1`
+
+那份 fork 里有一格可选诊断：先把 `plst[]` 十六格填成毒值，再逐个操作数查
+"这一族有没有人填过"（每族只印一次）。第 12 个洞就是这么逼出来的 ——
+它先排掉了 fam=0（KEAX，NUL 占位）与 fam=8（KEIP，跳转标签，本来就不该解引用），
+才把注意力留给 KGLB。
+
+## 出图判据现在的账## 出图判据现在的账（`bench/render-a64.sh` 3 过 / 1 红 / 1 不计）
 
 * `ken/ceilflor2.pss` 1096 色、`ken/texture.pss` 98 色、`tigrou/clock.pss` 167 色 —— 过；
 * `ken/orthoglobe.pss` —— **红**。已经量清的一半：把它的片元着色器换成一句
