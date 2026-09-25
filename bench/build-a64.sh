@@ -62,6 +62,8 @@ echo "-> $OUT/polydraw.o"
 #                      （数帧、到点 glReadPixels 写 PNG，PNG 写出器也在里头）
 #   * pd_main_a64.c —— main()：读 .pss 进一格全局，GetWindowText 回它（假编辑框），
 #                      然后交给原文的 WinMain，`/bench:N` 让它自己计时并跑满退出
+#   * pd_gui_glfw.c  —— `--gui` 那条腿：GLFW 开真窗口（legacy 2.1 上下文），
+#                      每帧把 FBO 那一块 blit 到窗口，键鼠喂回 polydraw
 echo "== eval.o（给 polydraw 连的那份，不带 main）"
 $CC -arch arm64 $OPT -w -I polydraw_src -include port/pd_port.h -DCOMPILE=0 \
 	-c polydraw_src/eval.a64.stitch.c -o "$OUT/eval.o"
@@ -69,8 +71,11 @@ for f in pd_win_a64 pd_gl_cgl pd_main_a64; do
 	$CC -arch arm64 $OPT -w -I polydraw_src -I port/a64/winshim -include port/pd_port.h \
 		-c "port/a64/$f.c" -o "$OUT/$f.o"
 done
+# GUI 那一份不要假 windows.h（它用真 GLFW 头），也不要 -include pd_port.h
+$CC -arch arm64 $OPT -w -I /opt/homebrew/include \
+	-c port/a64/pd_gui_glfw.c -o "$OUT/pd_gui_glfw.o"
 echo "== polydraw_a64"
 $CC -arch arm64 "$OUT/polydraw.o" "$OUT/kplib.o" "$OUT/eval.o" \
-	"$OUT/pd_win_a64.o" "$OUT/pd_gl_cgl.o" "$OUT/pd_main_a64.o" \
-	-framework OpenGL -o "$OUT/polydraw_a64"
+	"$OUT/pd_win_a64.o" "$OUT/pd_gl_cgl.o" "$OUT/pd_main_a64.o" "$OUT/pd_gui_glfw.o" \
+	-framework OpenGL -L/opt/homebrew/lib -lglfw -o "$OUT/polydraw_a64"
 echo "-> $OUT/polydraw_a64"

@@ -190,6 +190,43 @@ abort 那一族则要另一条路：`lldb -o "b malloc_error_break"` 看是谁�
   缝合文件用 `#define` 把调用点换过去，定义那边仍是真名）；
 * `PD_RUNDBG=1` 多了一行"带字符串的原型没接：|…|" —— 以后再冒出别的原型直接点名。
 
+## GUI 那条腿（`--gui`：真窗口 + 实时循环）
+
+`polydraw_a64 ken/ceilflor2.pss --gui --size 640x480` —— 开窗口、实时跑、
+**关窗就退**。判据 `bench/gui-a64.sh` **3/3**（ceilflor2 83 fps、texture 120、
+clock 120，都是 1280x960 的 Retina 帧缓冲）。
+
+形状上**一个渲染路径都没改**（离屏那条腿原样绿着），只补了四件事：
+
+* `port/a64/pd_gui_glfw.c` —— GLFW 开窗口。**上下文归窗口**（`wglCreateContext` /
+  `wglMakeCurrent` 在 GUI 档下转过去），而且 GUI 档**不建 FBO**：直接画进窗口那张
+  默认帧缓冲。离屏那条路非得有 FBO 是因为**离屏根本没有 0 号那张**；有窗口就不用了，
+  于是"绑 0"那个包装（`pd_bindfb_wrap`）在 GUI 下正好是原意。
+  为什么用 GLFW 而不是 Cocoa：要的是等价实现，而 GLFW 给的正是 **legacy 2.1 上下文**
+  （polydraw 的 `glBegin/glEnd` 要固定管线，core profile 没有）；
+* `port/a64/pd_gui_bridge.c` —— 往 polydraw 里喂输入的**唯一通道**。
+  `dkeystatus[256]` / `dbstatus` / `popts` 都是 `pd_head.h` 里的 **static**，
+  只有 polydraw 那个翻译单元看得见 —— 所以这份桥必须**包在缝合文件末尾**；
+* 键盘按 **DOS/DirectInput 扫描码**映射（脚本读的是 `keystatus[0xcd]` 这种），
+  表在 pd_gui_glfw.c 里，列了方向键/WASD/空格/Shift/Ctrl/Esc/回车/数字/字母；
+* 退出：`PeekMessage` 在窗口该关的时候投一条 **WM_QUIT** —— 原文
+  `pd_win.c:703` 见到它就 `goto quitit`，于是原文那个帧循环一个字不用改。
+
+两格量出来才知道的事：
+
+* **渲染窗格要铺满窗口，得按原文自己的开关 `popts.fullscreen`**
+  （`pd_win.c:238`：`oglxres = xres; oglyres = yres;`），在 `CreateWindow` 壳子里按下
+  —— 它正好在 `resetwindows()` 算布局之前。**试过并退掉**的一刀：包 `glViewport`
+  一律撑满窗口。不行 —— `glcapture()` 那一族自己会设小视口做渲染到纹理，
+  一律覆盖就把那条路整条打断（`tigrou/clock.pss` 整张帧缓冲非黑像素 **0**）；
+* **`/WxH` 要给帧缓冲的尺寸，不是窗口尺寸**。Retina 上帧缓冲是窗口的两倍，
+  按窗口给的话画面只铺满四分之一（量到：非黑 307200 / 1228800）。
+  鼠标也跟着按帧缓冲坐标报，两头才一致。
+
+判据那两条是**看不见窗口也能量的**：整张帧缓冲里非黑像素的个数（读在 swap 之前）、
+以及标题栏那一行 fps（原文每秒往标题写一次，我们把 `SetWindowText` 转给
+`glfwSetWindowTitle`）。抽样点靠不住 —— `clock.pss` 是黑底细线，3x3 九个点一个都碰不上。
+
 ## 出图那一半：现在到哪儿了
 
 `bench/build-a64.sh` 一路走到 **`bench/out/polydraw_a64`（连上了）**。三份新实现：

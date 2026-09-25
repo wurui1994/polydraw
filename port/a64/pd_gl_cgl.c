@@ -67,6 +67,14 @@ void pd_gl_probe (const char *tag)
 
 int pd_gl_size (int *w, int *h) { if (w) *w = pd_fbw; if (h) *h = pd_fbh; return(pd_fbo != 0); }
 
+/* ── GUI 那条腿（`port/a64/pd_gui_glfw.c`）——
+   开了 `--gui` 就把上下文交给窗口，渲染路径一个字不改（照旧画进我们的 FBO），
+   每帧收尾多做一步：把 viewport 那一块 blit 到窗口的 0 号帧缓冲。 */
+extern int pd_gui_on (void);
+extern int pd_gui_open (void);
+extern int pd_gui_make_current (void);
+extern void pd_gui_present (unsigned int fbo, const int *vp);
+
 HGLRC wglCreateContext (HDC dc)
 {
 	CGLPixelFormatAttribute at[] = {
@@ -77,6 +85,9 @@ HGLRC wglCreateContext (HDC dc)
 	CGLPixelFormatObj pf = 0;
 	GLint n = 0;
 	(void)dc;
+	/* GUI 档：窗口自己带上下文，**不要**再开一个离屏的 —— 两个上下文之间
+	   对象不共享，FBO 就 blit 不过去了。 */
+	if (pd_gui_on()) { if (!pd_gui_open()) return(0); return((HGLRC)1); }
 	if (pd_cgl) return((HGLRC)pd_cgl);
 	if (CGLChoosePixelFormat(at,&pf,&n) != kCGLNoError) { fprintf(stderr,"pd_gl: CGLChoosePixelFormat 失败\n"); return(0); }
 	if (CGLCreateContext(pf,0,&pd_cgl) != kCGLNoError) { CGLDestroyPixelFormat(pf); fprintf(stderr,"pd_gl: CGLCreateContext 失败\n"); return(0); }
@@ -87,6 +98,17 @@ HGLRC wglCreateContext (HDC dc)
 BOOL wglMakeCurrent (HDC dc, HGLRC rc)
 {
 	(void)dc;
+	if (pd_gui_on())
+	{
+		if (!rc) return(1);
+		if (!pd_gui_make_current()) return(0);
+		/* GUI 档**不建 FBO**：直接画进窗口那张默认帧缓冲。
+		   于是 `pd_bindfb_wrap` 把"绑 0"映到 pd_fbo(=0) 正好是原意，
+		   polydraw 自己那些 render-to-texture 的 FBO 也照常工作。
+		   （离屏那条路非得有 FBO 是因为**离屏根本没有 0 号那张**。） */
+		if (getenv("PD_GUIDBG")) fprintf(stderr,"[gui] wglMakeCurrent：直接画进窗口（不建 FBO）\n");
+		return(1);
+	}
 	if (!rc) { CGLSetCurrentContext(0); return(1); }
 	if (CGLSetCurrentContext((CGLContextObj)rc) != kCGLNoError) return(0);
 	/* **一次建足够大**（不按 viewport 重建）：重建会把已经画进去的内容丢掉，
@@ -301,6 +323,16 @@ BOOL SwapBuffers (HDC dc)
 		}
 	}
 	pd_frame++;
+	/* GUI 档：swap + poll（事件喂回 polydraw 那一边）。GUI 不走 FBO，
+	   画面已经在窗口那张默认帧缓冲里了，所以不用 blit。 */
+	if (getenv("PD_GUIDBG") && (pd_frame < 3))
+		fprintf(stderr,"[gui] SwapBuffers 第 %ld 帧 gui=%d fbo=%u\n",(long)pd_frame-1,pd_gui_on(),pd_fbo);
+	if (pd_gui_on())
+	{
+		GLint vv[4] = {0,0,0,0};
+		if (pd_fbo) { glGetIntegerv(GL_VIEWPORT,vv); }
+		pd_gui_present(pd_fbo,(const int *)vv);
+	}
 	return(1);
 }
 

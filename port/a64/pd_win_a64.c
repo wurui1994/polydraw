@@ -184,8 +184,16 @@ BOOL WritePrivateProfileString (LPCSTR sect, LPCSTR key, LPCSTR val, LPCSTR file
  * GUI 那一步要真接本机窗口时，这一层就是接口所在（把 NSEvent 翻成 WM_*）。 */
 static HWND pd_fake_hwnd = (HWND)0x1;
 
+/* GUI 档：在这儿把"渲染窗格铺满窗口"那个开关按下去。
+   为什么在 CreateWindow 里按：它正好在 `resetwindows()` 算布局**之前**
+   （`pd_win.c:220` 建主窗口，`:227` 才算 oglxres/oglyres），赶得上。
+   `pd_in_fullscreen` 在 polydraw 那个翻译单元里（popts 是 static）。 */
+extern int pd_gui_on (void);
+extern void pd_in_fullscreen (int on);
 HWND CreateWindow (LPCSTR a, LPCSTR b, DWORD c, int d, int e, int f, int g, HWND h, HMENU i, HINSTANCE j, LPVOID k)
-{ (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k; return(pd_fake_hwnd); }
+{ (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;
+  if (pd_gui_on()) pd_in_fullscreen(1);
+  return(pd_fake_hwnd); }
 HWND CreateWindowEx (DWORD x, LPCSTR a, LPCSTR b, DWORD c, int d, int e, int f, int g, HWND h, HMENU i, HINSTANCE j, LPVOID k)
 { (void)x; return(CreateWindow(a,b,c,d,e,f,g,h,i,j,k)); }
 BOOL DestroyWindow (HWND h) { (void)h; return(1); }
@@ -195,7 +203,10 @@ BOOL MoveWindow (HWND h, int a, int b, int c, int d, BOOL e) { (void)h;(void)a;(
 BOOL GetWindowRect (HWND h, RECT *r) { (void)h; r->left = r->top = 0; r->right = 640; r->bottom = 480; return(1); }
 BOOL GetClientRect (HWND h, RECT *r) { return(GetWindowRect(h,r)); }
 /* `GetWindowText` 在 pd_main_a64.c 里 —— 它就是那个"假编辑框"：回脚本正文。 */
-BOOL SetWindowText (HWND h, LPCSTR s) { (void)h;(void)s; return(1); }
+/* 标题栏：原文每秒往这儿写一次"文件名 + fps"（`pd_win.c:770`）。
+   GUI 档下转给窗口 —— 于是 fps 就在标题上看得见，不用另造一套计时。 */
+extern int pd_gui_title (const char *s);
+BOOL SetWindowText (HWND h, LPCSTR s) { (void)h; if (s) pd_gui_title(s); return(1); }
 LONG_PTR SetWindowLong (HWND h, int i, LONG_PTR v) { (void)h;(void)i;(void)v; return(0); }
 HWND SetFocus (HWND h) { return(h); }
 BOOL ClientToScreen (HWND h, POINT *p) { (void)h;(void)p; return(1); }
@@ -205,16 +216,28 @@ BOOL ClientToScreen (HWND h, POINT *p) { (void)h;(void)p; return(1); }
    整个扇面被近平面裁掉，画面就是空的。报正中是无头出图最讲得通的默认。
    `PD_MOUSE=x,y` 可以改（要复现某一帧时用）。 */
 extern int pd_gl_size (int *w, int *h);
+extern int pd_gui_mouse (int *x, int *y);
+extern int pd_gui_closing (void);
 BOOL GetCursorPos (POINT *p)
 {
 	const char *m = getenv("PD_MOUSE");
 	int w = 640, h = 480, mx = -1, my = -1;
+	/* GUI 档：报真鼠标（窗口坐标）。没开 GUI 时 pd_gui_mouse 回 0。 */
+	if (pd_gui_mouse(&mx,&my)) { p->x = mx; p->y = my; return(1); }
 	pd_gl_size(&w,&h);
 	if (m && (sscanf(m,"%d,%d",&mx,&my) == 2)) { p->x = mx; p->y = my; return(1); }
 	p->x = w/2; p->y = h/2;
 	return(1);
 }
-BOOL PeekMessage (MSG *m, HWND h, UINT a, UINT b, UINT c) { (void)m;(void)h;(void)a;(void)b;(void)c; return(0); }
+/* 消息循环：平时空转（无头出图靠 `/bench:N` 自己数帧退出）。
+   GUI 档下**窗口一关就投一条 WM_QUIT** —— 原文 `pd_win.c:703` 见到它就
+   `goto quitit`，于是不用改原文那个循环。 */
+BOOL PeekMessage (MSG *m, HWND h, UINT a, UINT b, UINT c)
+{
+	(void)h;(void)a;(void)b;(void)c;
+	if (m && pd_gui_closing()) { memset(m,0,sizeof(*m)); m->message = WM_QUIT; return(1); }
+	return(0);
+}
 BOOL TranslateMessage (const MSG *m) { (void)m; return(0); }
 LRESULT DispatchMessage (const MSG *m) { (void)m; return(0); }
 LRESULT SendMessage (HWND h, UINT m, WPARAM w, LPARAM l) { (void)h;(void)m;(void)w;(void)l; return(0); }

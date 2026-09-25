@@ -33,3 +33,7 @@
 #include "pd/pd_script.c"
 #include "pd/pd_find.c"
 #include "pd/pd_win.c"
+
+/* GUI 那条腿往 polydraw 里喂输入的唯一通道 —— `dkeystatus`/`dbstatus` 是
+   `pd_head.h:354` 里的 static，只有这个翻译单元看得见，所以桥必须放在这儿。 */
+#include "../port/a64/pd_gui_bridge.c"

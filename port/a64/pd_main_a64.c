@@ -21,6 +21,11 @@
 
 extern int WinMain (HINSTANCE, HINSTANCE, LPSTR, int);
 extern void pd_gl_shoot_at (long frame, const char *path);
+/* GUI 那条腿（`port/a64/pd_gui_glfw.c`）。 */
+extern void pd_gui_enable (int w, int h);
+extern int pd_gui_open (void);
+extern int pd_gui_fbsize (int *w, int *h);
+extern void pd_gui_close (void);
 
 /* 那格全局：脚本正文。`GetWindowText` 就回它。 */
 static char *pd_text = 0;
@@ -54,27 +59,35 @@ static int pd_load (const char *path)
 int main (int argc, char **argv)
 {
 	char cmd[1024], *src = 0, *out = "out.png";
-	int i, frames = 60, w = 640, h = 480;
+	int i, frames = 60, w = 640, h = 480, gui = 0;
 
 	for(i=1;i<argc;i++)
 	{
 		if (!strcmp(argv[i],"--frames") && (i+1 < argc)) { frames = atoi(argv[++i]); continue; }
 		if (!strcmp(argv[i],"--out")    && (i+1 < argc)) { out = argv[++i]; continue; }
 		if (!strcmp(argv[i],"--size")   && (i+1 < argc)) { sscanf(argv[++i],"%dx%d",&w,&h); continue; }
+		if (!strcmp(argv[i],"--gui")) { gui = 1; continue; }
 		if (argv[i][0] != '-') { src = argv[i]; continue; }
 		fprintf(stderr,"不认的旗子：%s\n",argv[i]); return(64);
 	}
 	if (!src)
 	{
-		printf("用法: polydraw_a64 脚本.pss [--frames N] [--size WxH] [--out 图.png]\n");
+		printf("用法: polydraw_a64 脚本.pss [--frames N] [--size WxH] [--out 图.png] [--gui]\n");
 		return(64);
 	}
 	if (!pd_load(src)) return(66);
 
+	/* GUI 档：开真窗口、实时跑到关窗为止（`port/a64/pd_gui_glfw.c`）。
+	   与出图那条腿共用同一条渲染路径 —— polydraw 照旧画进我们的 FBO，
+	   每帧收尾 blit 到窗口。所以 GUI 不给 `/bench:N`（那是"跑满 N 帧就退"）。 */
+	if (gui) pd_gui_enable(w,h);
+	/* 先把窗口开起来，然后**按帧缓冲的真实尺寸**告诉 polydraw（`/WxH`）——
+	   Retina 上帧缓冲是窗口尺寸的两倍，按窗口尺寸给的话画面只铺满四分之一。 */
+	if (gui && pd_gui_open()) pd_gui_fbsize(&w,&h);
+
 	/* 最后一帧存图。`/bench:N` 的口径是"30 帧暖机 + N 帧计时"，所以总帧数是 N+30。 */
-	/* PD_SHOT=n 存第 n 帧（调试用）。量到过一件还没查清的事：脚本的绘制只在第 0 帧
-	   发生（整趟里 qglBegin 只被调了一次），所以默认那个第 frames+29 帧拿到的是
-	   被 glClear 清过的空画面。 */
+	/* PD_SHOT=n 存第 n 帧（调试用）。 */
+	if (!gui)
 	{
 		const char *sh = getenv("PD_SHOT");
 		/* 默认存**最后一帧**（`/bench:N` 的口径是 30 帧暖机 + N 帧计时）。
@@ -83,6 +96,9 @@ int main (int argc, char **argv)
 	}
 
 	/* 交给原文的 WinMain。`/bench:N` 让它别等焦点、别 Sleep(1)，并自己计时。 */
-	snprintf(cmd,sizeof(cmd),"/bench:%d /%dx%d",frames,w,h);
-	return(WinMain(0,0,cmd,1 /*SW_SHOWNORMAL*/));
+	if (gui) snprintf(cmd,sizeof(cmd),"/%dx%d",w,h);
+	else     snprintf(cmd,sizeof(cmd),"/bench:%d /%dx%d",frames,w,h);
+	i = WinMain(0,0,cmd,1 /*SW_SHOWNORMAL*/);
+	if (gui) pd_gui_close();
+	return(i);
 }

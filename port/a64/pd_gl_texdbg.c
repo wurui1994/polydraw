@@ -65,3 +65,14 @@ static void pd_dbg_glTexParameteri (GLenum tar, GLenum pn, GLint v)
 	if (pd_texdbg_on())
 		fprintf(stderr,"[tex] parami tar=%x pname=%x v=%x err=%s\n",tar,pn,v,pd_gl_errnam(glGetError()));
 }
+
+/* ── 试过并**退掉**的一刀：包 `glViewport` 让它撑满窗口 ──
+ *
+ * GUI 下画面只落在窗口一角（渲染窗格是 `xres>>1` x `oglxres*3/4`），一眼看着像是
+ * 该把视口改大。**不行**：`glcapture()` 那一族（`pd_host_gl.c:245`）自己会设一个
+ * 小视口去做渲染到纹理，一律覆盖就把那条路整条打断 —— `tigrou/clock.pss`
+ * 整幅图全黑（量到过：整张帧缓冲非黑像素 0）。
+ *
+ * 正确的做法是按原文自己留的开关 `popts.fullscreen`（`pd_win.c:238`），
+ * 见 `port/a64/pd_gui_bridge.c` 的 `pd_in_fullscreen`。
+ */
