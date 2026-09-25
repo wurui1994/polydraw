@@ -42,16 +42,42 @@
    （`kasm_main.c:397`）；解释器没有码字要补，要补的是那份抄本。
    —— `pd_a64_refresh_ext`，在 `kasm87` 收尾时逐格刷一遍。
 
-5. **还没补：`parmdat` 里指针占 4 个字节**。`kasm87cp`/`kasm87c`
-   （`kasm_interp.c:236/257`）写变参时 `j += 4` 就是"指针 4 字节"，而
-   `kasm87c_run` 读它用的是 `*(long *)`（在 arm64 上是 8 字节）。
-   一个指针参数还侥幸能跑，**两个就错位**。这是原文 32 位假设的核心，
-   要动的是"编译期给参数分偏移"那一段（`newvar[].r` 的 KESP 偏移）。
+5. **`parmdat` 里指针占 4 个字节**（已补）。`kasm87cp`/`kasm87c`
+   （`kasm_interp.c:236/257`）写变参时 `j += 4` 就是"指针 4 字节"，
+   `kasm_comp.c:169/174` 分偏移也是 4，而 `kasm87c_run` 读它用的是
+   `*(double **)` / `*(long *)`（在 arm64 上 8 字节）。一个指针参数侥幸能跑，
+   **两个就错位**。
+   —— `port/a64/pd_a64_parm.c`：写的一边接管 `kasm87c`/`kasm87cp`（顺带把原文读
+   **全局** `newvar`/`gnumarg` 改成读 `kcd->` 那一份）；分偏移那一边**不 fork
+   那个 62KB 的 `kasm87comp`**，改成 kcd 造好之后**事后重映射**（按 `newvar[]`
+   里记的旧基址逐个累加出新基址，`gasm[]`/`rxi[]`/`newvar[]` 上所有
+   KESP/KPTR 的偏移一起换）。
 
-   现状：Ken 自带的例子 #1~#3 全对（`20°C = 68°F`、`hypot(3,4) = 5`、
-   `sillypifunc` 五个值逐个对），**#4（两个函数指针）崩**。
-   polydraw 自己**不吃这条路** —— 它调脚本是 `gevalfunc()`，零个参数
-   （`polydraw.c:480/2036/2290`），所以这个洞不挡出图。
+6. **`KIMM` 必须是 long 常量**（已补）。`kasm_state.c:36` 是
+   `#define KIMM 0xb0000000` —— 类型是 **unsigned int**，于是
+   `kasm_interp.c:36` 的 `((long) -KIMM)` 走无符号算术得 `0x50000000`，
+   而不是 `-0xb0000000`。32 位上 `0x50000000+0xb0000000+idx` 溢出回绕**正好**
+   得到 idx，arm64 上不回绕 —— `gevalext[0x100000000+idx]` 当场读飞。
+   —— 缝合文件里 `#undef KIMM` / `#define KIMM 0xb0000000L`，一行。
+
+   这两格补上之后 Ken 自带的 main 从"例子 #4 崩"走到了 **#1~#13 全对**
+   （`sillydualfunc`、`dumbanglefunc`、`getunitvector`、`getcol`、
+   数组按指针传的 `1,2,3 / 3,5,3 / 8,8,3` 全逐个对上）。
+
+7. **还没补：宿主函数是用变参函数指针调的**。`kasm_interp.c:140` 把它声明成
+   `double (__cdecl *)(double,...)`，然后 `dafunc(*p[1],*p[2],*p[3])`。
+   在 x86 上变参与定参的调用约定一样（全压栈），所以没事；
+   **Apple 的 arm64 上变参实参一律走栈**，而 `qglVertex3d(double,double,double)`
+   是定参、从 d0/d1/d2 取 —— 于是只有第一个实参对。
+   量到的：脚本写 `glVertex(-1,-1,-2)`，`qglVertex3d` 收到 `(-1,-2,-1)`。
+   **这就是"画面全黑"的根**：调用都发生了、GL 没报错、FBO 也绑对了，
+   只是坐标是垃圾。
+
+   下一刀：fork `kasm87c_run`（缝合文件里 `#define` 改名），把那个大 switch 里
+   每一处 `dafunc(...)` 换成**精确原型**的强转。要分两档 ——
+   宿主 C 函数是定参、而脚本自己的函数（走我们的 thunk）是变参，
+   `pd_a64_owns()` 正好能分开：属于我们的那一档不走变参，直接摊 parmdat
+   调 `kasm87c_run`。
 
 ## 现在能跑到哪儿
 

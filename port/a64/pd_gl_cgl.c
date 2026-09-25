@@ -182,8 +182,26 @@ void pd_gl_shoot_at (long frame, const char *path) { pd_shot = frame; pd_shot_pa
 /* 没有窗口可以交换 —— 这儿就是"一帧画完"：该存图的那一帧把像素读出来写 PNG。 */
 BOOL SwapBuffers (HDC dc)
 {
+	GLint vp[4];
 	(void)dc;
 	glFlush();
+	/* polydraw 每帧 `glViewport(0,0,oglxres,oglyres)`（`pd_win.c:714`），而那是
+	   **渲染窗格**的尺寸（编辑器占掉了另一半），不是我们建 FBO 时用的那个。
+	   量到过：窗口 640x480 时 oglxres/oglyres 是 320x240 —— 不跟着改的话，
+	   画面只落在 FBO 的左下角一块，存出来的图一大半是空的。
+	   所以每帧收尾时按当前 viewport 把 FBO 对齐（下一帧生效，存图在第 30+ 帧，够了）。 */
+	if (getenv("PD_GLDBG"))
+	{
+		GLint fb = -1, dr = -1; GLenum e = glGetError();
+		glGetIntegerv(0x8CA6/*GL_FRAMEBUFFER_BINDING_EXT*/,&fb);
+		glGetIntegerv(GL_DRAW_BUFFER,&dr);
+		glGetIntegerv(GL_VIEWPORT,vp);
+		fprintf(stderr,"[gl] frame=%ld fb=%d(ours=%u) drawbuf=%04x vp=%d,%d,%d,%d err=%04x\n",
+			(long)pd_frame,fb,pd_fbo,dr,vp[0],vp[1],vp[2],vp[3],(unsigned)e);
+	}
+	glGetIntegerv(GL_VIEWPORT,vp);
+	if ((vp[2] > 0) && (vp[3] > 0) && ((vp[2] != pd_fbw) || (vp[3] != pd_fbh)))
+		{ pd_gl_resize(vp[2],vp[3]); glViewport(0,0,vp[2],vp[3]); }
 	if ((pd_frame == pd_shot) && pd_shot_path && pd_fbo)
 	{
 		unsigned char *px = (unsigned char *)malloc((size_t)pd_fbw*(size_t)pd_fbh*4);

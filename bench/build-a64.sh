@@ -33,7 +33,7 @@ echo "-> $OUT/eval_a64"
 echo "== eval_bench（量尺）"
 $CC -arch arm64 $OPT -I polydraw_src \
 	-include port/pd_port.h -DCOMPILE=0 -w \
-	polydraw_src/eval.a64bench.stitch.c -o "$OUT/eval_bench" -lm
+	-DPD_EVAL_BENCH polydraw_src/eval.a64.stitch.c -o "$OUT/eval_bench" -lm
 echo "-> $OUT/eval_bench"
 "$OUT/eval_bench" '(x){s=0;for(i=0;i<x;i++)s=s+i*i;s}' 1000 | tail -1
 
@@ -64,7 +64,7 @@ echo "-> $OUT/polydraw.o"
 #                      然后交给原文的 WinMain，`/bench:N` 让它自己计时并跑满退出
 echo "== eval.o（给 polydraw 连的那份，不带 main）"
 $CC -arch arm64 $OPT -w -I polydraw_src -include port/pd_port.h -DCOMPILE=0 \
-	-c polydraw_src/eval.a64lib.stitch.c -o "$OUT/eval.o"
+	-c polydraw_src/eval.a64.stitch.c -o "$OUT/eval.o"
 for f in pd_win_a64 pd_gl_cgl pd_main_a64; do
 	$CC -arch arm64 $OPT -w -I polydraw_src -I port/a64/winshim -include port/pd_port.h \
 		-c "port/a64/$f.c" -o "$OUT/$f.o"

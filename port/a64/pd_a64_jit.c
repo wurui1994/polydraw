@@ -145,17 +145,23 @@ static void pd_a64_release (void *f)
 	pd_a64_poke(f,72,0);
 }
 
-/* `kasm87c_copyglob2struct` 的外壳：原文那一份照旧跑，回来之后把"代码段地址"
-   换成我们的 thunk。kcd 从哪儿拿：原文返回前刚把它写进 `gkasm87cptr`。 */
+/* `kasm87c_copyglob2struct` 的外壳：原文那一份照旧跑，回来之后做三件事 ——
+   把参数区的指针宽度从 4 改成 8（第 5 个洞，见 pd_a64_parm.c）、
+   把"代码段地址"换成我们的 thunk、把入口映到我们那两个 kasm87c/kasm87cp。
+   kcd 从哪儿拿：原文返回前刚把它写进 `gkasm87cptr`。 */
 static kcd_t *pd_a64_copyglob2struct (long stackdoubs)
 {
 	void *entry;
-	void *kcd;
+	kcd_t *kcd;
 
 	entry = (void *)kasm87c_copyglob2struct(stackdoubs);
 	if (!entry) return(0);
-	kcd = (void *)gkasm87cptr;
-	return((kcd_t *)pd_a64_thunk(kcd,entry));
+	kcd = (kcd_t *)gkasm87cptr;
+	pd_a64_widen_parms(kcd);
+	/* 原文那两个被缝合文件改名成了 `*_x86`（参数区还是 4 字节的口径），
+	   照它选的那一档映到我们的同名实现上。 */
+	entry = (entry == (void *)kasm87c_x86) ? (void *)kasm87c : (void *)kasm87cp;
+	return((kcd_t *)pd_a64_thunk((void *)kcd,entry));
 }
 
 /* `kasm87` 的收尾里记一笔 gstatmem（原文把它写在 `v-FUNCBYTEOFFS+8` 那个头字里）。 */
