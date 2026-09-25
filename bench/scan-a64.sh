@@ -44,7 +44,10 @@ for f in ken/*.pss tigrou/*.pss; do
 	rm -f polydraw_bench.txt "$png"
 	timeout "$TMO" "$BIN" "$f" --frames "$N" --out "$png" >"$log" 2>&1
 	rc=$?
-	ms=$(awk -F'\t' 'END{if(NF>=2)printf "%.3f",$2}' polydraw_bench.txt 2>/dev/null)
+	# polydraw_bench.txt 每行是 "\tfps\tms/帧" —— 开头那个 tab 让 $1 是空串，
+	# 所以 ms/帧 是**第 3 格**。先前取的是 $2（fps），于是整张表的"ms/帧"
+	# 印的其实是 fps（tree 那格 46.8 是 46.8 fps，不是 46.8 ms）。
+	ms=$(awk -F'\t' 'END{if(NF>=3)printf "%.3f",$3}' polydraw_bench.txt 2>/dev/null)
 	nc=$(colors "$png")
 	note=""
 	if   [ "$rc" = 124 ]; then verdict=超时; ntmo=$((ntmo+1))

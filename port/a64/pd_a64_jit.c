@@ -37,9 +37,11 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-/* 这三个定义在后面两份里（pd_a64_parm.c / 本文件用得到的那两个入口），
+/* 这几个定义在后面两份里（pd_a64_parm.c / 本文件用得到的那两个入口），
    先报个名 —— C 里 static 的前向声明加后面的定义是合法的。 */
 static void pd_a64_widen_parms (kcd_t *kcd);
+static long pd_a64_parms (const kcd_t *kcd, long *idx, long max);
+static long pd_a64_parm_isdouble (const newvartyp *nv);
 double __cdecl kasm87c (double first, ...);
 double __cdecl kasm87cp (double *first, ...);
 
@@ -159,14 +161,22 @@ static kcd_t *pd_a64_copyglob2struct (long stackdoubs)
 {
 	void *entry;
 	kcd_t *kcd;
+	long pidx[8], n;
 
 	entry = (void *)kasm87c_copyglob2struct(stackdoubs);
 	if (!entry) return(0);
 	kcd = (kcd_t *)gkasm87cptr;
 	pd_a64_widen_parms(kcd);
-	/* 原文那两个被缝合文件改名成了 `*_x86`（参数区还是 4 字节的口径），
-	   照它选的那一档映到我们的同名实现上。 */
-	entry = (entry == (void *)kasm87c_x86) ? (void *)kasm87c : (void *)kasm87cp;
+
+	/* 第 16 个洞：入口选 kasm87c 还是 kasm87cp，原文（`kasm_interp.c:333`）看的是
+	   **`newvar[0]`** —— 可 newvar 前头摆的是全局 STATIC（第 14 个洞那件事），
+	   头一个**参数**在 globnewvarnum 那一格。于是"带全局 + 第一个参数是 double"的
+	   函数（tigrou/balls2k 的 `drawsph(cx,cy,cz,cr)` 就是）会被选成 kasm87cp：
+	   arm64 上 double 走 d0、指针走 x0，parmdat[0] 拿到的是垃圾。
+	   所以这一格自己按参数表判，不看原文选的那一个。 */
+	n = pd_a64_parms(kcd,pidx,8);
+	if (n > 0) entry = pd_a64_parm_isdouble(&kcd->newvar[pidx[0]]) ? (void *)kasm87c : (void *)kasm87cp;
+	else       entry = (entry == (void *)kasm87c_x86) ? (void *)kasm87c : (void *)kasm87cp;
 	return((kcd_t *)pd_a64_thunk((void *)kcd,entry));
 }
 

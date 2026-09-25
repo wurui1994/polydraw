@@ -94,6 +94,57 @@
    另外 `glBindFramebufferEXT(…,0)` 翻成"绑我们那张"（离屏没有 0 号那张）——
    不过量下来 polydraw 这一趟压根没调它（那三个 FBO 入口有一个是空的）。
 
+## 又四个洞（14~17）：全是 32 位 x86 的口径撞上 LP64
+
+这四格合起来把语料里最后 **6 份崩**（4 段错误 + 2 abort）全清掉了。共同点是
+**原文自己写着口径**（注释里就有"4 byte"、"(~parnum)*4"），只是那口径等于
+`sizeof(long)==4`。
+
+14. **`gnumarg` 不是"参数个数"**（已补）。`newvar[]` 前头先摆全局 `STATIC` 声明
+    （`kasm_main.c:222` 那一趟 `parse_static`，家族在 `:277` 被改成 KGLB），
+    参数接在**后面**；`gnumarg` 是"参数列表解析完时的 `newvarnum`"。
+    我们的参数区宽度重映射按"前 `gnumarg` 格都是参数"排新基址 —— 真参数被全局
+    挤到后面去了。量到的（`ken/curvybuild.pss`，函数 `(N,A,B)`）：`gnumarg=13`，
+    `newvar[0..9]` 是 WALL/SECT/NUMSECTS/… 全是 `e…`（KGLB），`newvar[10..12]`
+    才是 N/A/B（`a…` = KPTR）；A 拿到基址 88，`*(double **)(parmdat+88)` 读到栈上
+    垃圾 `0x3`，MOV 上段错误。
+    —— `pd_a64_parm.c` 的 `pd_a64_parms()`：**按家族筛**（KESP/KPTR 才是参数），
+    widen 与 `kasm87c`/`kasm87cp` 填参都走这一串。
+    好了四份：`curvybuild` / `heightmap` / `drawcone2` / `drawcone2_asm`。
+
+15. **`texttrans` 位图按"long 是 4 字节"算大小**（已补）。`kasm_cpu.c:73` 是
+    `long *texttrans`，写的一边 `texttrans[i>>5] |= (1<<i)`（一格 long 管 32 个
+    字符），可 `kasm_main.c:29` 算的是 `((len+31)>>5)<<2` —— 每 32 个字符 4 字节。
+    量到的：`tigrou/balls2k.pss` 的 eval 段（bakz 约 5.5KB）要 1384 字节、
+    只 malloc 了 `max(692,1024)=1024`，越界 360 字节正好压在紧接着 malloc 的
+    `tbufmal` 上：tbuf 前 25 个字节变成位图垃圾，括号扫描报 `ERROR: too many }`。
+    —— 已有的 `kasm_main_a64.c` 替身里改成按 `sizeof(long)` 算（`tools/mkmain.mjs`）。
+
+16. **入口选 `kasm87c` 还是 `kasm87cp` 看的是 `newvar[0]`**（已补）。
+    `kasm_interp.c:333` 那一句判的是第一个 newvar —— 与第 14 个洞同一个根：
+    带全局时那是个全局。于是 `drawsph(cx,cy,cz,cr)`（第一个参数是 double）被选成
+    `kasm87cp`：arm64 上 double 走 d0、指针走 x0，`parmdat[0]` 拿到的是垃圾。
+    —— `pd_a64_copyglob2struct` 自己按参数表判，不看原文选的那一档。
+
+17. **多维数组的维度表一格是 4 字节，两头都写成 `long *`**（已补）。
+    `kasm_state.c:99` 的注就写着 `ArrayDims:{(~parnum)*4}`；可
+    `kasm_parse.c:144` 写（`*(long *)&newvarnam[newvarplc] = i; newvarplc += 4;`，
+    只保了 4 字节却写 8 个）、`:1086` 读（`((long *)…)[l]`，按 8 字节一格）。
+    `static planes[6][4]` 于是读出 `0x0000000400000006`，"维度合并乘数"是 2.75e19，
+    进常量表后折出来的下标是 `0x7fffffffffffffff` —— 被 `kasm_opt.c:339` 的越界闸
+    拦下 -> `kasmoptimizations()` 回 -1 -> `kasm87comp` 回 0（**这条路不设
+    `kasm87err`**，所以外头只看到"编译失败"）-> `kasm87` 走清理，
+    `free(gevalext[j].ptr-FUNCBYTEOFFS)` 去 free 我们 mmap 的 thunk 槽 -> **rc=134**。
+    —— `tools/mkparse.mjs` 生成 `port/a64/kasm_parse_a64.c`（只差那两处强转，
+    `diff -u polydraw_src/eval/kasm_parse.c` 看得见），缝合文件改包它。
+    好了两份：`balls2k` / `metaballs_cube`。
+
+查这四格的路子记一笔：`PD_RUNDBG=1` 那把诊断加了第三格 —— **执行前**查
+`p[0..2]` 有没有落在头一页（基址 0 + 小偏移），撞上就把指令号、opcode、三个操作数的
+`r/q` 和**整张参数表**印出来。第 14 个洞就是那张表一眼看出来的（前十格全是 `e…`）。
+abort 那一族则要另一条路：`lldb -o "b malloc_error_break"` 看是谁在 free ——
+它把"堆被写坏"与"free 了不是 malloc 来的东西"分开了，后者直接指到清理路径。
+
 ## 出图那一半：现在到哪儿了
 
 `bench/build-a64.sh` 一路走到 **`bench/out/polydraw_a64`（连上了）**。三份新实现：
@@ -140,30 +191,42 @@ tigrou/clock.pss      1322 fps   0.756 ms/帧
 
 ## 整份语料的账（`bench/scan-a64.sh`，53 份）
 
-**ok 37 / 空画面 6 / 着色器错 2 / 崩 6 / 超时 2**（上一轮是 ok 34 / 崩 10）。
-表落 `bench/out/scan.tsv`，每份的 polydraw 诊断落 `bench/out/scanlog/`。
+**ok 42 / 空画面 7 / 着色器错 2 / 崩 0 / 超时 2**（上两轮是 ok 34 / 崩 10、
+ok 37 / 崩 6）。表落 `bench/out/scan.tsv`，每份的 polydraw 诊断落
+`bench/out/scanlog/`。
 
-* **崩 6**：`curvybuild` / `drawcone2` / `drawcone2_asm` / `heightmap` 是段错误
-  （crash 地址很小，像"基址 0 + 偏移"），`balls2k` / `metaballs_cube` 是
-  **rc=134（abort）** —— 那是 malloc 发现堆被写坏，形状与段错误不同族，
-  最像 PEEK/POKE 那个"quick&dirty bounds check"里 `newvar[…].maxind` 取到了
-  不对的那一格（`kcd->newvar` 是抄本，`nv` 下标若过期，`k` 就是垃圾、界就没了）；
-* **空画面 6**：`cubetex` / `geo_duptris` / `geo_test` / `orthoglobe` /
-  `ballsk` / `metaballs`；
+* **崩 0** —— 第 14~17 个洞清完，整份语料**再没有崩的**；
+* **空画面 7**：`cubetex` / `drawcone2` / `geo_duptris` / `geo_test` /
+  `orthoglobe` / `ballsk` / `metaballs`（`drawcone2` 是从"崩"变成"空画面"的，
+  等于往前挪了一格，还欠一刀）；
 * **着色器错 2**：`gspiral`（`&` 用在 int 上）、`mipmap`（`texture2DLod` 没声明）
   —— 都是 GLSL 1.20 的上限（macOS legacy profile），不是移植的洞；
 * **超时 2**：`balls`（16384 个球在解释器上跑）、`particules_sparks`。
 
-一组 ms/帧（离屏 320x240 + 纯 C 解释器）：`tree` 39、`gpgpu` 96、`disco_ball` 100、
-`drawsph_asm` 146、`snake_tube` 239、`menger_sponge` 370 … `interference_asm` 1310、
-`sphere_ellipsis` 1526、`texture3d` 1652。
+ms/帧（离屏 320x240 + 纯 C 解释器，`/bench:30` 的口径 = 30 帧暖机 + 30 帧计时）：
+最快一档 `sphere_ellipsis` 0.355、`ceilflor2` 0.476、`driftbox` 0.490；
+最慢一档 `curvybuild` 36.9、`tree` 19.1、`gpgpu` 17.3、`disco_ball` 14.0、
+`balls2k` 9.1。
+
+> 这一栏先前是**错的**：`polydraw_bench.txt` 每行是 `\tfps\tms/帧`，开头那个 tab
+> 让 `$1` 是空串，而 scan 取的是 `$2` —— 于是"ms/帧"印的其实是 **fps**
+> （"tree 39 ms/帧"实为 39 fps）。现在取 `$3`。量毫秒级的东西，列没对上就整栏失真。
 
 ### 查"解释器里的野指针"用 `PD_RUNDBG=1`
 
-那份 fork 里有一格可选诊断：先把 `plst[]` 十六格填成毒值，再逐个操作数查
-"这一族有没有人填过"（每族只印一次）。第 12 个洞就是这么逼出来的 ——
-它先排掉了 fam=0（KEAX，NUL 占位）与 fam=8（KEIP，跳转标签，本来就不该解引用），
-才把注意力留给 KGLB。
+那份 fork 里有三格可选诊断：
+
+1. 先把 `plst[]` 十六格填成毒值，再逐个操作数查"这一族有没有人填过"（每族只印一次）
+   —— 第 12 个洞就是这么逼出来的（它先排掉了 fam=0（KEAX，NUL 占位）与 fam=8
+   （KEIP，跳转标签，本来就不该解引用），才把注意力留给 KGLB）；
+2. 算完的 `p[j]` **落在哪块地盘**（kcd / 值栈 / parmdat / gstatmem）；
+3. **执行前**查 `p[0..2]` 有没有落在头一页（基址 0 + 小偏移），撞上就把指令号、
+   opcode、三个操作数的 `r/q` 和**整张参数表**印出来 —— 第 14 个洞是那张表
+   一眼看出来的（前十格全是 `e…`）。
+
+abort（rc=134）那一族别用这把：走 `lldb -o "b malloc_error_break"`。
+它把"堆被写坏"与"free 了不是 malloc 来的东西"分开，后者直接指到清理路径
+（第 17 个洞就是这么定位的）。
 
 ## 出图判据现在的账## 出图判据现在的账（`bench/render-a64.sh` 3 过 / 1 红 / 1 不计）
 
