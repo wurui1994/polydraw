@@ -513,6 +513,51 @@ static void pd_op (pd_jb *b, kcd_t *kcd, long i, pd_fix *fix, long *nfix)
 			return;
 		}
 
+		/* ── 宿主函数那一族（`USERFUNC`）───────────────────────────────────────
+		 *
+		 * 解释器在这儿最亏：每次调用都要按 `n` 过一趟 switch、再 `strncmp` 原型串、
+		 * 才知道该怎么强转。而**原型串与被调的函数在编译期就定了**，所以 JIT 直接把
+		 * 实参摆到位就行 —— 这就是这一族该由 JIT 干的理由。
+		 *
+		 * ABI：AAPCS64（Apple 的非变参就是它）—— **double 走 d0..d7、指针走 x0..x7，
+		 * 两条序列各自数**。所以 `dCd` 这种原型是 d0=第一格、x0=第二格、d1=第三格。
+		 *
+		 * 这一版**只接宿主函数**（`n<=8`、原型只有 d/D）。脚本自己那些函数
+		 * （`pd_a64_owns`）是真变参入口，Apple 上变参实参全走栈 —— 那是下一刀。
+		 */
+		case USERFUNC:
+		{
+			char *cptr;
+			void *dafunc;
+			long j, nd = 0, np = 0;
+			if ((a->n < 1) || (a->n > 8)) { b->bad = 1; return; }
+			if ((kcd->newvar[a->g].r & 0xf0000000) != KIMM) { b->bad = 1; return; }
+			dafunc = (void *)kcd->gevalext[kcd->newvar[a->g].r & 0x0fffffff].ptr;
+			if (pd_a64_owns(dafunc)) { b->bad = 1; return; }   /* 脚本函数：下一刀 */
+			cptr = &kcd->newvarnam[kcd->newvar[a->g].proti];
+			/* 原型串**不是 NUL 结尾**的（后面紧跟函数名），所以只看前 n 个字符。 */
+			for(j=0;j<a->n;j++) if ((cptr[j] != 'd') && (cptr[j] != 'D')) { b->bad = 1; return; }
+			for(j=1;j<=a->n;j++)
+			{
+				rtyp *rp = (j <= 2) ? &a->r[j] : &kcd->rxi[a->rxi+j-3];
+				if (cptr[j-1] == 'd')
+				{
+					if (nd >= 8) { b->bad = 1; return; }
+					pd_load(b,kcd,rp,(int)nd,PD_XS0);
+					nd++;
+				}
+				else
+				{
+					if (np >= 8) { b->bad = 1; return; }
+					pd_addrof(b,kcd,rp,(int)np,PD_XS0);
+					np++;
+				}
+			}
+			pd_call(b,dafunc);
+			pd_store(b,kcd,&a->r[0],0,PD_XS0);
+			return;
+		}
+
 		default: b->bad = 1; return;
 	}
 }

@@ -288,6 +288,29 @@ tigrou/clock.pss      1322 fps   0.756 ms/帧
 （x87 JIT + 真窗口 + vsync 关掉）不是同一件事，**不能直接对比**。
 它现在能当的是"arm64 这条腿自己的前后对比"。
 
+## 真的 arm64 JIT（`port/a64/pd_a64_jitc.c`）
+
+先前这条腿上**只有解释器** —— `kasm87`（`COMPILE==1` 那份 x87 JIT）在 arm64 上等于
+没有。现在有一份把**同一串 `gasm[]` 三地址指令**吐成 A64 机器码的 JIT：一格 `kcd`
+编一次，之后每帧直接跳进去。挂点只有 `pd_a64_fill` 里那一句（编不出来就退回解释器）。
+
+量出来的账（`PD_JIT=0` 对 `PD_JIT=1`，同一台机器同一趟）：
+
+```
+(x){s=0;for(i=0;i<1000;i++)s=s+sqrt(i*x);s}   92.98 us -> 8.87 us   （10.5x，值逐位相同）
+ken/ceilflor2.pss  --gui                        79.0 fps -> 103.3 fps
+ken/texture.pss    --gui                        60.8 fps -> 119.9 fps
+tigrou/clock.pss   --gui                        59.8 fps -> 59.8 fps （已经顶在 vsync 上）
+```
+
+**判据是差分**：`PD_JIT=2` 每次调用两条路都跑一趟、位级对不上就印。
+`bench/test-a64.sh` 在差分档下一条"不一致"都没有（那一档里 `x*=x` 与 `static s++`
+两份会 FAIL —— 差分把副作用做了两遍，不是 JIT 错）。
+
+接了哪些指令、还欠什么，看那份文件的头注。现在还欠的最大一格是**脚本自己那些函数**
+（`pd_a64_owns` 那一支）：它们的入口是真变参（`kasm87c(double first, ...)`），
+Apple 的 arm64 变参实参全走栈，得单独铺一趟 —— 碰上就整份退回解释器。
+
 ## 整份语料的账（`bench/scan-a64.sh`，53 份）
 
 **ok 48 / 空画面 1 / 着色器错 2 / 崩 0 / 超时 2**（三轮前是 ok 34 / 崩 10，
