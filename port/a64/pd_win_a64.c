@@ -225,13 +225,25 @@ int MessageBox (HWND h, LPCSTR txt, LPCSTR cap, UINT t)
 
 /* ── 空壳回失败：线程、管道、进程、MIDI ──
  * 出图是单线程的；polydraw 那几处都判返回值，回失败它就走单线程那条路。 */
-HANDLE CreateEvent (void *a, BOOL b, BOOL c, LPCSTR d) { (void)a;(void)b;(void)c;(void)d; return(0); }
-BOOL SetEvent (HANDLE h) { (void)h; return(0); }
-BOOL ResetEvent (HANDLE h) { (void)h; return(0); }
+/* 这一格是"脚本跑死了"的看门狗（`pd_script.c:554-568`）。协议比看着简单：
+   **脚本本来就是主线程自己调的**（`:564` 的 `safeevalfunc()`），那条线程只负责
+   "超时就报 stuck"。所以不需要真线程，只要：
+     * `_beginthreadex` 回一个**非 0** 的假句柄 —— 不然 `gthand` 一直是 0，
+       每帧都重新走一遍创建；
+     * `WaitForSingleObject` 回 `WAIT_OBJECT_0`（0）—— 回 WAIT_TIMEOUT 的话
+       第一帧之后就 `gshaderstuck = 1`，脚本再也不跑了。
+   踩过：先前这两个回 0 / WAIT_TIMEOUT，于是**脚本只在第 0 帧画了一次**，
+   后面每帧被 glClear 清成空的 —— 查了半天"画面全黑"的最后一格就是这儿。
+   代价：没有看门狗了，脚本死循环会把整个进程挂住（出图那条路可以接受）。 */
+static int pd_ev = 0;
+HANDLE CreateEvent (void *a, BOOL b, BOOL c, LPCSTR d)
+{ (void)a;(void)b;(void)c;(void)d; return((HANDLE)(intptr_t)(++pd_ev)); }
+BOOL SetEvent (HANDLE h) { (void)h; return(1); }
+BOOL ResetEvent (HANDLE h) { (void)h; return(1); }
 BOOL CloseHandle (HANDLE h) { (void)h; return(1); }
-DWORD WaitForSingleObject (HANDLE h, DWORD ms) { (void)h;(void)ms; return(WAIT_TIMEOUT); }
+DWORD WaitForSingleObject (HANDLE h, DWORD ms) { (void)h;(void)ms; return(0 /*WAIT_OBJECT_0*/); }
 UINT_PTR _beginthreadex (void *a, unsigned b, unsigned (*c)(void *), void *d, unsigned e, unsigned *f)
-{ (void)a;(void)b;(void)c;(void)d;(void)e; if (f) *f = 0; return(0); }
+{ (void)a;(void)b;(void)c;(void)d;(void)e; if (f) *f = 0; return(1); }
 HANDLE CreateNamedPipe (LPCSTR a, DWORD b, DWORD c, DWORD d, DWORD e, DWORD f, DWORD g, void *h)
 { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return(INVALID_HANDLE_VALUE); }
 BOOL ConnectNamedPipe (HANDLE h, void *o) { (void)h;(void)o; return(0); }

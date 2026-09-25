@@ -113,15 +113,17 @@
   `WinMain`。命令行给 `/bench:N` —— 那是先前给 `polydraw.c` 加的插桩，它自己会
   第 30 帧起计时、跑满 N 帧退出，于是**不用重写帧循环，只要喂它**。
 
-**现状**：`ken/ceilflor2.pss` 与 `tigrou/clock.pss` **真出图了**
-（1074 / 155 种颜色，不是空画面）。判据 `bench/render-a64.sh` 现在 **2/5**。
+**现状**：`ken/ceilflor2.pss`（1086 种颜色）与 `tigrou/clock.pss`（159 种）
+**真出图了**，而且是**每一帧都在画**（默认存最后一帧）。判据
+`bench/render-a64.sh` **2/5**。
 
-剩下那一格（还没查清）：**脚本的绘制只在第 0 帧发生** —— 整趟里 `qglBegin`
-只被调了一次，后面每帧被 `glClear` 清成空的。所以默认存第 0 帧（`PD_SHOT=n` 可改），
-而 `texture` / `gspiral` / `orthoglobe` 这些要靠 `numframes==0` 那个初始化块或
-纹理上传的，第 0 帧还没画东西，于是判据里是红的。
+最后那一格（已补）：**看门狗**。`pd_script.c:554-568` 里那条线程只负责"脚本超时
+就报 stuck" —— 脚本本来就是主线程自己调的（`:564` 的 `safeevalfunc()`）。
+可是我们把 `_beginthreadex` 回 0、`WaitForSingleObject` 回 `WAIT_TIMEOUT`，
+于是第一帧之后 `gshaderstuck = 1`，脚本再也不跑了 —— "画面全黑"查到最后
+就是这一格。改成回非 0 句柄 + `WAIT_OBJECT_0` 即可（代价：没有看门狗了，
+脚本死循环会挂住进程；出图这条路可以接受）。
 
-怀疑在 polydraw 侧：`gevalfunc` 疑似被 `Draw` 收尾时放掉，而 `setShaders` 的重编译
-只在文本变了才做（`:180` 的 `if (!needrecompile) return;`）—— 于是第二帧起
-`if ((!shadn[2]) || (!gevalfunc))` 那一支把脚本跳过。**下一步就量这一条**：
-在 `Draw` 里外各打一个点看 `gevalfunc` 什么时候变 0。
+还红的三份是**脚本功能的欠账**，不是移植的洞：`texture` 要从文件读图、
+`gspiral` / `orthoglobe` 用到还没走通的东西。下一步逐份看它们的
+`bench/out/png/*.log`（polydraw 自己的诊断现在都在里头）。
