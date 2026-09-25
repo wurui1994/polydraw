@@ -55,3 +55,22 @@ $CC -arch arm64 $OPT -fms-extensions \
 	-I polydraw_src -I port/a64/winshim -include port/pd_port.h \
 	-c polydraw_src/polydraw.stitch.c -o "$OUT/polydraw.o"
 echo "-> $OUT/polydraw.o"
+
+# 连成可执行：polydraw.o + kplib.o + eval.o + 那三份 port/a64 的实现。
+#   * pd_win_a64.c  —— 81 个 win32 函数（计时/ini 是真的，窗口/菜单/对话框空壳）
+#   * pd_gl_cgl.c   —— wgl* 走 CGL 离屏上下文 + FBO；SwapBuffers 是"一帧画完"的钩子
+#                      （数帧、到点 glReadPixels 写 PNG，PNG 写出器也在里头）
+#   * pd_main_a64.c —— main()：读 .pss 进一格全局，GetWindowText 回它（假编辑框），
+#                      然后交给原文的 WinMain，`/bench:N` 让它自己计时并跑满退出
+echo "== eval.o（给 polydraw 连的那份，不带 main）"
+$CC -arch arm64 $OPT -w -I polydraw_src -include port/pd_port.h -DCOMPILE=0 \
+	-c polydraw_src/eval.a64lib.stitch.c -o "$OUT/eval.o"
+for f in pd_win_a64 pd_gl_cgl pd_main_a64; do
+	$CC -arch arm64 $OPT -w -I polydraw_src -I port/a64/winshim -include port/pd_port.h \
+		-c "port/a64/$f.c" -o "$OUT/$f.o"
+done
+echo "== polydraw_a64"
+$CC -arch arm64 "$OUT/polydraw.o" "$OUT/kplib.o" "$OUT/eval.o" \
+	"$OUT/pd_win_a64.o" "$OUT/pd_gl_cgl.o" "$OUT/pd_main_a64.o" \
+	-framework OpenGL -o "$OUT/polydraw_a64"
+echo "-> $OUT/polydraw_a64"

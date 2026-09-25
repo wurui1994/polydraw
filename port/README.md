@@ -96,7 +96,33 @@ kasm87() 编译本身                     0.0137 ms/趟
 * **那三个 `-Wno-`**：原文是 C89，clang 16 起把 implicit-int /
   implicit-function-declaration / int-conversion 提成了错误。
 
-还差 **78 个 win32 函数的实现**才能连成可执行（`nm -u bench/out/polydraw.o` 就是
-那张清单）。绝大多数在 `pd_win.c`（编辑器）里，出图只要 `pd_host_gl.c` +
-`pd_script.c` —— 按这个口径挑着补：计时/文件/ini 要真的，窗口/菜单/对话框/MIDI 空壳。
-`__try`/`__except`（`pd_script.c:295`）现在降成了"没有守护"，理由写在 `pd_port.h` 里。
+## 出图那一半：现在到哪儿了
+
+`bench/build-a64.sh` 一路走到 **`bench/out/polydraw_a64`（连上了）**。三份新实现：
+
+* `pd_win_a64.c` —— 81 个 win32 函数。计时（`QueryPerformanceCounter` ->
+  `clock_gettime`，频率报 1e9）、`GetModuleFileName`（`_NSGetExecutablePath`）、
+  ini 三个（真读写文件）是**真的**；窗口/菜单/光标/字体/对话框空壳回成功；
+  线程/管道/进程/MIDI 空壳回失败（polydraw 判返回值，回失败它就走单线程那条路）；
+* `pd_gl_cgl.c` —— `wgl*` 走 **CGL 离屏上下文**（不要 GLFW/NSOpenGL：不碰 AppKit、
+  不要主线程与 run loop）+ 一张 FBO 当"默认帧缓冲"。`wglGetProcAddress` 是
+  `dlsym(RTLD_DEFAULT, 名字)`（legacy GL 的符号全在 OpenGL.framework 里），
+  找不着就再试 `*EXT` / `*ARB`。`SwapBuffers` 就是**"一帧画完"的钩子**：数帧、
+  到点 `glReadPixels` 写 PNG（PNG 写出器也在这份里 —— kplib 只读不写，
+  deflate 用存储块）；
+* `pd_main_a64.c` —— `main()` 把 `.pss` 读进一格全局，**`GetWindowText` 回它**
+  （假编辑框，于是 `pd_script.c` 的 `Draw` 拿到的就是脚本正文），然后交给原文的
+  `WinMain`。命令行给 `/bench:N` —— 那是先前给 `polydraw.c` 加的插桩，它自己会
+  第 30 帧起计时、跑满 N 帧退出，于是**不用重写帧循环，只要喂它**。
+
+**现状（别夸大）**：跑得起来、不崩、PNG 写出来了 —— 但**画面是全透明黑，
+几何没落上去**。已经排掉的一条：读像素前把我们的 FBO 绑回来（polydraw 自己也用
+FBO，画完会 bind 回 0，而离屏根本没有"0"那张）—— 绑了还是黑。
+
+下一个探针（按这个顺序，别猜）：
+1. `pd_win.c:721` 的 `if (shadn[2]) Draw(...)` —— `Draw` 到底有没有被调？
+   `shadn[]` 是 `setShaders` 按 `txt2sec` 分的段数填的，假编辑框喂的文本
+   可能没被分进第 2 段（那是"主程序"段）；
+2. 真 `.pss` 会崩在 `kasm87c_run + 428`（一条 `ldr x9,[x9,#8]`）—— 那是
+   USERFUNC/KPTR 那条路，八成还是第 5 个洞（指针在 `parmdat` 里占 4 字节）。
+   `/tmp/t1.pss` 那种只有 `glBegin/glVertex/glEnd` 的不崩，说明分界就在参数形状上。
