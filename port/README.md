@@ -208,6 +208,36 @@ abort 那一族则要另一条路：`lldb -o "b malloc_error_break"` 看是谁�
   缝合文件用 `#define` 把调用点换过去，定义那边仍是真名）；
 * `PD_RUNDBG=1` 多了一行"带字符串的原型没接：|…|" —— 以后再冒出别的原型直接点名。
 
+## 第 21 个洞：**`rnd` 从一开始就是错的、`nrnd` 几乎死循环**（`krand` 的 32 位回绕）
+
+`eval/kasm_math.c:4`：
+
+```c
+static long krand () { kholdrand = (unsigned long)((kholdrand*(214013*2)+2531011*2)>>1); return(kholdrand); }
+```
+
+那句 `(unsigned long)` 在 32 位 x86 上是**32 位**：乘加自然回绕、`>>1` 之后落在
+`[0, 2^31)`，正好配 `oneover2_31`（`RND` 就是 `krand()*oneover2_31`，要的是 `[0,1)`）。
+LP64 上 `unsigned long` 是 64 位，**不回绕**：
+
+* 量到 `(){rnd}` = **-1043597862.5**（不是 `[0,1)`）—— 所有用 `rnd` 的脚本
+  画出来的东西都不对，只是"画出来了"所以一直没人看；
+* `NRND` 那个 Box-Muller 的拒绝采样 `do{…}while(r>=1)` 几乎**永不接受**
+  （x、y 都是天文数字），每次接受的概率约 2^-33 —— 这就是**两份超时的真正原因**
+  （`ken/balls.pss` / `particules_sparks`；采样 4004/4004 个样本全在 `nrnd` 里）。
+
+改法（`tools/mkmath.mjs` 生成 `port/a64/kasm_math_a64.c`，原文零改动）：
+把截断挪到**移位之前** —— `((unsigned int)(和) >> 1)`。
+**只把 `unsigned long` 换成 `unsigned int` 是不够的**：那样 `>>1` 还在 64 位里做，
+"先移位再截断"与"先回绕再移位"不是一回事（量到的还是 8515129.92）。
+
+效果：`(){rnd}` = 0.92、一千个样本均值 0.5038、`nrnd` = 0.594；
+**`ken/balls.pss` 从"超时（>3s/帧）"变成 25.7ms/帧（38.9 fps）**。
+
+**这一格的教训**：`bench/scan-a64.sh` 里"超时"那一类不要当成"算得久"就放过 ——
+先拿 `/usr/bin/sample` 打一发。4004/4004 个样本全落在一个函数里的形状，
+不是"慢"，是"死循环"。
+
 ## GUI 那条腿（`--gui`：真窗口 + 实时循环）
 
 `polydraw_a64 ken/ceilflor2.pss --gui --size 640x480` —— 开窗口、实时跑、
@@ -372,10 +402,14 @@ PD_JIT=1   ok 48 / 空画面 1 / 着色器错 2 / 崩 0 / 超时 2
 
 ## 整份语料的账（`bench/scan-a64.sh`，53 份）
 
-**ok 48 / 空画面 1 / 着色器错 2 / 崩 0 / 超时 2**（三轮前是 ok 34 / 崩 10，
-上一轮 ok 42 / 空画面 7）。表落 `bench/out/scan.tsv`，每份的 polydraw 诊断落
-`bench/out/scanlog/`。
+**ok 50 / 空画面 1 / 着色器错 2 / 崩 0 / 超时 0**
+（一路是 ok 34 崩 10 -> ok 42 空 7 -> ok 48 超时 2 -> **现在**）。
+**剩下的三份全在我们之外**：1 份是驱动语义（`geo_duptris`，见下）、
+2 份是 macOS legacy GL 只到 GLSL 1.20。换句话说**这台机器上画得出来的都画出来了**。
+表落 `bench/out/scan.tsv`，每份的 polydraw 诊断落 `bench/out/scanlog/`。
 
+* **超时 0** —— 第 21 个洞（`krand` 不回绕、`nrnd` 几乎死循环）清完，
+  先前那两份"超时"（balls / particules_sparks）**不是算得久，是死循环**；
 * **崩 0** —— 第 14~17 个洞清完，整份语料**再没有崩的**；
 * **空画面 1**：只剩 `geo_duptris`（几何着色器那一族）。已经量清的三件事：
   1. 参考（c_impl 的 `geo_duptris.pss_f30.png`）**只有 214 个非黑像素**（细白线），

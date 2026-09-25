@@ -45,6 +45,8 @@ typedef struct
 	unsigned int *c;   /* 指令流（A64 定长 4 字节） */
 	long n, max;       /* 已写几条 / 最多几条 */
 	int bad;           /* 碰上不会编的东西 */
+	long nfb;          /* 有几条走了解释器那格退路（`PD_JITDBG` 会印 —— 退路是**比解释器
+	                      自己那趟循环还慢**的，某份脚本反而变慢时先看这个数） */
 } pd_jb;
 
 static void pd_e (pd_jb *b, unsigned int w)
@@ -382,6 +384,7 @@ static double pd_a64_jit_one (char *parmdat, kcd_t *kcd, long i)
 /** 发一格"走解释器"的调用（实参是 parmdat / kcd / 指令下标）。 */
 static void pd_fallback (pd_jb *b, long i)
 {
+	b->nfb++;
 	pd_movx(b,0,PD_XPARM);
 	pd_movx(b,1,PD_XKCD);
 	pd_imm64(b,2,(unsigned long long)i);
@@ -659,6 +662,9 @@ static void pd_op (pd_jb *b, kcd_t *kcd, long i, pd_fix *fix, long *nfix)
  * `GOTO`/`IF*` 的目标是 `gasm` 下标，而原文那句是 `i = r[0].r;` 之后**再过一趟
  * `i++`** —— 所以真正的落点是 `r[0].r + 1`（这一格错了就是无声的死循环）。
  */
+/* 上一趟编译里有几条走了退路（只给 PD_JITDBG 印）。 */
+static long pd_jit_lastfb = 0;
+
 static void *pd_jit_build (kcd_t *kcd)
 {
 	pd_jb b;
@@ -672,7 +678,7 @@ static void *pd_jit_build (kcd_t *kcd)
 	at  = (long *)malloc((size_t)(n+1)*sizeof(long));
 	fix = (pd_fix *)malloc((size_t)(n+2)*sizeof(pd_fix));
 	if ((!b.c) || (!at) || (!fix)) { free(b.c); free(at); free(fix); return(0); }
-	b.n = 0; b.max = cap; b.bad = 0;
+	b.n = 0; b.max = cap; b.bad = 0; b.nfb = 0;
 
 	pd_prologue(&b,kcd);
 	for(i=0;i<n;i++)
@@ -751,6 +757,7 @@ static void *pd_jit_build (kcd_t *kcd)
 			else __builtin___clear_cache((char *)mem,(char *)mem+len);
 		}
 	}
+	pd_jit_lastfb = b.nfb;
 	free(b.c); free(at); free(fix);
 	return(mem);
 }
@@ -792,8 +799,8 @@ static void *pd_a64_jitfn (kcd_t *kcd)
 	pd_jitc[pd_jitcn].fn  = pd_jit_build(kcd);
 	if (getenv("PD_JITDBG"))
 	{
-		fprintf(stderr,"[jit] kcd %p gecnt %ld -> %s\n",(void *)kcd,(long)kcd->gecnt,
-			pd_jitc[pd_jitcn].fn ? "编出来了" : "编不出来（退回解释器）");
+		fprintf(stderr,"[jit] kcd %p gecnt %ld -> %s（%ld 条走退路）\n",(void *)kcd,(long)kcd->gecnt,
+			pd_jitc[pd_jitcn].fn ? "编出来了" : "编不出来（退回解释器）",pd_jit_lastfb);
 		if (atol(getenv("PD_JITDBG")) >= 2)
 			for(i=0;i<kcd->gecnt;i++)
 				fprintf(stderr,"[jit]   %3ld: f=%ld n=%ld r=%08lx/%08lx/%08lx\n",i,

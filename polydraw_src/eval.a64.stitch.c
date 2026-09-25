@@ -41,7 +41,7 @@
 #define KIMM 0xb0000000L
 
 #include "eval/kasm_cpu.c"
-#include "eval/kasm_math.c"
+#include "../port/a64/kasm_math_a64.c"
 #include "eval/kasm_dbg.c"
 #include "eval/kasm_name.c"
 #include "eval/kasm_grow.c"
