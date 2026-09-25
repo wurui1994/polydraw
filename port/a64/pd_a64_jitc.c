@@ -120,9 +120,16 @@ static void pd_fcsel (pd_jb *b, int dd, int dn, int dm, int cond)
 static void pd_cset (pd_jb *b, int rd, int cond)
 	{ pd_e(b,0x1A9F07E0u | ((unsigned)(cond^1)<<12) | (unsigned)rd); }
 
-/* SCVTF Dd,Wn（有符号 32 位整数 -> double）/ FCVTZS Xd,Dn（朝零截断） */
+/* SCVTF Dd,Wn（有符号 32 位整数 -> **double**）/ FCVTZS Xd,Dn（朝零截断）
+ *
+ * `0x1E620000` 里 bits23:22 = 01 是"目标是 double"。**先前写的是 `0x1E220000`
+ * （bits23:22 = 00 = single）**，于是六个比较与 LAND/LOR/NEQU0/SGN/UNIT 算出来的
+ * 是一格 float 的位模式塞在 d 里 —— 当条件用（非 0 即真）居然还对，所以 16 份
+ * 表达式判据全过；一旦把比较结果**当数用**（`(a<b)*c`）就整份画不出来。
+ * 语料扫描里 `空画面` 从 1 涨到 5 就是它。
+ */
 static void pd_scvtf_w (pd_jb *b, int dd, int wn)
-	{ pd_e(b,0x1E220000u | ((unsigned)wn<<5) | (unsigned)dd); }
+	{ pd_e(b,0x1E620000u | ((unsigned)wn<<5) | (unsigned)dd); }
 static void pd_fcvtzs_x (pd_jb *b, int xd, int dn)
 	{ pd_e(b,0x9E780000u | ((unsigned)dn<<5) | (unsigned)xd); }
 
@@ -537,8 +544,13 @@ static void pd_op (pd_jb *b, kcd_t *kcd, long i, pd_fix *fix, long *nfix)
 			if ((kcd->newvar[a->g].r & 0xf0000000) != KIMM) { b->bad = 1; return; }
 			dafunc = (void *)kcd->gevalext[kcd->newvar[a->g].r & 0x0fffffff].ptr;
 			cptr = &kcd->newvarnam[kcd->newvar[a->g].proti];
-			/* 原型串**不是 NUL 结尾**的（后面紧跟函数名），所以只看前 n 个字符。 */
-			for(j=0;j<a->n;j++) if ((cptr[j] != 'd') && (cptr[j] != 'D')) { b->bad = 1; return; }
+			/* 原型串**不是 NUL 结尾**的（后面紧跟函数名），所以只看前 n 个字符。
+			   `C`（`char *`）与 `D`（`double *`）在这一层是同一件事：递的都是**操作数的
+			   地址**（串操作数在 `globval` 里 —— KSTR 在 `kasm_comp.c:313` 被改成
+			   `KEDX+gccnt*8`，所以那一格的地址就是串的地址。解释器那侧第 18 个洞
+			   补的正是这一族）。 */
+			for(j=0;j<a->n;j++)
+				if ((cptr[j] != 'd') && (cptr[j] != 'D') && (cptr[j] != 'C')) { b->bad = 1; return; }
 			/* **脚本自己那些函数**（`pd_a64_owns`）：入口是真变参（`kasm87c(double,...)`），
 			   Apple 上变参实参全走栈 —— 与其在这儿重铺一遍，不如把操作数地址摆成
 			   `double *p[17]` 那张表，原样递给现成的 `pd_a64_call_script`
@@ -568,7 +580,7 @@ static void pd_op (pd_jb *b, kcd_t *kcd, long i, pd_fix *fix, long *nfix)
 					pd_load(b,kcd,rp,(int)nd,PD_XS0);
 					nd++;
 				}
-				else
+				else   /* 'D' 与 'C' 都是"递地址" */
 				{
 					if (np >= 8) { b->bad = 1; return; }
 					pd_addrof(b,kcd,rp,(int)np,PD_XS0);
@@ -608,6 +620,23 @@ static void *pd_jit_build (kcd_t *kcd)
 	for(i=0;i<n;i++)
 	{
 		at[i] = b.n;
+		/* `PD_JITNO=f1,f2,…`：**拒编含这几号指令的整份** —— 二分"是哪一族错了"就靠它。
+		   （f 的编号是 `eval.c:251` 那张 enum：TIMES=28、PEEK=48、POKE=50、USERFUNC=56…） */
+		{
+			const char *no = getenv("PD_JITNO");
+			if (no)
+			{
+				char want[16]; long k;
+				snprintf(want,sizeof(want),"%ld",(long)kcd->gasm[i].f);
+				for(k=0;no[k];k++)
+				{
+					if ((k) && (no[k-1] != ',')) continue;
+					if (!strncmp(&no[k],want,strlen(want))
+						&& ((no[k+strlen(want)] == 0) || (no[k+strlen(want)] == ','))) { b.bad = 1; break; }
+				}
+				if (b.bad) break;
+			}
+		}
 		pd_op(&b,kcd,i,fix,&nfix);
 		if (b.bad) break;
 	}
@@ -661,7 +690,11 @@ static int pd_jit_get_mode (void)
 	if (pd_jit_mode < 0)
 	{
 		const char *s = getenv("PD_JIT");
-		pd_jit_mode = (!s) ? 1 : atoi(s);
+		/* **默认先关着**：语料扫描里还有两份（`ken/heightmap.pss` / `ken/texture3d.pss`）
+		   开着 JIT 会从"出得来图"退成"空画面"，根因还没定到（两份都只差 2 色对 1 色，
+		   在边上，但那仍然是退步）。查错的手法与开关见 `port/README.md`。
+		   等那两份清了再把默认改成开。 */
+		pd_jit_mode = (!s) ? 0 : atoi(s);
 		if (pd_jit_mode < 0) pd_jit_mode = 0;
 	}
 	return(pd_jit_mode);
@@ -674,11 +707,24 @@ static void *pd_a64_jitfn (kcd_t *kcd)
 	if (!pd_jit_get_mode()) return(0);
 	for(i=0;i<pd_jitcn;i++) if (pd_jitc[i].kcd == kcd) return(pd_jitc[i].fn);
 	if (pd_jitcn >= PD_JIT_CACHE) return(0);
+	/* `PD_JITMAX=n`：只编指令数 <= n 的那些 —— 出了错拿它二分（哪一份 kcd 的锅）。 */
+	{
+		const char *mx = getenv("PD_JITMAX");
+		if ((mx) && (kcd->gecnt > atol(mx))) { pd_jitc[pd_jitcn].kcd = kcd; pd_jitc[pd_jitcn++].fn = 0; return(0); }
+	}
 	pd_jitc[pd_jitcn].kcd = kcd;
 	pd_jitc[pd_jitcn].fn  = pd_jit_build(kcd);
 	if (getenv("PD_JITDBG"))
+	{
 		fprintf(stderr,"[jit] kcd %p gecnt %ld -> %s\n",(void *)kcd,(long)kcd->gecnt,
 			pd_jitc[pd_jitcn].fn ? "编出来了" : "编不出来（退回解释器）");
+		if (atol(getenv("PD_JITDBG")) >= 2)
+			for(i=0;i<kcd->gecnt;i++)
+				fprintf(stderr,"[jit]   %3ld: f=%ld n=%ld r=%08lx/%08lx/%08lx\n",i,
+					(long)kcd->gasm[i].f,(long)kcd->gasm[i].n,
+					(unsigned long)kcd->gasm[i].r[0].r,(unsigned long)kcd->gasm[i].r[1].r,
+					(unsigned long)kcd->gasm[i].r[2].r);
+	}
 	return(pd_jitc[pd_jitcn++].fn);
 }
 
