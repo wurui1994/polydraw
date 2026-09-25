@@ -282,7 +282,12 @@ tigrou/clock.pss      1322 fps   0.756 ms/帧
   先去看参考画的是什么；
 * **着色器错 2**：`gspiral`（`&` 用在 int 上）、`mipmap`（`texture2DLod` 没声明）
   —— 都是 GLSL 1.20 的上限（macOS legacy profile），不是移植的洞；
-* **超时 2**：`balls`（16384 个球在解释器上跑）、`particules_sparks`。
+* **超时 2**：`balls`（16384 个球）、`particules sparks`。**不是卡死，是真的在算** ——
+  跑着的时候 attach 上去，栈是 `kasm87c_run <- kasm87cp <- WinMain`（深度 1，
+  就是脚本主函数那一圈），两份都 > 3 s/帧。这两格属于**性能**，
+  补法是 arm64 的真 JIT（ADR-0045），不是移植的洞。
+  顺带记一笔：`/bench:N` 的口径是"30 帧暖机 + N 帧计时"，所以慢脚本连一个数都拿不到
+  （31 帧 x 3s 就超 90s）；要量它们用 **GUI 档的标题 fps**，那个没有暖机门槛。
 
 ms/帧（离屏 320x240 + 纯 C 解释器，`/bench:30` 的口径 = 30 帧暖机 + 30 帧计时）：
 最快一档 `multiarb_asm` 0.379、`cubetex` 0.437、`ceilflor2` 0.448；
