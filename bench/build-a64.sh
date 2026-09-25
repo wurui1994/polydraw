@@ -53,7 +53,7 @@ echo "== polydraw（只到 .o）"
 $CC -arch arm64 $OPT -fms-extensions \
 	-Wno-implicit-int -Wno-implicit-function-declaration -Wno-int-conversion -w \
 	-I polydraw_src -I port/a64/winshim -include port/pd_port.h \
-	-c polydraw_src/polydraw.stitch.c -o "$OUT/polydraw.o"
+	-c polydraw_src/polydraw.a64.stitch.c -o "$OUT/polydraw.o"
 echo "-> $OUT/polydraw.o"
 
 # 连成可执行：polydraw.o + kplib.o + eval.o + 那三份 port/a64 的实现。

@@ -49,14 +49,19 @@
 #include "eval/kasm_emit.c"
 #include "eval/kasm_opt.c"
 
-#define kasm87c  kasm87c_x86
-#define kasm87cp kasm87cp_x86
+#define kasm87c     kasm87c_x86
+#define kasm87cp    kasm87cp_x86
+#define kasm87c_run kasm87c_run_x86
 #include "eval/kasm_interp.c"
 #undef kasm87c
 #undef kasm87cp
+#undef kasm87c_run
 
-#include "../port/a64/pd_a64_parm.c"
+/* 次序：jit（thunk 与 pd_a64_owns）-> run（真的 kasm87c_run，要 pd_a64_owns）
+   -> parm（真的 kasm87c/kasm87cp，要 kasm87c_run）。 */
 #include "../port/a64/pd_a64_jit.c"
+#include "../port/a64/pd_a64_run.c"
+#include "../port/a64/pd_a64_parm.c"
 
 #define kasm87c_copyglob2struct pd_a64_copyglob2struct
 #define kasm87free              kasm87free_x86

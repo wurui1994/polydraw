@@ -64,63 +64,35 @@
    （`sillydualfunc`、`dumbanglefunc`、`getunitvector`、`getcol`、
    数组按指针传的 `1,2,3 / 3,5,3 / 8,8,3` 全逐个对上）。
 
-7. **还没补：宿主函数是用变参函数指针调的**。`kasm_interp.c:140` 把它声明成
+7. **宿主函数是用变参函数指针调的**（已补）。`kasm_interp.c:140` 把它声明成
    `double (__cdecl *)(double,...)`，然后 `dafunc(*p[1],*p[2],*p[3])`。
    在 x86 上变参与定参的调用约定一样（全压栈），所以没事；
    **Apple 的 arm64 上变参实参一律走栈**，而 `qglVertex3d(double,double,double)`
    是定参、从 d0/d1/d2 取 —— 于是只有第一个实参对。
    量到的：脚本写 `glVertex(-1,-1,-2)`，`qglVertex3d` 收到 `(-1,-2,-1)`。
-   **这就是"画面全黑"的根**：调用都发生了、GL 没报错、FBO 也绑对了，
-   只是坐标是垃圾。
+   —— `port/a64/pd_a64_run.c`（**由 `tools/mkrun.mjs` 生成**，`diff` 可审）：
+   那个大 switch 里 52 处 `dafunc(…)` 全换成精确原型的强转；
+   而**脚本自己的函数是真变参**（走 thunk），`pd_a64_owns()` 把它分出去，
+   自己摊一份 parmdat 直接递归调 `kasm87c_run`。
+   补完之后 `qglColor3d(1,0,0)` / `qglVertex3d(-1,-1,-2)` 逐个对上。
 
-   下一刀：fork `kasm87c_run`（缝合文件里 `#define` 改名），把那个大 switch 里
-   每一处 `dafunc(...)` 换成**精确原型**的强转。要分两档 ——
-   宿主 C 函数是定参、而脚本自己的函数（走我们的 thunk）是变参，
-   `pd_a64_owns()` 正好能分开：属于我们的那一档不走变参，直接摊 parmdat
-   调 `kasm87c_run`。
+   原文的既有缺口（不是我们弄的）：那个 switch 的原型只认 `d`/`D`，没有 `C`
+   （char *）—— 所以 `printf("…")` 这种带字符串的宿主函数在 COMPILE==0 那条路上
+   本来就不会被调（而且 `myprintf` 自己是真变参，按定参强转也不对）。
 
-## 现在能跑到哪儿
+8. **polydraw 的控制台要转到 stderr**。`kputs`（`pd/pd_cons.c:4`）往编辑器那个
+   控制台窗口写，我们的窗口是空壳 —— 于是着色器编译错误、脚本编译错误、
+   `compile frag#0` 这种进度**一个字都看不见**，查问题等于闭着眼睛。
+   —— `polydraw.a64.stitch.c` 把它改名成 `kputs_win32`，真名归
+   `port/a64/pd_cons_a64.c`（印到 stderr）。开了之后第一次看到
+   `GL_VERSION: 2.1 Metal - 91.7` / `GLSL_VERSION: 1.20` / `compile vert#0` ——
+   一切正常，于是排掉了"着色器没过"这条。
 
-```
-$ bench/build-a64.sh          # 编（clang -O2，arm64）
-$ bench/test-a64.sh           # 判据：16/16
-```
-
-那 16 格压的是：算术与优先级、`for` 循环、`*=`/`-=`、多函数脚本、
-**递归**（`f(5)=120`、`fib(7)=13`）、`static`、内建函数。
-
-量尺（`bench/out/eval_bench`，换掉了 Ken 那个永远印 `0 cc` 的 main）——
-这台机器（arm64 macOS，clang -O2，**纯 C 解释器**，不是 JIT）：
-
-```
-(x)x+1                                0.0140 us/趟
-(x)sin(x)*cos(x)+sqrt(x)              0.0385 us/趟
-(x){s=0;for(i=0;i<x;i++)s=s+i*i;s} 1000  28.80 us/趟（≈ 28.8ns 一圈，一圈三个算子）
-kasm87() 编译本身                     0.0137 ms/趟
-```
-
-**这不是 x87 JIT 那把尺子** —— 那把尺子只在 Windows/x86 上（`bench/build.cmd`
-加 `/bench:N`）。这一列是"解释器在 arm64 上的地板"，真的 arm64 JIT 要拿它当参照物。
-
-下一步（ADR-0045 D2）：真的 arm64 后端 —— 不再走解释器，把 `gasm[]` 直接
-落成 arm64 机器码。thunk 这一格已经把"生成可执行内存"这条路走通了。
-
-再往后（出图那一半）：`kplib.c` 在 arm64 上**零错误**直接编过；`polydraw.c` 现在
-也**编过了（0 错误）**，靠的是 `port/a64/winshim/` 那几份**假头文件** ——
-`pd/pd_head.h` 那 18KB 一个字节都没改。
-
-三处不显然的地方：
-
-* **`gl/gl.h`**：Windows 那份只有 GL 1.1，GL 2.0 那一批（`glUniform*` /
-  `glCreateShader` …）在 polydraw 里是**自己一张函数指针表**。macOS 的
-  `OpenGL/gl.h` 把它们当真函数声明了 —— 43 个 redefinition。办法是先把 SDK 那份
-  包进来（真函数照旧叫原名），**然后把那 43 个名字 `#define` 成 `pd_*`**：
-  宏从那一行往后生效，于是 `pd_head.h` 的指针表与后面全部调用点一致改名，自己一套；
-* **`-fms-extensions`**：`10000000000000I64` 这种 MSVC 整数后缀
-  （`pd_host_gl.c:722`）。字面量后缀是 pp-number 的一部分，宏碰不到它，
-  只能靠编译器开关；
-* **那三个 `-Wno-`**：原文是 C89，clang 16 起把 implicit-int /
-  implicit-function-declaration / int-conversion 提成了错误。
+9. **FBO 只建一次、存图取 viewport 那一块**。先前按 viewport 重建 FBO，
+   而 polydraw 是**先画、我们后才知道 viewport 多大** —— 重建把第 0 帧的画面
+   丢掉了。现在一次建 2048x1536，存图只读当前 viewport 的子矩形。
+   另外 `glBindFramebufferEXT(…,0)` 翻成"绑我们那张"（离屏没有 0 号那张）——
+   不过量下来 polydraw 这一趟压根没调它（那三个 FBO 入口有一个是空的）。
 
 ## 出图那一半：现在到哪儿了
 
@@ -141,34 +113,15 @@ kasm87() 编译本身                     0.0137 ms/趟
   `WinMain`。命令行给 `/bench:N` —— 那是先前给 `polydraw.c` 加的插桩，它自己会
   第 30 帧起计时、跑满 N 帧退出，于是**不用重写帧循环，只要喂它**。
 
-**现状（别夸大）**：跑得起来、不崩、PNG 写出来了 —— 但**画面是全透明黑，
-几何没落上去**。已经排掉的一条：读像素前把我们的 FBO 绑回来（polydraw 自己也用
-FBO，画完会 bind 回 0，而离屏根本没有"0"那张）—— 绑了还是黑。
+**现状**：`ken/ceilflor2.pss` 与 `tigrou/clock.pss` **真出图了**
+（1074 / 155 种颜色，不是空画面）。判据 `bench/render-a64.sh` 现在 **2/5**。
 
-下一个探针（按这个顺序，别猜）：
-1. **`Draw` 大概率压根没被调**。`pd_win.c:721` 是 `if (shadn[2]) Draw(...)`，而
-   `shadn[2]` 是"片元着色器有几个"。链路是这样的（照 `pd_script.c` 读的）：
-   `txt2sec` 按行首的 `@` 分段，`typ` 0=`@h`（主脚本）/1=`@v`/2=`@g`/3=`@f`；
-   `setShaders:171` 那个循环 `if (!tsec[tseci].typ) continue;` —— **主脚本那一段
-   直接跳过**；而 `:180` 的 `if (!needrecompile) return;` 对"只有主脚本"的
-   `.pss`（`ken/balls.pss`、`ceilflor2.pss` 都是）恰好成立，于是 `shadn[2]` 一直是 0。
-   所以要么 Windows 上有别处给它塞了一个**默认片元着色器**（`setshader_int(0,-1,0)`
-   那一句最可疑），要么我们喂进去的文本没被 `txt2sec` 当成一段。
-   **量过了**（lldb 直接读那几个 static，没碰原文）：
-   `tsecn=1 / tsec[0].typ=0 / shadn={0,0,0} / gevalfunc=0` ——
-   假编辑框是好的（`tsec[0]` 的 120 字节就是我们喂的脚本），拦住的就是 `shadn[2]`。
-2. **给脚本补一个 `@f` 段，`Draw` 就进去了** —— 然后崩在 `kasm87c_run + 428`，
-   与真 `.pss`（`ken/ceilflor2.pss`）**同一处**。那一行是 `kasm_interp.c:79`：
+剩下那一格（还没查清）：**脚本的绘制只在第 0 帧发生** —— 整趟里 `qglBegin`
+只被调了一次，后面每帧被 `glClear` 清成空的。所以默认存第 0 帧（`PD_SHOT=n` 可改），
+而 `texture` / `gspiral` / `orthoglobe` 这些要靠 `numframes==0` 那个初始化块或
+纹理上传的，第 0 帧还没画东西，于是判据里是红的。
 
-   ```c
-   if ((r&0xf0000000) == KPTR) p[j] = (*(double **)p[j]) + q;
-   ```
-
-   `plst[KPTR>>28] = (long)parmdat-KPTR`，于是 `p[j]` 指着 `parmdat` 里某一格，
-   再按 `double **` 解引用 —— 在 arm64 上读 **8 个字节**，而写那一格的
-   `kasm87cp` 是按"指针 4 字节"排的偏移（`j += 4`），编译期给参数分偏移那一段
-   （`newvar[].r` 的 KESP 偏移）也是 4。反汇编 `ldr x9,[x9,#8]` 正好对上。
-
-   **所以出图剩下的就是第 5 个洞那一件事**：参数区的指针宽度 4 -> 8。
-   要动"编译期分偏移"与 `kasm87cp`/`kasm87c` 写变参那两处 —— 都在原文里，
-   得按现在这套办法（缝合文件里 `#define` 改名 + 新文件）换掉那几格。
+怀疑在 polydraw 侧：`gevalfunc` 疑似被 `Draw` 收尾时放掉，而 `setShaders` 的重编译
+只在文本变了才做（`:180` 的 `if (!needrecompile) return;`）—— 于是第二帧起
+`if ((!shadn[2]) || (!gevalfunc))` 那一支把脚本跳过。**下一步就量这一条**：
+在 `Draw` 里外各打一个点看 `gevalfunc` 什么时候变 0。

@@ -45,6 +45,26 @@ int pd_gl_resize (int w, int h)
 	return(1);
 }
 
+/* 给调试器用的探针：`expr (void)pd_gl_probe("tag")` —— 把当帧的 GL 关键状态印出来。
+   （lldb 里直接调 glGetIntegerv 要写一堆强转，包一层省事。） */
+void pd_gl_probe (const char *tag)
+{
+	GLint fb = 0, pr = 0, dt = 0, cf = 0, bl = 0, vp[4] = {0,0,0,0};
+	GLdouble mv[16], pj[16];
+	glGetIntegerv(0x8CA6/*FRAMEBUFFER_BINDING_EXT*/,&fb);
+	glGetIntegerv(0x8B8D/*CURRENT_PROGRAM*/,&pr);
+	glGetIntegerv(GL_DEPTH_TEST,&dt);
+	glGetIntegerv(GL_CULL_FACE,&cf);
+	glGetIntegerv(GL_BLEND,&bl);
+	glGetIntegerv(GL_VIEWPORT,vp);
+	glGetDoublev(GL_MODELVIEW_MATRIX,mv);
+	glGetDoublev(GL_PROJECTION_MATRIX,pj);
+	fprintf(stderr,"[probe %s] fb=%d(ours=%u) prog=%d depth=%d cull=%d blend=%d vp=%d,%d,%d,%d err=%04x\n",
+		tag,fb,pd_fbo,pr,dt,cf,bl,vp[0],vp[1],vp[2],vp[3],(unsigned)glGetError());
+	fprintf(stderr,"[probe %s] mv[0,5,10,12,13,14]=%g,%g,%g,%g,%g,%g  pj[0,5,10,11,14]=%g,%g,%g,%g,%g\n",
+		tag,mv[0],mv[5],mv[10],mv[12],mv[13],mv[14],pj[0],pj[5],pj[10],pj[11],pj[14]);
+}
+
 int pd_gl_size (int *w, int *h) { if (w) *w = pd_fbw; if (h) *h = pd_fbh; return(pd_fbo != 0); }
 
 HGLRC wglCreateContext (HDC dc)
@@ -69,7 +89,10 @@ BOOL wglMakeCurrent (HDC dc, HGLRC rc)
 	(void)dc;
 	if (!rc) { CGLSetCurrentContext(0); return(1); }
 	if (CGLSetCurrentContext((CGLContextObj)rc) != kCGLNoError) return(0);
-	if (!pd_fbo) pd_gl_resize(640,480);
+	/* **一次建足够大**（不按 viewport 重建）：重建会把已经画进去的内容丢掉，
+	   而 polydraw 是先画、后我们才知道 viewport 多大 —— 踩过一次，第 0 帧的画面
+	   就是这么丢的。存图时只取 viewport 那一块。 */
+	if (!pd_fbo) pd_gl_resize(2048,1536);
 	else glBindFramebufferEXT(GL_FRAMEBUFFER_EXT,pd_fbo);
 	return(1);
 }
@@ -81,12 +104,34 @@ BOOL wglDeleteContext (HGLRC rc)
 	return(1);
 }
 
+/* ── 把"绑定 0 号帧缓冲"翻成"绑定我们那张 FBO" ──
+ *
+ * 离屏根本没有"0"那张。而 polydraw 在 `pd_host_gl.c:301` 用 `…(GL_FRAMEBUFFER_EXT,0)`
+ * 去"restore"（`printg_init` 与每次 `glsettex` 都走这条），一绑就把我们那张换下来 ——
+ * 后面画的东西全进了不存在的默认帧缓冲，于是**存出来的图全透明黑**。
+ * 量到过：`qglEnd` 那一刻 `FRAMEBUFFER_BINDING` 是 0、viewport 是 0,0,0,0。
+ *
+ * polydraw 这一族是走 `wglGetProcAddress` 填的函数指针表，所以在那儿掉包就行。
+ */
+static void (*pd_real_bindfb)(GLenum, GLuint) = 0;
+static void pd_bindfb_wrap (GLenum target, GLuint fb)
+{
+	if (!fb) fb = pd_fbo;
+	if (getenv("PD_FBDBG")) fprintf(stderr,"[bind] frame=%ld -> %u\n",(long)0,fb);
+	if (pd_real_bindfb) pd_real_bindfb(target,fb);
+}
+
 /* `wglGetProcAddress`：polydraw 靠它填那张 GL 2.0 的函数指针表。
    macOS 没有对应的 API —— 但 legacy GL 的符号全在 OpenGL.framework 里，
    所以 `dlsym(RTLD_DEFAULT, 名字)` 就是答案。 */
 void *wglGetProcAddress (LPCSTR nam)
 {
 	void *p = dlsym(RTLD_DEFAULT,nam);
+	if (!strcmp(nam,"glBindFramebufferEXT") || !strcmp(nam,"glBindFramebuffer"))
+	{
+		if (!p) p = dlsym(RTLD_DEFAULT,"glBindFramebufferEXT");
+		if (p) { pd_real_bindfb = (void (*)(GLenum,GLuint))p; return((void *)pd_bindfb_wrap); }
+	}
 	if (!p)
 	{
 		/* 有几个在 macOS 上只有 `*EXT`/`*ARB` 那一版（FBO 一族就是）。 */
@@ -196,12 +241,37 @@ BOOL SwapBuffers (HDC dc)
 		glGetIntegerv(0x8CA6/*GL_FRAMEBUFFER_BINDING_EXT*/,&fb);
 		glGetIntegerv(GL_DRAW_BUFFER,&dr);
 		glGetIntegerv(GL_VIEWPORT,vp);
+		{
+			unsigned char c4[4] = {9,9,9,9};
+			glReadPixels(pd_fbw/2,pd_fbh/2,1,1,GL_RGBA,GL_UNSIGNED_BYTE,c4);
+			fprintf(stderr,"[gl] 中心像素 %d,%d,%d,%d\n",c4[0],c4[1],c4[2],c4[3]);
+		}
 		fprintf(stderr,"[gl] frame=%ld fb=%d(ours=%u) drawbuf=%04x vp=%d,%d,%d,%d err=%04x\n",
 			(long)pd_frame,fb,pd_fbo,dr,vp[0],vp[1],vp[2],vp[3],(unsigned)e);
 	}
-	glGetIntegerv(GL_VIEWPORT,vp);
-	if ((vp[2] > 0) && (vp[3] > 0) && ((vp[2] != pd_fbw) || (vp[3] != pd_fbh)))
-		{ pd_gl_resize(vp[2],vp[3]); glViewport(0,0,vp[2],vp[3]); }
+	if (getenv("PD_GLPROBE"))
+	{
+		/* 二分：拿 polydraw **当前的**状态画同一个四边形，然后逐样撤掉状态再画，
+		   看哪一样一撤就出来 —— 那就是吃掉画面的那一格。 */
+		unsigned char c4[4];
+		int k;
+		for(k=0;k<4;k++)
+		{
+			const char *what = "原样";
+			if (k == 1) { glUseProgram(0); what = "+去着色器"; }
+			if (k == 2) { glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); what = "+去深度/剔除"; }
+			if (k == 3) { glMatrixMode(GL_PROJECTION); glLoadIdentity();
+			              glMatrixMode(GL_MODELVIEW);  glLoadIdentity(); what = "+单位矩阵"; }
+			glBegin(GL_QUADS);
+			glColor3d(0,1,0);
+			glVertex3d(-1,-1,-2); glVertex3d(1,-1,-2); glVertex3d(1,1,-2); glVertex3d(-1,1,-2);
+			glEnd();
+			glFinish();
+			glReadPixels(pd_fbw/2,pd_fbh/2,1,1,GL_RGBA,GL_UNSIGNED_BYTE,c4);
+			fprintf(stderr,"[bisect] %-14s -> %d,%d,%d,%d err=%04x\n",what,c4[0],c4[1],c4[2],c4[3],(unsigned)glGetError());
+		}
+	}
+	(void)vp;
 	if ((pd_frame == pd_shot) && pd_shot_path && pd_fbo)
 	{
 		unsigned char *px = (unsigned char *)malloc((size_t)pd_fbw*(size_t)pd_fbh*4);
@@ -209,11 +279,16 @@ BOOL SwapBuffers (HDC dc)
 		{
 			/* polydraw 自己也用 FBO（render-to-texture），画完会 bind 回 0 ——
 			   而离屏根本没有0这张。读之前先把我们的绑回来。 */
+			GLint vv[4] = {0,0,pd_fbw,pd_fbh};
 			glBindFramebufferEXT(GL_FRAMEBUFFER_EXT,pd_fbo);
+			/* FBO 是一次建的大张（见 pd_gl_resize 的注），**存图只取当前 viewport
+			   那一块** —— 那才是 polydraw 的渲染窗格。 */
+			glGetIntegerv(GL_VIEWPORT,vv);
+			if ((vv[2] <= 0) || (vv[3] > pd_fbh) || (vv[2] > pd_fbw)) { vv[0] = vv[1] = 0; vv[2] = pd_fbw; vv[3] = pd_fbh; }
 			glPixelStorei(GL_PACK_ALIGNMENT,1);
-			glReadPixels(0,0,pd_fbw,pd_fbh,GL_RGBA,GL_UNSIGNED_BYTE,px);
-			if (pd_write_png(pd_shot_path,px,pd_fbw,pd_fbh))
-				fprintf(stderr,"[png] %s  %dx%d（第 %ld 帧）\n",pd_shot_path,pd_fbw,pd_fbh,pd_frame);
+			glReadPixels(vv[0],vv[1],vv[2],vv[3],GL_RGBA,GL_UNSIGNED_BYTE,px);
+			if (pd_write_png(pd_shot_path,px,vv[2],vv[3]))
+				fprintf(stderr,"[png] %s  %dx%d（第 %ld 帧）\n",pd_shot_path,vv[2],vv[3],pd_frame);
 			free(px);
 		}
 	}

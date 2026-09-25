@@ -37,6 +37,12 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+/* 这三个定义在后面两份里（pd_a64_parm.c / 本文件用得到的那两个入口），
+   先报个名 —— C 里 static 的前向声明加后面的定义是合法的。 */
+static void pd_a64_widen_parms (kcd_t *kcd);
+double __cdecl kasm87c (double first, ...);
+double __cdecl kasm87cp (double *first, ...);
+
 #define PD_SLOT 96
 #define PD_SLOT_CODE 56
 #define PD_PAGE (64*1024)

@@ -72,7 +72,18 @@ int main (int argc, char **argv)
 	if (!pd_load(src)) return(66);
 
 	/* 最后一帧存图。`/bench:N` 的口径是"30 帧暖机 + N 帧计时"，所以总帧数是 N+30。 */
-	pd_gl_shoot_at((long)frames+29,out);
+	/* PD_SHOT=n 存第 n 帧（调试用）。量到过一件还没查清的事：脚本的绘制只在第 0 帧
+	   发生（整趟里 qglBegin 只被调了一次），所以默认那个第 frames+29 帧拿到的是
+	   被 glClear 清过的空画面。 */
+	{
+		const char *sh = getenv("PD_SHOT");
+		/* 默认存**第 0 帧**。为什么不是最后一帧：量到脚本的绘制只在第 0 帧发生
+		   （整趟里 `qglBegin` 只被调了一次），后面每帧被 glClear 清成空的 ——
+		   那是 polydraw 侧还没查清的一格（`gevalfunc` 疑似被 Draw 收尾时放掉，
+		   而重编译只在文本变了才做）。查清之前，第 0 帧是唯一有画面的一帧。
+		   `PD_SHOT=n` 可以改。 */
+		pd_gl_shoot_at(sh ? atol(sh) : 0,out);
+	}
 
 	/* 交给原文的 WinMain。`/bench:N` 让它别等焦点、别 Sleep(1)，并自己计时。 */
 	snprintf(cmd,sizeof(cmd),"/bench:%d /%dx%d",frames,w,h);
