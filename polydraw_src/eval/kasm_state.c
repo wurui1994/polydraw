@@ -150,5 +150,3 @@ static long patchnum = 0, maxpatch = 0;
 static long round0msk[2048][2];
 //--------------------------------------------------
 static long cputype = 0, cpuinited = 0;
-
-#ifdef _MSC_VER

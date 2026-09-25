@@ -46,5 +46,3 @@ enum //kpgetdim() return values:
 #if defined(__POWERPC__)
 #define BIGENDIAN 1
 #endif
-
-#ifdef BIGENDIAN

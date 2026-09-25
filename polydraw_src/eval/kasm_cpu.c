@@ -1,3 +1,6 @@
+
+
+#ifdef _MSC_VER
 static _inline long testflag (long c)
 {
 	_asm

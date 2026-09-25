@@ -1,4 +1,12 @@
 
+
+#if (COMPILE == 0)
+
+	//kasm87c: similar functionality to kasm87, but pure C code - making it slower and more portable
+
+	//ANSI va_arg: supported on all compilers
+#include <stdarg.h>
+
 static long gkasm87cptr;
 typedef struct
 {

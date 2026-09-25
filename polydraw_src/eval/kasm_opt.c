@@ -684,10 +684,3 @@ static long kasmoptimizations (long mingecnt, long duringparse)
 	} while (got);
 	return(0);
 }
-
-#if (COMPILE == 0)
-
-	//kasm87c: similar functionality to kasm87, but pure C code - making it slower and more portable
-
-	//ANSI va_arg: supported on all compilers
-#include <stdarg.h>

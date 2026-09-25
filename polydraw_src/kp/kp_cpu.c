@@ -1,3 +1,5 @@
+
+#ifdef BIGENDIAN
 static unsigned int LSWAPIB (unsigned int a) { return(((a>>8)&0xff00)+((a&0xff00)<<8)+(a<<24)+(a>>24)); }
 static unsigned short SSWAPIB (unsigned short a) { return((a>>8)+(a<<8)); }
 #define LSWAPIL(a) (a)
