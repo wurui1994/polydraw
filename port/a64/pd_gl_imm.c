@@ -124,7 +124,7 @@ void pd_imm_flush (void)
 	B_n = 0; B_mode = -1;
 }
 
-/* 把这一格图元的第 i 个顶点推进攒批里。 */
+/* 把 scratch 里的第 i 个顶点推进攒批里（只有"要重排"的图元才走这条路）。 */
 static void bput (long i)
 {
 	float *d, *s;
@@ -136,29 +136,50 @@ static void bput (long i)
 	B_n++;
 }
 
+/**
+ * **这一格图元用不用重排**（回 -1 = 要重排；否则回"直接留下几个顶点"）。
+ *
+ * 顶点是**直接写在攒批末尾**的（`addv`），所以三角化正好是恒等置换的时候
+ * 一个字节都不用抄 —— `glBegin(GL_POLYGON)` 收三个顶点（`ken/balls.pss` 那种）、
+ * `GL_TRIANGLES` 收 3n 个、`GL_LINES` 收 2n 个、`GL_POINTS` 任意个，全落在这一档。
+ * 扇形/条带/四边形那几族要复制顶点，才抄一趟到 scratch 再展开。
+ */
+static long keep_as_is (int mode, long k)
+{
+	switch(mode)
+	{
+		case GL_POINTS: return(k);
+		case GL_LINES: return(k - (k%2));
+		case GL_TRIANGLES: return(k - (k%3));
+		case GL_TRIANGLE_FAN: case GL_POLYGON: case GL_TRIANGLE_STRIP:
+			if (k <= 3) return((k >= 3) ? 3 : 0);
+			return(-1);
+		case GL_LINE_STRIP: case GL_LINE_LOOP:
+			if (k <= 2) return((k >= 2) ? 2 : 0);
+			return(-1);
+		default: return(-1);
+	}
+}
+
 /* 这一格图元三角化（线那一族拆成独立线段）并推进攒批。 */
 static void emit_prim (void)
 {
-	long i;
-	int tgt;
+	long i, keep = keep_as_is(P_mode,P_n);
+	if (keep >= 0) { B_n += keep; P_n = 0; P_mode = -1; if (B_n >= PD_IMM_CAP) pd_imm_flush(); return; }
+	/* 要重排：先把这一格图元那 P_n 个顶点抄进 scratch（它们就在攒批末尾），再展开。 */
+	if (!agrow(&P_pos,&P_col,&P_tex,&P_nrm,&P_cap,P_n))
+		{ P_n = 0; P_mode = -1; return; }
+	memcpy(P_pos,&B_pos[B_n*4],(size_t)P_n*4*sizeof(float));
+	memcpy(P_col,&B_col[B_n*4],(size_t)P_n*4*sizeof(float));
+	memcpy(P_tex,&B_tex[B_n*4],(size_t)P_n*4*sizeof(float));
+	memcpy(P_nrm,&B_nrm[B_n*3],(size_t)P_n*3*sizeof(float));
 	switch(P_mode)
 	{
-		case GL_POINTS: tgt = GL_POINTS; break;
-		case GL_LINES: case GL_LINE_STRIP: case GL_LINE_LOOP: tgt = GL_LINES; break;
-		default: tgt = GL_TRIANGLES; break;
-	}
-	if ((B_mode >= 0) && (B_mode != tgt)) pd_imm_flush();
-	B_mode = tgt;
-	switch(P_mode)
-	{
-		case GL_POINTS: for(i=0;i<P_n;i++) bput(i); break;
-		case GL_LINES: for(i=0;i+1<P_n;i+=2) { bput(i); bput(i+1); } break;
 		case GL_LINE_STRIP: for(i=0;i+1<P_n;i++) { bput(i); bput(i+1); } break;
 		case GL_LINE_LOOP:
 			for(i=0;i+1<P_n;i++) { bput(i); bput(i+1); }
 			if (P_n >= 3) { bput(P_n-1); bput(0); }
 			break;
-		case GL_TRIANGLES: for(i=0;i+2<P_n;i+=3) { bput(i); bput(i+1); bput(i+2); } break;
 		/* 条带的朝向要保住：奇数格换前两个顶点（GL 的规矩）。 */
 		case GL_TRIANGLE_STRIP:
 			for(i=0;i+2<P_n;i++)
@@ -184,18 +205,22 @@ static void emit_prim (void)
 	P_n = 0; P_mode = -1;
 	if (B_n >= PD_IMM_CAP) pd_imm_flush();
 }
-/* 半格图元被外来调用打断：真开一趟 `glBegin`、把已收的顶点补发进去，之后直通。 */
+
+/* 半格图元被外来调用打断：真开一趟 `glBegin`、把已收的顶点补发进去，之后直通。
+   这一格图元的顶点在攒批末尾（`B_n` 之后，还没算进 `B_n`），所以先 flush 把**已经
+   算进去的**那些画掉，再从那后头replay。 */
 static void materialize (void)
 {
-	long i;
+	long i, at;
 	pd_imm_flush();
+	at = B_n;
 	qglBegin((double)P_mode);
 	for(i=0;i<P_n;i++)
 	{
-		glColor4fv(&P_col[i*4]);
-		glTexCoord4fv(&P_tex[i*4]);
-		glNormal3fv(&P_nrm[i*3]);
-		glVertex4fv(&P_pos[i*4]);
+		glColor4fv(&B_col[(at+i)*4]);
+		glTexCoord4fv(&B_tex[(at+i)*4]);
+		glNormal3fv(&B_nrm[(at+i)*3]);
+		glVertex4fv(&B_pos[(at+i)*4]);
 	}
 	P_n = 0; P_raw = 1;
 }
@@ -212,12 +237,22 @@ void pd_imm_break (void)
 
 double pd_imm_begin (double mode)
 {
-	int m = (int)mode;
+	int m = (int)mode, tgt;
 	if (!pd_imm_on()) return(qglBegin(mode));
 	F_prims++;
 	P_in = 1; P_n = 0; P_mode = m; P_raw = 0;
 	/* 不认的 mode、或者**这一帧图元太少不值得攒**：一律走原路。 */
 	if (!F_on || (m < GL_POINTS) || (m > GL_POLYGON)) { P_raw = 1; return(qglBegin(mode)); }
+	/* 目标图元（点/线/三角）在这儿就定了 —— 顶点要**直接写在攒批末尾**，
+	   所以"换了一族就先冲一趟"必须在收顶点之前办。 */
+	switch(m)
+	{
+		case GL_POINTS: tgt = GL_POINTS; break;
+		case GL_LINES: case GL_LINE_STRIP: case GL_LINE_LOOP: tgt = GL_LINES; break;
+		default: tgt = GL_TRIANGLES; break;
+	}
+	if ((B_mode >= 0) && (B_mode != tgt)) pd_imm_flush();
+	B_mode = tgt;
 	return(0.0);
 }
 
@@ -233,6 +268,7 @@ double pd_imm_end (double d)
 static void addv (double x, double y, double z, double w)
 {
 	float *d;
+	long at;
 	if (P_raw)
 	{
 		/* 直通那一档：颜色/纹理坐标/法向在**脚本调它们的时候**就已经发过去了
@@ -241,11 +277,14 @@ static void addv (double x, double y, double z, double w)
 		glVertex4d(x,y,z,w);
 		return;
 	}
-	if (!agrow(&P_pos,&P_col,&P_tex,&P_nrm,&P_cap,P_n+1)) { materialize(); addv(x,y,z,w); return; }
-	d = &P_pos[P_n*4]; d[0] = (float)x; d[1] = (float)y; d[2] = (float)z; d[3] = (float)w;
-	d = &P_col[P_n*4]; d[0] = C_col[0]; d[1] = C_col[1]; d[2] = C_col[2]; d[3] = C_col[3];
-	d = &P_tex[P_n*4]; d[0] = C_tex[0]; d[1] = C_tex[1]; d[2] = C_tex[2]; d[3] = C_tex[3];
-	d = &P_nrm[P_n*3]; d[0] = C_nrm[0]; d[1] = C_nrm[1]; d[2] = C_nrm[2];
+	/* **直接写在攒批末尾**（还不算进 `B_n`，`glEnd` 才算）—— 三角化是恒等置换的那几族
+	   于是一个字节都不用抄（见 `keep_as_is`）。 */
+	if (!agrow(&B_pos,&B_col,&B_tex,&B_nrm,&B_cap,B_n+P_n+1)) { materialize(); addv(x,y,z,w); return; }
+	at = B_n + P_n;
+	d = &B_pos[at*4]; d[0] = (float)x; d[1] = (float)y; d[2] = (float)z; d[3] = (float)w;
+	d = &B_col[at*4]; d[0] = C_col[0]; d[1] = C_col[1]; d[2] = C_col[2]; d[3] = C_col[3];
+	d = &B_tex[at*4]; d[0] = C_tex[0]; d[1] = C_tex[1]; d[2] = C_tex[2]; d[3] = C_tex[3];
+	d = &B_nrm[at*3]; d[0] = C_nrm[0]; d[1] = C_nrm[1]; d[2] = C_nrm[2];
 	P_n++;
 }
 double pd_imm_vertex2d (double x, double y)                       { addv(x,y,0.0,1.0); return(0.0); }

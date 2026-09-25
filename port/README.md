@@ -583,18 +583,30 @@ Apple 对"装不进去的贴图"的回答。教训：**先确认那个宿主调�
 在**脚本调它们的时候**就发过去（`P_raw || !F_on` 那个条件），`glVertex` 那一格只发顶点。
 先前那一版在直通路上每个顶点补发三格属性 —— 白多三倍的 GL 调用。
 
-### 下一刀（落点已经量到了）
+### 下一刀（已经做了：顶点只抄一遍）
 
-`tigrou/tree.pss` 现在 18~22ms（参考 10.255）。采样里栈顶前几名**全是攒批自己**：
+先前 `tigrou/tree.pss` 18~22ms（参考 10.255），采样里栈顶前几名**全是攒批自己**：
 `bput` 226 / `addv` 189 / `pd_imm_end` 96 / `agrow` 64，而 `kasm87c_run` 只有 76 ——
-剩下的 CPU 花在**顶点抄两遍**（图元那份 scratch -> 攒批那份）。下一刀是把这两份并成
-**一份交错数组**（每顶点 15 个 float 连着放、`gl*Pointer` 给 stride），`glEnd` 时就地
-扇形/条带展开，抄一遍。
+CPU 花在**顶点抄两遍**（图元那份 scratch -> 攒批那份）。
+
+改法：顶点**直接写在攒批末尾**（先不算进 `B_n`，`glEnd` 才算）。于是三角化正好是
+**恒等置换**的那几族一个字节都不用抄 —— `keep_as_is()` 那张表：
+`GL_POLYGON`/`GL_TRIANGLE_FAN`/`GL_TRIANGLE_STRIP` 收三个顶点（`ken/balls.pss` 就是它）、
+`GL_TRIANGLES` 收 3n 个、`GL_LINES` 收 2n 个、`GL_POINTS` 任意个。
+只有扇形/条带/四边形**超过一格三角形**才抄一趟到 scratch 再展开。
+两件事跟着挪了位置：目标图元族（点/线/三角）要在 `glBegin` 就定（顶点开始落地之前
+"换族就先冲一趟"）；`materialize()` 从攒批末尾 replay（那些顶点还没算进 `B_n`，
+所以先 flush 再 replay 不会重画）。
+
+量出来：`tree` **17.2ms**、`balls` 5.6、`snake tube` 3.8、`snake stars` 5.5；
+四份探针 md5 照旧与 `PD_IMM=0` 逐字节相同，scan 的分类一格没动
+（ok 50 / 空画面 1 / 着色器错 2 / 崩 0 / 超时 0）。
 
 **GPU 那一头的两份别再当 CPU 问题查**：`metaballs cube` 32ms、`metaballs` 14ms，
 采样里 CPU 基本闲着（栈顶 `__workq_kernreturn` 255 / `iokit_user_client_trap` 90，
 都在等 GPU）。那两份是片元着色器里的光线步进，参考那台机器是另一颗 GPU ——
 这一栏不可比，也不是我们这一侧能改的。
+
 
 
 
