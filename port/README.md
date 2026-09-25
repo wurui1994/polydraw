@@ -120,9 +120,15 @@ kasm87() 编译本身                     0.0137 ms/趟
 FBO，画完会 bind 回 0，而离屏根本没有"0"那张）—— 绑了还是黑。
 
 下一个探针（按这个顺序，别猜）：
-1. `pd_win.c:721` 的 `if (shadn[2]) Draw(...)` —— `Draw` 到底有没有被调？
-   `shadn[]` 是 `setShaders` 按 `txt2sec` 分的段数填的，假编辑框喂的文本
-   可能没被分进第 2 段（那是"主程序"段）；
+1. **`Draw` 大概率压根没被调**。`pd_win.c:721` 是 `if (shadn[2]) Draw(...)`，而
+   `shadn[2]` 是"片元着色器有几个"。链路是这样的（照 `pd_script.c` 读的）：
+   `txt2sec` 按行首的 `@` 分段，`typ` 0=`@h`（主脚本）/1=`@v`/2=`@g`/3=`@f`；
+   `setShaders:171` 那个循环 `if (!tsec[tseci].typ) continue;` —— **主脚本那一段
+   直接跳过**；而 `:180` 的 `if (!needrecompile) return;` 对"只有主脚本"的
+   `.pss`（`ken/balls.pss`、`ceilflor2.pss` 都是）恰好成立，于是 `shadn[2]` 一直是 0。
+   所以要么 Windows 上有别处给它塞了一个**默认片元着色器**（`setshader_int(0,-1,0)`
+   那一句最可疑），要么我们喂进去的文本没被 `txt2sec` 当成一段。
+   **下一步就量这一格**：把 `tsecn` / `tsec[0].typ` / `shadn[0..2]` 印出来。
 2. 真 `.pss` 会崩在 `kasm87c_run + 428`（一条 `ldr x9,[x9,#8]`）—— 那是
    USERFUNC/KPTR 那条路，八成还是第 5 个洞（指针在 `parmdat` 里占 4 字节）。
    `/tmp/t1.pss` 那种只有 `glBegin/glVertex/glEnd` 的不崩，说明分界就在参数形状上。
