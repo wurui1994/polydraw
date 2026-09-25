@@ -181,7 +181,25 @@ abort 那一族则要另一条路：`lldb -o "b malloc_error_break"` 看是谁�
 所以只能像原文那样按长度 `strncmp`。先头用 `strcmp` 写，五条全不中，
 现象与没补一模一样（"改了没效果"先怀疑这个）。
 
+**第二个坑（同一个根）**：找 `C` 也不能用 `strchr` —— 它会一路扫进后面的函数名，
+于是 `gltexcoord`（`|ddGLTEXCOORD|`）、`glcolor`、`glprogramlocalparam` 这些
+**压根没有字符串参**的调用也全进这一档。行为上无害（下面五条全不中就落回原路），
+但 `ken/curvybuild.pss` 跑两帧就白进 34 万次。现在按 `memchr(cptr,'C',cn)` 收在
+前 `n` 个字符里（`n` = `kcd->gasm[i].n`，原型串长度正好等于它）。
+
 `printf` 那一族仍然不接：`myprintf` 自己是真变参，按定参强转不对。
+
+### `curvybuild` 那 20% 的 `mysleep` 是脚本自己要的，不是错
+
+采样（`/usr/bin/sample`）显示 `ken/curvybuild.pss` 的主线程里 **552/2773 帧样本
+（20%）在 `mysleep` → `usleep`**，调用点是 `kasm87c_run+3988`（USERFUNC 那一档）。
+一开始怀疑是刚补的 `C` 原型派发调错了函数（`myprintf` 0x1000009e0 与
+`mysleep` 0x100004fd0 只差一格）。**结论是：没有错。** `lldb` 在 `mysleep`
+上断一次，栈就是 `kasm87c_run <- kasm87cp <- WinMain`，而脚本第 173 行写着
+`Sleep(15);` —— 它自己限帧。全语料 53 份里**只有这一份**调 `Sleep`，
+所以另外两份超时仍然是真在算（JIT 的活），与限帧无关。
+
+教训与"归因前先探针"那条一样：**符号地址相邻不构成证据，断一次栈只要几秒。**
 
 ### 两把新诊断
 

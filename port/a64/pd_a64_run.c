@@ -282,9 +282,12 @@ double kasm87c_run (char *parmdat, kcd_t *kcd)
 				//字符串操作数在 globval 里（KSTR 在 kasm_comp.c:313 被改成 KEDX+gccnt*8），
 				//所以 p[j] 本身就是串的地址，强转 char * 即可。
 				//printf 那一族仍然不接：`myprintf` 自己是真变参，按定参强转不对。
-				if (strchr(cptr,'C'))
+				//同理，找 `C` 也只能在前 n 个字符里找：用 strchr 会一路扫进后面的函数名，
+				//于是 `gltexcoord`（|ddGLTEXCOORD|）这种压根没有字符串参的调用也会进这一档
+				//—— 行为上无害（下面全不中就落回原路），但 curvybuild 两帧就白进 18 万次。
+				long cn = kcd->gasm[i].n;
+				if (memchr(cptr,'C',cn))
 				{
-					long cn = kcd->gasm[i].n;
 					if ((cn == 1) && (!strncmp(cptr,"C",1)))
 						{ (*p[0]) = ((double (__cdecl *)(char *))dafunc)((char *)p[1]); break; }
 					if ((cn == 2) && (!strncmp(cptr,"dC",2)))
@@ -295,7 +298,7 @@ double kasm87c_run (char *parmdat, kcd_t *kcd)
 						{ (*p[0]) = ((double (__cdecl *)(double,char *,double))dafunc)(*p[1],(char *)p[2],*p[3]); break; }
 					if ((cn == 3) && (!strncmp(cptr,"CCC",3)))
 						{ (*p[0]) = ((double (__cdecl *)(char *,char *,char *))dafunc)((char *)p[1],(char *)p[2],(char *)p[3]); break; }
-					if (pd_run_dbg) fprintf(stderr,"[run] 带字符串的原型没接：|%s| n=%ld\n",cptr,(long)cn);
+					if (pd_run_dbg) fprintf(stderr,"[run] 带字符串的原型没接：|%.*s| n=%ld\n",(int)cn,cptr,(long)cn);
 				}
 
 				switch(kcd->gasm[i].n) //This seems to be the only way to do pure C implementation; it sucks!
