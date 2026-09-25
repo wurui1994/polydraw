@@ -59,22 +59,30 @@ static int pd_load (const char *path)
 int main (int argc, char **argv)
 {
 	char cmd[1024], *src = 0, *out = "out.png";
-	int i, frames = 60, w = 640, h = 480, gui = 0;
+	int i, frames = 60, w = 640, h = 480, gui = -1;
 
 	for(i=1;i<argc;i++)
 	{
-		if (!strcmp(argv[i],"--frames") && (i+1 < argc)) { frames = atoi(argv[++i]); continue; }
-		if (!strcmp(argv[i],"--out")    && (i+1 < argc)) { out = argv[++i]; continue; }
+		if (!strcmp(argv[i],"--frames") && (i+1 < argc)) { frames = atoi(argv[++i]); if (gui < 0) gui = 0; continue; }
+		if (!strcmp(argv[i],"--out")    && (i+1 < argc)) { out = argv[++i]; if (gui < 0) gui = 0; continue; }
 		if (!strcmp(argv[i],"--size")   && (i+1 < argc)) { sscanf(argv[++i],"%dx%d",&w,&h); continue; }
-		if (!strcmp(argv[i],"--gui")) { gui = 1; continue; }
+		if (!strcmp(argv[i],"--gui"))    { gui = 1; continue; }
+		if (!strcmp(argv[i],"--render")) { gui = 0; continue; }
 		if (argv[i][0] != '-') { src = argv[i]; continue; }
 		fprintf(stderr,"不认的旗子：%s\n",argv[i]); return(64);
 	}
 	if (!src)
 	{
-		printf("用法: polydraw_a64 脚本.pss [--frames N] [--size WxH] [--out 图.png] [--gui]\n");
+		printf("用法: polydraw_a64 脚本.pss [--gui|--render] [--frames N] [--size WxH] [--out 图.png]\n");
+		printf("      不给旗子 = --gui（开窗口实时跑，与原版双击一样）；--render 是离屏出图。\n");
 		return(64);
 	}
+	/* **不给旗子就开窗口**。理由是"别默默地干等"：离屏那条腿要跑满 `frames+30` 帧才写
+	   PNG，中间既没有窗口也没有一行输出 —— 在解释器那条路上（还没有 arm64 JIT）
+	   一帧就是几百毫秒到秒级，于是 `polydraw_a64 ken/balls.pss` 看着像死循环。
+	   原版双击起来就是个窗口，所以默认跟它一致。给了 `--frames`/`--out`/`--render`
+	   才走离屏（判据脚本全都给）。 */
+	if (gui < 0) gui = 1;
 	if (!pd_load(src)) return(66);
 
 	/* GUI 档：开真窗口、实时跑到关窗为止（`port/a64/pd_gui_glfw.c`）。

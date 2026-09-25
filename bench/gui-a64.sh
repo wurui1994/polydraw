@@ -30,6 +30,20 @@ for f in ken/ceilflor2.pss ken/texture.pss tigrou/clock.pss; do
 		printf '  FAIL %-14s 非黑像素=%s  fps=%s（日志 %s）\n' "$nm" "$sum" "${fps:-无}" "$log"; fail=$((fail+1))
 	fi
 done
+
+# **默认路径那一格**：一个旗子都不给。它必须也开窗口 —— 从前默认是离屏跑 frames+30 帧
+# 才写 PNG，中间不出窗口、不出一行字，在解释器上一帧几百毫秒，看着就是死循环
+# （用户报的正是这个）。判据与上面同一条：窗口里有非黑像素。
+log=$(mktemp /tmp/pd-gui-XXXXXX)
+PD_GUIDBG=1 timeout "$SECS" "$BIN" ken/ceilflor2.pss >"$log" 2>&1
+sum=$(grep -o "非黑像素 [0-9]*" "$log" | sed 's/[^0-9]//g' | sort -n | tail -1)
+sum=${sum:-0}
+if [ "$sum" -gt 0 ]; then
+	printf '  ok   %-14s 非黑像素=%s（不给旗子 = 开窗口）\n' "默认路径" "$sum"; pass=$((pass+1))
+	rm -f "$log"
+else
+	printf '  FAIL %-14s 一个旗子都不给时没开出窗口（日志 %s）\n' "默认路径" "$log"; fail=$((fail+1))
+fi
 echo
 echo "$pass passed, $fail failed（GUI：窗口真画了 + 标题有 fps）"
 [ "$fail" = 0 ]
