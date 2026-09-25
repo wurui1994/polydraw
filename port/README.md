@@ -150,10 +150,16 @@ tigrou/clock.pss      1322 fps   0.756 ms/帧
       那个上传组合没问题；
     - 探针 B（原式不动，只把 alpha 强制成 1）：全是 `(0,0,0,255)` ——
       **原式那组 texcoord 采回来就是黑的**。
-  所以剩下的是它那句 `acos(t.x*inversesqrt(1.0-t.y*t.y))`：扇面顶点的半径是
-  `1/cos(PI/12)≈1.035`，`1.0-t.y*t.y` 会变负 -> `inversesqrt` 出 NaN ->
-  Apple 的 GPU 上 NaN 的 texcoord 采回黑。**下一步**：把 `t` 在片元里直接输出成颜色，
-  看它到底是多少（顺带验 `gl_MultiTexCoord0` 有没有传对）。
+    - 探针 C（把 `t` 直接当颜色输出）：`t.x`/`t.y` 逐点在变 ——
+      **`gl_MultiTexCoord0` 传对了**；
+    - 探针 D（把算出来的 `u`/`v` 当颜色，并用 `u!=u` 检 NaN）：u/v 都在变，
+      **蓝通道全 0 = 没有 NaN**。于是"NaN 采回黑"那条也排掉了。
+  现在最像的一条：**u 与 v 都是负数**（`u = acos(…)/(-2π) - panx ∈ [-0.5,0]-panx`、
+  `v = acos(t.y)/(-π) ∈ [-1,0]`），而 `pd_host_gl.c:147` 那一句会把
+  wrap 强制成 `KGL_CLAMP_TO_EDGE`（NPOT 纹理那条规矩）—— 负的 texcoord 一律
+  夹到边缘那一列/行上，采出来就是一条黑边。
+  **下一步**：印出 earth.jpg 的尺寸与 `CreateEmptyTexture` 实际选的 wrap 模式，
+  看是不是 NPOT 把它按到了 CLAMP（Windows 上如果是 REPEAT，这就是差异点）。
 * `ken/gspiral.pss` —— **不计**。片元着色器用了 `&` / `>>`（整数位运算），
   那是 GLSL 1.30 起才有的；macOS 的 legacy profile 最高 GL 2.1 / GLSL 1.20，
   编译期就报 `'&' does not operate on 'int' and 'int'`。要它得换 core profile（3.2+），
