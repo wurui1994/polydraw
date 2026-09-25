@@ -354,6 +354,40 @@ static double pd_jit_nrnd (void) { return(nrnd()); }
 static double pd_jit_fact (double x) { return(fact(x)); }
 static double pd_jit_logb (double x, double y) { return(log(x)/log(y)); }
 
+/**
+ * **"这一条走解释器"的退路**（每条指令一格，不是整份）。
+ *
+ * 做法是拿一份 `kcd` 的**浅拷贝**（所有表都共用），把 `gasm` 指到第 i 条、`gecnt` 改成 1，
+ * 然后调原文的 `kasm87c_run` —— 它跑完那一条就掉到末尾 `return(*p[0])`。
+ * 于是**一行重复代码都不用写**（USERFUNC 那张原型串 switch 尤其不该抄第二份）。
+ *
+ * 一个必须处理的坑：`kasm87c_run` 算 `plst[KECX]` 用的是**进来那一刻的 `gvlp`**，
+ * 而我们是在函数体中间调它（`gvlp` 已经加过 `stackdoubs` 了）。所以先把 `gvlp` 退回去、
+ * 跑完再放回来 —— 不退的话局部量的地址整片偏掉（这一格错了是无声的乱数）。
+ *
+ * 只能用在**不改控制流**的指令上（GOTO/IF0/IF1/RETURN 由 JIT 自己发）。
+ */
+static double pd_a64_jit_one (char *parmdat, kcd_t *kcd, long i)
+{
+	kcd_t tmp = *kcd;
+	double *save = gvlp, d;
+	tmp.gasm = &kcd->gasm[i];
+	tmp.gecnt = 1;
+	gvlp = save - kcd->stackdoubs;
+	d = kasm87c_run(parmdat,&tmp);
+	gvlp = save;
+	return(d);
+}
+
+/** 发一格"走解释器"的调用（实参是 parmdat / kcd / 指令下标）。 */
+static void pd_fallback (pd_jb *b, long i)
+{
+	pd_movx(b,0,PD_XPARM);
+	pd_movx(b,1,PD_XKCD);
+	pd_imm64(b,2,(unsigned long long)i);
+	pd_call(b,(const void *)pd_a64_jit_one);
+}
+
 /* ── 一条 gasm -> 一串 A64 ────────────────────────────────────────────────────
  *
  * 口径就是 `kasm_interp.c` 那张 switch，一条一条对着抄。**每条指令都是
@@ -540,49 +574,40 @@ static void pd_op (pd_jb *b, kcd_t *kcd, long i, pd_fix *fix, long *nfix)
 			char *cptr;
 			void *dafunc;
 			long j, nd = 0, np = 0;
-			if ((a->n < 1) || (a->n > 8)) { b->bad = 1; return; }
-			if ((kcd->newvar[a->g].r & 0xf0000000) != KIMM) { b->bad = 1; return; }
+			if ((a->n < 1) || (a->n > 8)) { pd_fallback(b,i); return; }
+			if ((kcd->newvar[a->g].r & 0xf0000000) != KIMM) { pd_fallback(b,i); return; }
 			dafunc = (void *)kcd->gevalext[kcd->newvar[a->g].r & 0x0fffffff].ptr;
 			cptr = &kcd->newvarnam[kcd->newvar[a->g].proti];
+			if (getenv("PD_JITDBG") && (atol(getenv("PD_JITDBG")) >= 2))
+				fprintf(stderr,"[jit]   USERFUNC 第 %ld 条：n=%ld 原型=|%.*s| 名字=%s owns=%d\n",
+					i,(long)a->n,(int)a->n,cptr,&kcd->newvarnam[kcd->newvar[a->g].nami],
+					pd_a64_owns(dafunc));
 			/* 原型串**不是 NUL 结尾**的（后面紧跟函数名），所以只看前 n 个字符。
 			   `C`（`char *`）与 `D`（`double *`）在这一层是同一件事：递的都是**操作数的
 			   地址**（串操作数在 `globval` 里 —— KSTR 在 `kasm_comp.c:313` 被改成
 			   `KEDX+gccnt*8`，所以那一格的地址就是串的地址。解释器那侧第 18 个洞
 			   补的正是这一族）。 */
 			for(j=0;j<a->n;j++)
-				if ((cptr[j] != 'd') && (cptr[j] != 'D') && (cptr[j] != 'C')) { b->bad = 1; return; }
-			/* **脚本自己那些函数**（`pd_a64_owns`）：入口是真变参（`kasm87c(double,...)`），
-			   Apple 上变参实参全走栈 —— 与其在这儿重铺一遍，不如把操作数地址摆成
-			   `double *p[17]` 那张表，原样递给现成的 `pd_a64_call_script`
-			   （它就是为这件事写的，已经判过）。省下来的仍然是"每次调用一趟 strncmp"。 */
-			if (pd_a64_owns(dafunc))
-			{
-				for(j=1;j<=a->n;j++)
-				{
-					rtyp *rp = (j <= 2) ? &a->r[j] : &kcd->rxi[a->rxi+j-3];
-					pd_addrof(b,kcd,rp,PD_XS1,PD_XS0);
-					pd_strx(b,PD_XS1,31,PD_POFF+j*8);
-				}
-				pd_imm64(b,0,(unsigned long long)(unsigned long)dafunc);
-				pd_imm64(b,1,(unsigned long long)(unsigned long)cptr);
-				pd_addimm(b,2,31,PD_POFF);
-				pd_imm64(b,3,(unsigned long long)a->n);
-				pd_call(b,(const void *)pd_a64_call_script);
-				pd_store(b,kcd,&a->r[0],0,PD_XS0);
-				return;
-			}
+				if ((cptr[j] != 'd') && (cptr[j] != 'D') && (cptr[j] != 'C')) { pd_fallback(b,i); return; }
+			/* **脚本自己那些函数**（`pd_a64_owns`）：这一条交给解释器。
+			   先前这儿是"把操作数地址摆成 p[17] 那张表、递给 pd_a64_call_script" ——
+			   那一版在 `ken/heightmap.pss` 上必崩（按指令二分定到第 272 条：
+			   `DRAWTOPO`，原型 `dddDDDd`、owns=1）。根因还没定死，所以先退回解释器：
+			   **递归那一半的收益本来也不在这儿** —— 在 `pd_a64_call_script` 自己会问
+			   一句 JIT（fib(20) 的 6.4 倍是那一句给的），这条路仍然走 JIT 的被调函数。 */
+			if (pd_a64_owns(dafunc)) { pd_fallback(b,i); return; }
 			for(j=1;j<=a->n;j++)
 			{
 				rtyp *rp = (j <= 2) ? &a->r[j] : &kcd->rxi[a->rxi+j-3];
 				if (cptr[j-1] == 'd')
 				{
-					if (nd >= 8) { b->bad = 1; return; }
+					if (nd >= 8) { pd_fallback(b,i); return; }
 					pd_load(b,kcd,rp,(int)nd,PD_XS0);
 					nd++;
 				}
 				else   /* 'D' 与 'C' 都是"递地址" */
 				{
-					if (np >= 8) { b->bad = 1; return; }
+					if (np >= 8) { pd_fallback(b,i); return; }
 					pd_addrof(b,kcd,rp,(int)np,PD_XS0);
 					np++;
 				}
@@ -592,7 +617,9 @@ static void pd_op (pd_jb *b, kcd_t *kcd, long i, pd_fix *fix, long *nfix)
 			return;
 		}
 
-		default: b->bad = 1; return;
+		/* 没接的指令**不再整份放弃**：单独这一条走解释器（见 `pd_a64_jit_one` 的头注）。
+		   于是"覆盖率"这件事不再卡着正确性 —— 编得出来的快、编不出来的那一条慢一点。 */
+		default: pd_fallback(b,i); return;
 	}
 }
 
@@ -620,22 +647,37 @@ static void *pd_jit_build (kcd_t *kcd)
 	for(i=0;i<n;i++)
 	{
 		at[i] = b.n;
-		/* `PD_JITNO=f1,f2,…`：**拒编含这几号指令的整份** —— 二分"是哪一族错了"就靠它。
-		   （f 的编号是 `eval.c:251` 那张 enum：TIMES=28、PEEK=48、POKE=50、USERFUNC=56…） */
+		/* 两把**按指令**二分的开关（都走那格"这一条交给解释器"的退路 —— 先前那种
+		   "一碰上就整份退回"的关法说明不了是哪一族、更说明不了是哪一条）：
+		     PD_JITNO=f1,f2,…  这几号指令交给解释器（编号是 `eval.c:251` 那张 enum）
+		     PD_JITFB=a,b      下标在 [a,b] 里的指令交给解释器
+		   控制流那三族（GOTO/IF0/IF1/RETURN）必须由 JIT 自己发，所以不受这两把开关管。 */
 		{
-			const char *no = getenv("PD_JITNO");
-			if (no)
+			long f = kcd->gasm[i].f;
+			int fb = 0;
+			if ((f != GOTO) && (f != IF0) && (f != IF1) && (f != RETURN))
 			{
-				char want[16]; long k;
-				snprintf(want,sizeof(want),"%ld",(long)kcd->gasm[i].f);
-				for(k=0;no[k];k++)
+				const char *no = getenv("PD_JITNO");
+				const char *rg = getenv("PD_JITFB");
+				if (no)
 				{
-					if ((k) && (no[k-1] != ',')) continue;
-					if (!strncmp(&no[k],want,strlen(want))
-						&& ((no[k+strlen(want)] == 0) || (no[k+strlen(want)] == ','))) { b.bad = 1; break; }
+					char want[16]; long k, wl;
+					snprintf(want,sizeof(want),"%ld",f); wl = (long)strlen(want);
+					for(k=0;no[k];k++)
+					{
+						if ((k) && (no[k-1] != ',')) continue;
+						if (!strncmp(&no[k],want,(size_t)wl) && ((no[k+wl] == 0) || (no[k+wl] == ','))) { fb = 1; break; }
+					}
 				}
-				if (b.bad) break;
+				if (rg)
+				{
+					long lo = atol(rg), hi;
+					const char *cm = strchr(rg,',');
+					hi = cm ? atol(cm+1) : lo;
+					if ((i >= lo) && (i <= hi)) fb = 1;
+				}
 			}
+			if (fb) { pd_fallback(&b,i); continue; }
 		}
 		pd_op(&b,kcd,i,fix,&nfix);
 		if (b.bad) break;

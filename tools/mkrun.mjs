@@ -127,13 +127,24 @@ const fixKglb = (line) => (line.includes('plst[((unsigned long)KGLB)>>28]')
   ? line.replace('((long)gstatmem    -KGLB)', '-((long)KGLB) /*本机改：原文把 gstatmem 算了两遍*/')
   : line);
 
+/**
+ * **第 19 个洞**：`USERFUNC` 里"函数指针形参"那一支读的是**全局** `gasm[i].g`，
+ * 旁边三行读的都是 `kcd->gasm[i].g`。全局那一份是**上一次编译**留下的
+ * （与第 14 个洞的 `newvar`/`gnumarg` 一模一样的毛病）——
+ * 多个脚本先后编译之后，那一格取到的是别人的表，`dafunc` 直接是野指针。
+ * 平时不容易撞上（要"拿函数指针当形参"那种写法），但 JIT 那格
+ * "单独跑一条指令"的退路会把它放大成必崩：那时 `i` 是 0、全局 `gasm` 是别人的。
+ */
+const fixGlobGasm = (line) => line.replace('kcd->newvar[gasm[i].g].r',
+  'kcd->newvar[kcd->gasm[i].g].r /*本机改：原文这儿读的是全局 gasm（第 19 个洞）*/');
+
 const out = [];
 let guarded = 0;
 for (const line of body) {
   if (line.includes('plst[((unsigned long)KECX)>>28]')) out.push(...POISON_FILL);
   if (line.includes('switch(kcd->gasm[i].n)')) out.push(...SCRIPT_PATH);
   if (line === '\t\tswitch(kcd->gasm[i].f)' || (guarded === 0 && line.trim() === 'switch(kcd->gasm[i].f)')) { out.push(...NULL_GUARD); guarded++; }
-  out.push(fixKglb(fixCall(line)));
+  out.push(fixGlobGasm(fixKglb(fixCall(line))));
   if (line.includes('p[j] = (double *)(plst[((unsigned long)kcd->gasm[i].r[j].r)>>28]'))
     out.push(CHK('\t\t\t', 'kcd->gasm[i].r[j].r', 'i', 'j'));
   else if (line.includes('p[3] = (double *)(plst[((unsigned long)rp->r)>>28]'))

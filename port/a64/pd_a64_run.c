@@ -266,7 +266,7 @@ double kasm87c_run (char *parmdat, kcd_t *kcd)
 				}
 				if ((kcd->newvar[kcd->gasm[i].g].r&0xf0000000) == KIMM)
 					  dafunc = ((double (__cdecl *)(double,...))kcd->gevalext[kcd->newvar[kcd->gasm[i].g].r&0x0fffffff].ptr);
-				else dafunc = ((double (__cdecl *)(double,...))*(long *)(plst[((unsigned long)KESP)>>28]+kcd->newvar[gasm[i].g].r));
+				else dafunc = ((double (__cdecl *)(double,...))*(long *)(plst[((unsigned long)KESP)>>28]+kcd->newvar[kcd->gasm[i].g].r /*本机改：原文这儿读的是全局 gasm（第 19 个洞）*/));
 
 				cptr = &kcd->newvarnam[kcd->newvar[kcd->gasm[i].g].proti];
 
