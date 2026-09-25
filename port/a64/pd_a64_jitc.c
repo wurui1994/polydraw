@@ -39,6 +39,13 @@
 
 #include <sys/mman.h>
 
+/* 立即模式攒批那一份（`port/a64/pd_gl_imm.c`，另一个翻译单元）。 */
+extern void *pd_imm_hook (void *fn);
+extern int pd_imm_isgl (const char *nm);
+extern void pd_imm_break (void);
+extern void pd_imm_flush (void);
+extern void pd_imm_frame_end (void);
+
 /* 一格编译缓冲。`bad` 一立起来就整份放弃（见头注）。 */
 typedef struct
 {
@@ -630,6 +637,17 @@ static void pd_op (pd_jb *b, kcd_t *kcd, long i, pd_fix *fix, long *nfix)
 			   **递归那一半的收益本来也不在这儿** —— 在 `pd_a64_call_script` 自己会问
 			   一句 JIT（fib(20) 的 6.4 倍是那一句给的），这条路仍然走 JIT 的被调函数。 */
 			if (pd_a64_owns(dafunc)) { pd_fallback(b,i); return; }
+			/* **立即模式攒批**（`port/a64/pd_gl_imm.c`，那一刀 35 倍）：
+			   `glBegin` / `glEnd` / `glVertex` / `glTexCoord` / `glColor` / `glNormal`
+			   那几族在**编译期**换落点（攒进数组、不发 GL）；**别的宿主调用**在调用之前
+			   先发一格 `pd_imm_break`（状态要变了，攒着的那批得按旧状态先画掉）。
+			   解释器那条退路（`pd_a64_jit_one`）自己头一句也会 break，所以一条都不漏。 */
+			{
+				void *h = pd_imm_hook(dafunc);
+				if (h) dafunc = h;
+				else if (pd_imm_isgl(&kcd->newvarnam[kcd->newvar[a->g].nami]))
+					pd_call(b,(const void *)pd_imm_break);
+			}
 			for(j=1;j<=a->n;j++)
 			{
 				rtyp *rp = (j <= 2) ? &a->r[j] : &kcd->rxi[a->rxi+j-3];

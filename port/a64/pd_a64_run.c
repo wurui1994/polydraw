@@ -29,6 +29,8 @@
 double kasm87c_run (char *parmdat, kcd_t *kcd);
 /* JIT 在这个文件**后头**才 include 进来（它要 kcd_t），所以也先报个名。 */
 static void *pd_a64_jitfn (kcd_t *kcd);
+/* 立即模式攒批（`port/a64/pd_gl_imm.c`，另一个翻译单元）。 */
+void *pd_imm_call (void *fn);
 
 /* —— 本机补的诊断（`PD_RUNDBG=1` 打开）——
  *
@@ -276,6 +278,11 @@ double kasm87c_run (char *parmdat, kcd_t *kcd)
 				//自己摊一份 parmdat，直接递归调 kasm87c_run，压根不经过变参。
 				if (pd_a64_owns((void *)dafunc))
 					{ (*p[0]) = pd_a64_call_script((void *)dafunc,cptr,p,kcd->gasm[i].n); break; }
+
+				//—— 立即模式攒批（port/a64/pd_gl_imm.c）：解释器这条路也要过那一层 ——
+				//不然"脚本函数里头调 GL"那种写法会绕过攒批（真 glVertex 没有 glBegin 配套）。
+				//pd_imm_call 回替代实现（glBegin/glVertex/… 那几格），别的先把攒着的交出去。
+				dafunc = (double (__cdecl *)(double,...))pd_imm_call((void *)dafunc);
 
 				//—— 第 18 个洞：原文那个 switch 只认 `d`/`D`，**没有 `C`（char *）那一档** ——
 				//于是 `glsettex(0,"earth.jpg")` / `glsetshader("v","f")` 这些带字符串的宿主

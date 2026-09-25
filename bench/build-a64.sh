@@ -22,7 +22,7 @@ $CC -arch arm64 $OPT -I polydraw_src \
 	-include port/pd_port.h \
 	-DCOMPILE=0 -DEVALTEST \
 	-Wno-deprecated-non-prototype -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast \
-	polydraw_src/eval.a64.stitch.c -o "$OUT/eval_a64" -lm
+	polydraw_src/eval.a64.stitch.c port/a64/pd_gl_imm_stub.c -o "$OUT/eval_a64" -lm
 
 echo "-> $OUT/eval_a64"
 "$OUT/eval_a64" "1+2*3" | tail -1
@@ -33,7 +33,7 @@ echo "-> $OUT/eval_a64"
 echo "== eval_bench（量尺）"
 $CC -arch arm64 $OPT -I polydraw_src \
 	-include port/pd_port.h -DCOMPILE=0 -w \
-	-DPD_EVAL_BENCH polydraw_src/eval.a64.stitch.c -o "$OUT/eval_bench" -lm
+	-DPD_EVAL_BENCH polydraw_src/eval.a64.stitch.c port/a64/pd_gl_imm_stub.c -o "$OUT/eval_bench" -lm
 echo "-> $OUT/eval_bench"
 "$OUT/eval_bench" '(x){s=0;for(i=0;i<x;i++)s=s+i*i;s}' 1000 | tail -1
 
@@ -74,8 +74,11 @@ done
 # GUI 那一份不要假 windows.h（它用真 GLFW 头），也不要 -include pd_port.h
 $CC -arch arm64 $OPT -w -I /opt/homebrew/include \
 	-c port/a64/pd_gui_glfw.c -o "$OUT/pd_gui_glfw.o"
+# 立即模式攒批那一份也不要假 windows.h（它用真 OpenGL 头）
+$CC -arch arm64 $OPT -w -c port/a64/pd_gl_imm.c -o "$OUT/pd_gl_imm.o"
 echo "== polydraw_a64"
 $CC -arch arm64 "$OUT/polydraw.o" "$OUT/kplib.o" "$OUT/eval.o" \
 	"$OUT/pd_win_a64.o" "$OUT/pd_gl_cgl.o" "$OUT/pd_main_a64.o" "$OUT/pd_gui_glfw.o" \
+	"$OUT/pd_gl_imm.o" \
 	-framework OpenGL -L/opt/homebrew/lib -lglfw -o "$OUT/polydraw_a64"
 echo "-> $OUT/polydraw_a64"

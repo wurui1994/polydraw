@@ -173,6 +173,10 @@ double __cdecl kasm87c (double first, ...)
 	va_start(m,first);
 	d = pd_a64_fill(parmdat,kcd,&m,8);
 	va_end(m);
+	/* 脚本这一趟跑完了：攒着的那批交出去（polydraw 自己那些 GL —— 控制台文字、
+	   贴图、清屏 —— 都在这之后，不许插到批中间），并且按这一帧的图元数定下一帧还攒不攒。
+	   见 `port/a64/pd_gl_imm.c`。 */
+	pd_imm_frame_end();
 	return(d);
 }
 
@@ -186,6 +190,7 @@ double __cdecl kasm87cp (double *first, ...)
 	va_start(m,first);
 	d = pd_a64_fill(parmdat,kcd,&m,8);   /* 原文这儿是 4（指针 4 字节） */
 	va_end(m);
+	pd_imm_frame_end();
 	return(d);
 }
 
