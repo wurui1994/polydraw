@@ -140,6 +140,26 @@ static double pd_a64_fill (char *parmdat, kcd_t *kcd, va_list *m, long j)
 		else  { *(void  **)&parmdat[j] = va_arg(*m,void * ); }
 		j += 8;
 	}
+	/* **JIT 那条路**（`port/a64/pd_a64_jitc.c`）：编得出来就跳编出来那一份，
+	   编不出来（碰上还没接的指令）回 0，照旧走解释器。挂点只有这一句 ——
+	   ABI 与 `kasm87c_run` 逐字相同，所以上头那一串"实参怎么摊"一个字节都不用改。 */
+	{
+		double (*jf)(char *, kcd_t *) = (double (*)(char *, kcd_t *))pd_a64_jitfn(kcd);
+		if (jf)
+		{
+			if (pd_jit_get_mode() < 2) return(jf(parmdat,kcd));
+			/* `PD_JIT=2` 差分：两条路都跑一趟，位级对不上就印。
+			   **它会把副作用做两遍**（脚本要是写全局/数组，第二趟看到的是第一趟改过的）
+			   —— 所以这一档只拿来查纯算术那一类（`bench/test-a64.sh`）。 */
+			{
+				double da = jf(parmdat,kcd);
+				double dc = kasm87c_run(parmdat,kcd);
+				if (memcmp(&da,&dc,sizeof(double)))
+					fprintf(stderr,"[jit] 差分不一致：jit %.17g / 解释器 %.17g\n",da,dc);
+				return(dc);
+			}
+		}
+	}
 	return(kasm87c_run(parmdat,kcd));
 }
 

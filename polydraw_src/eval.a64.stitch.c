@@ -60,9 +60,11 @@
 #undef kasm87c_run
 
 /* 次序：jit（thunk 与 pd_a64_owns）-> run（真的 kasm87c_run，要 pd_a64_owns）
-   -> parm（真的 kasm87c/kasm87cp，要 kasm87c_run）。 */
+   -> jitc（**真的 JIT**：把 gasm[] 吐成 A64，要 kcd_t）
+   -> parm（真的 kasm87c/kasm87cp，要 kasm87c_run 与 pd_a64_jitfn）。 */
 #include "../port/a64/pd_a64_jit.c"
 #include "../port/a64/pd_a64_run.c"
+#include "../port/a64/pd_a64_jitc.c"
 #include "../port/a64/pd_a64_parm.c"
 
 #define kasm87c_copyglob2struct pd_a64_copyglob2struct
