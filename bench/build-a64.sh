@@ -36,3 +36,22 @@ $CC -arch arm64 $OPT -I polydraw_src \
 	polydraw_src/eval.a64bench.stitch.c -o "$OUT/eval_bench" -lm
 echo "-> $OUT/eval_bench"
 "$OUT/eval_bench" '(x){s=0;for(i=0;i<x;i++)s=s+i*i;s}' 1000 | tail -1
+
+# kplib：**零错误**直接编过（原文什么都不缺）。
+echo "== kplib"
+$CC -arch arm64 $OPT -I polydraw_src -include port/pd_port.h \
+	-w -c polydraw_src/kplib.stitch.c -o "$OUT/kplib.o"
+echo "-> $OUT/kplib.o"
+
+# polydraw：靠 port/a64/winshim/ 那几份**假头文件**（windows.h / process.h / gl/gl.h）
+# 编过。原文 18KB 的 pd_head.h 一个字节都没改。
+#   * `-fms-extensions`：`10000000000000I64` 这种 MSVC 整数后缀（pd_host_gl.c:722）；
+#   * 那三个 `-Wno-`：原文是 C89，而 clang 16 起把 implicit-int / implicit-decl /
+#     int-conversion 提成了错误。
+# 这一步只到 .o —— 连成可执行还差那 78 个 win32 函数的实现（下一步）。
+echo "== polydraw（只到 .o）"
+$CC -arch arm64 $OPT -fms-extensions \
+	-Wno-implicit-int -Wno-implicit-function-declaration -Wno-int-conversion -w \
+	-I polydraw_src -I port/a64/winshim -include port/pd_port.h \
+	-c polydraw_src/polydraw.stitch.c -o "$OUT/polydraw.o"
+echo "-> $OUT/polydraw.o"

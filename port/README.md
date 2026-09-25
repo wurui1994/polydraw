@@ -79,8 +79,24 @@ kasm87() 编译本身                     0.0137 ms/趟
 下一步（ADR-0045 D2）：真的 arm64 后端 —— 不再走解释器，把 `gasm[]` 直接
 落成 arm64 机器码。thunk 这一格已经把"生成可执行内存"这条路走通了。
 
-再往后（出图那一半）：`kplib.c` 在 arm64 上**零错误**直接编过了；`polydraw.c`
-只差 `windows.h`（`pd/pd_head.h:10`）。计划是给 `port/a64/winshim/` 放几份
-**假头文件**（`windows.h` / `process.h` / `gl/gl.h`），这样 `pd_head.h` 那 18KB
-一个字节都不用改；win32 的实现（78 个函数，绝大多数在 `pd_win.c` 那份编辑器里）
-按"出图只要 `pd_host_gl.c` + `pd_script.c`"的口径挑着补。
+再往后（出图那一半）：`kplib.c` 在 arm64 上**零错误**直接编过；`polydraw.c` 现在
+也**编过了（0 错误）**，靠的是 `port/a64/winshim/` 那几份**假头文件** ——
+`pd/pd_head.h` 那 18KB 一个字节都没改。
+
+三处不显然的地方：
+
+* **`gl/gl.h`**：Windows 那份只有 GL 1.1，GL 2.0 那一批（`glUniform*` /
+  `glCreateShader` …）在 polydraw 里是**自己一张函数指针表**。macOS 的
+  `OpenGL/gl.h` 把它们当真函数声明了 —— 43 个 redefinition。办法是先把 SDK 那份
+  包进来（真函数照旧叫原名），**然后把那 43 个名字 `#define` 成 `pd_*`**：
+  宏从那一行往后生效，于是 `pd_head.h` 的指针表与后面全部调用点一致改名，自己一套；
+* **`-fms-extensions`**：`10000000000000I64` 这种 MSVC 整数后缀
+  （`pd_host_gl.c:722`）。字面量后缀是 pp-number 的一部分，宏碰不到它，
+  只能靠编译器开关；
+* **那三个 `-Wno-`**：原文是 C89，clang 16 起把 implicit-int /
+  implicit-function-declaration / int-conversion 提成了错误。
+
+还差 **78 个 win32 函数的实现**才能连成可执行（`nm -u bench/out/polydraw.o` 就是
+那张清单）。绝大多数在 `pd_win.c`（编辑器）里，出图只要 `pd_host_gl.c` +
+`pd_script.c` —— 按这个口径挑着补：计时/文件/ini 要真的，窗口/菜单/对话框/MIDI 空壳。
+`__try`/`__except`（`pd_script.c:295`）现在降成了"没有守护"，理由写在 `pd_port.h` 里。
