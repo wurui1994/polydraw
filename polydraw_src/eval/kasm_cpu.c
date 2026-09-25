@@ -1,0 +1,62 @@
+
+static long round0msk[2048][2];
+//--------------------------------------------------
+static long cputype = 0, cpuinited = 0;static _inline long testflag (long c)
+{
+	_asm
+	{
+		mov ecx, c
+		pushfd
+		pop eax
+		mov edx, eax
+		xor eax, ecx
+		push eax
+		popfd
+		pushfd
+		pop eax
+		xor eax, edx
+		mov eax, 1
+		jne menostinx
+		xor eax, eax
+		menostinx:
+	}
+}
+
+static _inline void cpuid (long a, long *s)
+{
+	_asm
+	{
+		push ebx
+		push esi
+		mov eax, a
+		cpuid
+		mov esi, s
+		mov dword ptr [esi+0], eax
+		mov dword ptr [esi+4], ebx
+		mov dword ptr [esi+8], ecx
+		mov dword ptr [esi+12], edx
+		pop esi
+		pop ebx
+	}
+}static _inline long testflag (long c) { return(0); }
+static _inline void cpuid (long a, long *s) { return; }
+	//Bit numbers of return value:
+	//0:FPU, 4:RDTSC, 15:CMOV, 22:MMX+, 23:MMX, 25:SSE, 26:SSE2, 27:SSE3, 30:3DNow!+, 31:3DNow!
+static long getcputype ()
+{
+	long i, cpb[4], cpid[4];
+	if (!testflag(0x200000)) return(0);
+	cpuid(0,cpid); if (!cpid[0]) return(0);
+	cpuid(1,cpb); i = (cpb[3]&~((1<<22)|(1<<27)|(1<<30)|(1<<31)));
+	if (cpb[2]&(1<<0)) i |= (1<<27); //I hijack bit 27 for SSE3 detection
+	cpuid(0x80000000,cpb);
+	if (((unsigned long)cpb[0]) > 0x80000000)
+	{
+		cpuid(0x80000001,cpb);
+		i |= (cpb[3]&(1<<31));
+		if (!((cpid[1]^0x68747541)|(cpid[3]^0x69746e65)|(cpid[2]^0x444d4163))) //AuthenticAMD
+			i |= (cpb[3]&((1<<22)|(1<<30)));
+	}
+	if (i&(1<<25)) i |= (1<<22); //SSE implies MMX+ support
+	return(i);
+}

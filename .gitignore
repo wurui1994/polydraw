@@ -1,0 +1,4 @@
+.DS_Store
+*.obj
+polydraw.exe
+polydraw_bench.txt
