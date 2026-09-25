@@ -1,6 +1,7 @@
 /* port/a64/kasm_main_a64.c —— `eval/kasm_main.c` 的 arm64 替身。
  *
- * 与原文的差别**只有一处**：`#if (COMPILE != 0)` 那条分支的收尾。
+ * 与原文的差别只有两处：`#if (COMPILE != 0)` 那条分支的收尾，以及 `texttrans`
+ * 那块位图的大小（第 15 个洞，见 tools/mkmain.mjs 的注）。
  * `diff -u polydraw_src/eval/kasm_main.c port/a64/kasm_main_a64.c` 看得见全部改动。
  * 原文一个字节都没动 —— 这一份是新材料，只有 arm64 的缝合文件包含它。
  */
@@ -32,7 +33,7 @@ void *kasm87 (char *bakz)
 	kasm87err0 = -1; kasm87err1 = -1;
 
 	i = strlen(bakz)+1+2;
-	texttransn = (((i+31)>>5)<<2); //# bytes for texttrans bit buf, aligned to 32-bits
+	texttransn = (((i+31)>>5)*(long)sizeof(long)) /*本机改：一格 long 在 LP64 上是 8 字节，见头注第 15 个洞*/; //# bytes for texttrans bit buf, aligned to 32-bits
 	if (texttransn > texttransmal)
 	{
 		if (texttrans) free((void *)texttrans);

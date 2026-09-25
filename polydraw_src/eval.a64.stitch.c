@@ -45,7 +45,9 @@
 #include "eval/kasm_dbg.c"
 #include "eval/kasm_name.c"
 #include "eval/kasm_grow.c"
-#include "eval/kasm_parse.c"
+/* 第 17 个洞：多维数组的维度表一格是 4 字节，原文两头都写成 `long *`
+   （32 位 x86 上正好，LP64 上错位）—— 换成生成出来的替身，只差那两处强转。 */
+#include "../port/a64/kasm_parse_a64.c"
 #include "eval/kasm_emit.c"
 #include "eval/kasm_opt.c"
 
