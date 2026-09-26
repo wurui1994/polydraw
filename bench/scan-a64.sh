@@ -6,13 +6,15 @@
 # 有了这张表才知道下一刀该往哪儿使劲，而不是逐份猜。
 #
 # 用法：bench/scan-a64.sh [每份的帧数，默认 10]
-#       结果落 bench/out/scan.tsv，每份的 polydraw 诊断落 bench/out/scanlog/。
+#       结果落 $OUT/scan.tsv，每份的 polydraw 诊断落 $OUT/scanlog/。
+#       `BIN=` 与 `OUT=` 都可以换 —— x86-64 那两条腿靠这两个 env 各自落一份
+#       （`bench/out-x64-osx` / `bench/out-x64`），**别让它们互相覆盖**。
 set -uo pipefail
 cd "$(dirname "$0")/.."
 BIN=${BIN:-bench/out/polydraw_a64}
 N=${1:-10}
 TMO=${TMO:-20}
-OUT=bench/out
+OUT=${OUT:-bench/out}
 LOGD=$OUT/scanlog
 [ -x "$BIN" ] || { echo "先跑 bench/build-a64.sh"; exit 1; }
 mkdir -p "$LOGD" "$OUT/scanpng"
