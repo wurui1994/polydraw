@@ -54,6 +54,7 @@ static char *pd_a64_page[PD_MAXPAGE];
 static long pd_a64_pagenum = 0;
 static long pd_a64_used[PD_MAXPAGE];
 
+#if defined(__aarch64__) || defined(_M_ARM64)
 /* movz/movk 一族：`0xD2800000`（movz）/ `0xF2800000`（movk），
    位段是 hw<<21 | imm16<<5 | Rd（ARMv8 C6.2.190/C6.2.187）。 */
 static void pd_a64_movabs (unsigned int *o, int rd, unsigned long long v)
@@ -65,6 +66,7 @@ static void pd_a64_movabs (unsigned int *o, int rd, unsigned long long v)
 		o[i] = ((i == 0) ? 0xD2800000u : 0xF2800000u) | ((unsigned int)i<<21) | (im<<5) | (unsigned int)rd;
 	}
 }
+#endif
 
 /* 换一页的保护位。写的时候 RW、跑的时候 RX —— 绝不要 RWX（arm64 macOS 不给）。 */
 static int pd_a64_protect (long pi, int exec)
@@ -92,10 +94,17 @@ static char *pd_a64_slot (long *pio)
 	return(pd_a64_page[pi]);
 }
 
-/* 造一格 thunk。`entry` 是 kasm87c 或 kasm87cp（原文那句 hack 交回来的就是它）。 */
+/* 造一格 thunk。`entry` 是 kasm87c 或 kasm87cp（原文那句 hack 交回来的就是它）。
+ *
+ * x86-64（SysV）那一份的两条讲究，与 arm64 那份是同一件事换了寄存器：
+ *   * 传参的寄存器（rdi/rsi/rdx/rcx/r8/r9、xmm0-7）与栈上那些变参一个字节都不许动，
+ *     所以只用 **r10/r11** —— SysV 里这两个是"调用者保存且不传参"的；
+ *   * **rax 也不许动**：`kasm87c(double first, ...)` 是变参函数，调用约定要求
+ *     al = 用了几个向量寄存器，callee 的 va_start 要读它（SysV AMD64 §3.5.7）。
+ *     所以不能像常见的 thunk 那样拿 rax 当草稿纸。
+ */
 static void *pd_a64_thunk (void *kcd, void *entry)
 {
-	unsigned int *o;
 	char *slot;
 	long pi = 0;
 
@@ -103,12 +112,37 @@ static void *pd_a64_thunk (void *kcd, void *entry)
 	if (!slot) return(0);
 	if (!pd_a64_protect(pi,0)) return(0);
 
-	o = (unsigned int *)slot;
-	pd_a64_movabs(&o[0],16,(unsigned long long)(unsigned long)&gkasm87cptr);
-	pd_a64_movabs(&o[4],17,(unsigned long long)(unsigned long)kcd);
-	o[8] = 0xF9000000u | (16u<<5) | 17u;                 /* str x17, [x16]  */
-	pd_a64_movabs(&o[9],16,(unsigned long long)(unsigned long)entry);
-	o[13] = 0xD61F0000u | (16u<<5);                       /* br  x16         */
+#if defined(__aarch64__) || defined(_M_ARM64)
+	{
+		unsigned int *o = (unsigned int *)slot;
+		pd_a64_movabs(&o[0],16,(unsigned long long)(unsigned long)&gkasm87cptr);
+		pd_a64_movabs(&o[4],17,(unsigned long long)(unsigned long)kcd);
+		o[8] = 0xF9000000u | (16u<<5) | 17u;                 /* str x17, [x16]  */
+		pd_a64_movabs(&o[9],16,(unsigned long long)(unsigned long)entry);
+		o[13] = 0xD61F0000u | (16u<<5);                       /* br  x16         */
+	}
+#elif defined(__x86_64__) || defined(_M_X64)
+	{
+		unsigned char *o = (unsigned char *)slot;
+		long k = 0;
+		/* movabs r10, &gkasm87cptr   49 BA imm64 */
+		o[k++] = 0x49; o[k++] = 0xBA;
+		*(unsigned long long *)&o[k] = (unsigned long long)(unsigned long)&gkasm87cptr; k += 8;
+		/* movabs r11, kcd            49 BB imm64 */
+		o[k++] = 0x49; o[k++] = 0xBB;
+		*(unsigned long long *)&o[k] = (unsigned long long)(unsigned long)kcd; k += 8;
+		/* mov [r10], r11             4D 89 1A */
+		o[k++] = 0x4D; o[k++] = 0x89; o[k++] = 0x1A;
+		/* movabs r10, entry          49 BA imm64 */
+		o[k++] = 0x49; o[k++] = 0xBA;
+		*(unsigned long long *)&o[k] = (unsigned long long)(unsigned long)entry; k += 8;
+		/* jmp r10                    41 FF E2 */
+		o[k++] = 0x41; o[k++] = 0xFF; o[k++] = 0xE2;
+		if (k > PD_SLOT_CODE) return(0);                      /* 36 字节，装得下 */
+	}
+#else
+#error "pd_a64_thunk：这个架构还没有 codestub（arm64 / x86-64 各一份）"
+#endif
 
 	*(void **)&slot[56] = kcd;                            /* 记账：这一格的 kcd     */
 	*(long  *)&slot[64] = 0;                              /*       gstatmem（后补） */

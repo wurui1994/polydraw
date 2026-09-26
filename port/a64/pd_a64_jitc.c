@@ -46,6 +46,87 @@ extern void pd_imm_break (void);
 extern void pd_imm_flush (void);
 extern void pd_imm_frame_end (void);
 
+/* ── 与架构无关的那几格（arm64 与 x86-64 两份发射器共用）────────────────────────
+ *
+ * 这一段本来夹在 arm64 发射器中间；补 x86-64 那一份（`port/x64/pd_x64_jitc.c`）时
+ * 提到前头来 —— 两份发射器各自定义 `pd_jit_build`，别的全共用。
+ */
+
+/* 几格小包装：体里就是原文那一行，这样 JIT 只管"摆参数、跳过去"，
+   不用猜 `krand` 的返回类型、也不用自己拼 `log(a)/log(b)`。 */
+static double pd_jit_rnd  (void) { return(((double)krand())*(double)oneover2_31); }
+static double pd_jit_nrnd (void) { return(nrnd()); }
+static double pd_jit_fact (double x) { return(fact(x)); }
+static double pd_jit_logb (double x, double y) { return(log(x)/log(y)); }
+
+/**
+ * **"这一条走解释器"的退路**（每条指令一格，不是整份）。
+ *
+ * 做法是拿一份 `kcd` 的**浅拷贝**（所有表都共用），把 `gasm` 指到第 i 条、`gecnt` 改成 1，
+ * 然后调原文的 `kasm87c_run` —— 它跑完那一条就掉到末尾 `return(*p[0])`。
+ * 于是**一行重复代码都不用写**（USERFUNC 那张原型串 switch 尤其不该抄第二份）。
+ *
+ * 一个必须处理的坑：`kasm87c_run` 算 `plst[KECX]` 用的是**进来那一刻的 `gvlp`**，
+ * 而我们是在函数体中间调它（`gvlp` 已经加过 `stackdoubs` 了）。所以先把 `gvlp` 退回去、
+ * 跑完再放回来 —— 不退的话局部量的地址整片偏掉（这一格错了是无声的乱数）。
+ *
+ * 只能用在**不改控制流**的指令上（GOTO/IF0/IF1/RETURN 由 JIT 自己发）。
+ */
+static double pd_a64_jit_one (char *parmdat, kcd_t *kcd, long i)
+{
+	kcd_t tmp = *kcd;
+	double *save = gvlp, d;
+	tmp.gasm = &kcd->gasm[i];
+	tmp.gecnt = 1;
+	gvlp = save - kcd->stackdoubs;
+	d = kasm87c_run(parmdat,&tmp);
+	gvlp = save;
+	return(d);
+}
+
+/* 两把**按指令**二分的开关（都走那格"这一条交给解释器"的退路 —— 先前那种
+   "一碰上就整份退回"的关法说明不了是哪一族、更说明不了是哪一条）：
+     PD_JITNO=f1,f2,…  这几号指令交给解释器（编号是 `eval.c:251` 那张 enum）
+     PD_JITFB=a,b      下标在 [a,b] 里的指令交给解释器
+   控制流那三族（GOTO/IF0/IF1/RETURN）必须由 JIT 自己发，所以不受这两把开关管。 */
+static int pd_jit_want_fb (kcd_t *kcd, long i, long n)
+{
+	long f = kcd->gasm[i].f;
+	const char *no, *rg;
+	if ((f == GOTO) || (f == IF0) || (f == IF1) || (f == RETURN)) return(0);
+	no = getenv("PD_JITNO");
+	rg = getenv("PD_JITFB");
+	if (no)
+	{
+		char want[16]; long k, wl;
+		snprintf(want,sizeof(want),"%ld",f); wl = (long)strlen(want);
+		for(k=0;no[k];k++)
+		{
+			if ((k) && (no[k-1] != ',')) continue;
+			if (!strncmp(&no[k],want,(size_t)wl) && ((no[k+wl] == 0) || (no[k+wl] == ','))) return(1);
+		}
+	}
+	if (rg)
+	{
+		/* `a,b` 或者 `a,b,gecnt`（第三格给的话只管指令数正好是它的那一份 kcd
+		   —— 一份脚本有好几格 kcd，不分开的话二分会把别人的也退回去）。 */
+		long lo = atol(rg), hi;
+		const char *cm = strchr(rg,',');
+		hi = cm ? atol(cm+1) : lo;
+		if ((!cm) || (!strchr(cm+1,',')) || (atol(strchr(cm+1,',')+1) == n))
+			if ((i >= lo) && (i <= hi)) return(1);
+	}
+	return(0);
+}
+
+/* 上一趟编译里有几条走了退路（只给 PD_JITDBG 印）。 */
+static long pd_jit_lastfb = 0;
+
+/* 这一格由架构自己那份发射器给（arm64 在本文件下半截，x86-64 在 port/x64/）。 */
+static void *pd_jit_build (kcd_t *kcd);
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+
 /* 一格编译缓冲。`bad` 一立起来就整份放弃（见头注）。 */
 typedef struct
 {
@@ -356,38 +437,6 @@ static void pd_bounds (pd_jb *b, long k, int rj)
 /* 分支要回填的地方（A64 的相对偏移单位是"条指令"）。 */
 typedef struct { long at; long tgt; int cond; } pd_fix;   /* cond < 0 表示无条件 B */
 
-/* 几格小包装：体里就是原文那一行，这样 JIT 只管"摆参数、跳过去"，
-   不用猜 `krand` 的返回类型、也不用自己拼 `log(a)/log(b)`。 */
-static double pd_jit_rnd  (void) { return(((double)krand())*(double)oneover2_31); }
-static double pd_jit_nrnd (void) { return(nrnd()); }
-static double pd_jit_fact (double x) { return(fact(x)); }
-static double pd_jit_logb (double x, double y) { return(log(x)/log(y)); }
-
-/**
- * **"这一条走解释器"的退路**（每条指令一格，不是整份）。
- *
- * 做法是拿一份 `kcd` 的**浅拷贝**（所有表都共用），把 `gasm` 指到第 i 条、`gecnt` 改成 1，
- * 然后调原文的 `kasm87c_run` —— 它跑完那一条就掉到末尾 `return(*p[0])`。
- * 于是**一行重复代码都不用写**（USERFUNC 那张原型串 switch 尤其不该抄第二份）。
- *
- * 一个必须处理的坑：`kasm87c_run` 算 `plst[KECX]` 用的是**进来那一刻的 `gvlp`**，
- * 而我们是在函数体中间调它（`gvlp` 已经加过 `stackdoubs` 了）。所以先把 `gvlp` 退回去、
- * 跑完再放回来 —— 不退的话局部量的地址整片偏掉（这一格错了是无声的乱数）。
- *
- * 只能用在**不改控制流**的指令上（GOTO/IF0/IF1/RETURN 由 JIT 自己发）。
- */
-static double pd_a64_jit_one (char *parmdat, kcd_t *kcd, long i)
-{
-	kcd_t tmp = *kcd;
-	double *save = gvlp, d;
-	tmp.gasm = &kcd->gasm[i];
-	tmp.gecnt = 1;
-	gvlp = save - kcd->stackdoubs;
-	d = kasm87c_run(parmdat,&tmp);
-	gvlp = save;
-	return(d);
-}
-
 /** 发一格"走解释器"的调用（实参是 parmdat / kcd / 指令下标）。 */
 static void pd_fallback (pd_jb *b, long i)
 {
@@ -650,8 +699,7 @@ static void pd_op (pd_jb *b, kcd_t *kcd, long i, pd_fix *fix, long *nfix)
  * `GOTO`/`IF*` 的目标是 `gasm` 下标，而原文那句是 `i = r[0].r;` 之后**再过一趟
  * `i++`** —— 所以真正的落点是 `r[0].r + 1`（这一格错了就是无声的死循环）。
  */
-/* 上一趟编译里有几条走了退路（只给 PD_JITDBG 印）。 */
-static long pd_jit_lastfb = 0;
+/* 上一趟编译里有几条走了退路：`pd_jit_lastfb`（在前头，两份发射器共用）。 */
 
 static void *pd_jit_build (kcd_t *kcd)
 {
@@ -672,41 +720,7 @@ static void *pd_jit_build (kcd_t *kcd)
 	for(i=0;i<n;i++)
 	{
 		at[i] = b.n;
-		/* 两把**按指令**二分的开关（都走那格"这一条交给解释器"的退路 —— 先前那种
-		   "一碰上就整份退回"的关法说明不了是哪一族、更说明不了是哪一条）：
-		     PD_JITNO=f1,f2,…  这几号指令交给解释器（编号是 `eval.c:251` 那张 enum）
-		     PD_JITFB=a,b      下标在 [a,b] 里的指令交给解释器
-		   控制流那三族（GOTO/IF0/IF1/RETURN）必须由 JIT 自己发，所以不受这两把开关管。 */
-		{
-			long f = kcd->gasm[i].f;
-			int fb = 0;
-			if ((f != GOTO) && (f != IF0) && (f != IF1) && (f != RETURN))
-			{
-				const char *no = getenv("PD_JITNO");
-				const char *rg = getenv("PD_JITFB");
-				if (no)
-				{
-					char want[16]; long k, wl;
-					snprintf(want,sizeof(want),"%ld",f); wl = (long)strlen(want);
-					for(k=0;no[k];k++)
-					{
-						if ((k) && (no[k-1] != ',')) continue;
-						if (!strncmp(&no[k],want,(size_t)wl) && ((no[k+wl] == 0) || (no[k+wl] == ','))) { fb = 1; break; }
-					}
-				}
-				if (rg)
-				{
-					/* `a,b` 或者 `a,b,gecnt`（第三格给的话只管指令数正好是它的那一份 kcd
-					   —— 一份脚本有好几格 kcd，不分开的话二分会把别人的也退回去）。 */
-					long lo = atol(rg), hi;
-					const char *cm = strchr(rg,',');
-					hi = cm ? atol(cm+1) : lo;
-					if ((!cm) || (!strchr(cm+1,',')) || (atol(strchr(cm+1,',')+1) == n))
-						if ((i >= lo) && (i <= hi)) fb = 1;
-				}
-			}
-			if (fb) { pd_fallback(&b,i); continue; }
-		}
+		if (pd_jit_want_fb(kcd,i,n)) { pd_fallback(&b,i); continue; }
 		pd_op(&b,kcd,i,fix,&nfix);
 		if (b.bad) break;
 	}
@@ -749,6 +763,14 @@ static void *pd_jit_build (kcd_t *kcd)
 	free(b.c); free(at); free(fix);
 	return(mem);
 }
+
+#endif   /* arm64 那份发射器到此 */
+
+/* x86-64 那份发射器在 `port/x64/pd_x64_jitc.c`（缝合文件里紧跟着这一份）。
+   两个都不是的架构上给一格空的 —— 整份退回解释器，答案照旧对。 */
+#if !defined(__aarch64__) && !defined(_M_ARM64) && !defined(__x86_64__) && !defined(_M_X64)
+static void *pd_jit_build (kcd_t *kcd) { (void)kcd; return(0); }
+#endif
 
 /* 一格 kcd 编一次。kcd 是原文的结构体（不能加字段），所以拿一张小表记。 */
 #define PD_JIT_CACHE 256

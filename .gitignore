@@ -3,3 +3,4 @@
 polydraw.exe
 polydraw_bench.txt
 bench/out/
+bench/out-x64/
