@@ -53,8 +53,13 @@ if [ "${PD_X64_GL:-1}" = 0 ]; then echo "== 跳过 polydraw（PD_X64_GL=0）"; e
 case "$(uname -s)" in
 # osx x86-64：GL 走 CGL（不要窗口），GUI 那一族**桩掉** —— homebrew 那份 libglfw
 # 是 arm64 的，连不进 x86_64 的可执行文件（见 port/x64/pd_gui_stub.c 的头注）。
-Darwin) GLLIB=(-framework OpenGL); GLINC=(); GUISRC=port/x64/pd_gui_stub.c;;
-*)      GLLIB=(-lGL -lglfw -ldl); GLINC=(); GUISRC=port/a64/pd_gui_glfw.c;;
+Darwin) GLLIB=(-framework OpenGL); GLINC=(); GUISRC=port/x64/pd_gui_stub.c; EGLSRC=;;
+# linux：出图走 **EGL surfaceless**（无头，不要 DISPLAY），窗口那条腿走 GLFW。
+# `-rdynamic` 不许省：polydraw 用 `wglGetProcAddress("wglSwapIntervalEXT")` 去问**我们
+# 自己导出的那一族 wgl\* 垫片**，而我们那一份是 `dlsym(RTLD_DEFAULT,…)` 实现的 ——
+# ELF 上可执行文件的符号默认**不进动态符号表**，查不到就弹
+# `wglSwapIntervalEXT() not supported` 然后退出（macOS 上一直是可见的，所以没踩到）。
+*)      GLLIB=(-lGL -lEGL -lglfw -ldl -rdynamic); GLINC=(); GUISRC=port/a64/pd_gui_glfw.c; EGLSRC=port/x64/pd_gl_egl.c;;
 esac
 
 echo "== kplib"
@@ -79,10 +84,16 @@ done
 # GUI 与攒批那两份不要假 windows.h（它们用真 GLFW / 真 GL 头）
 $CC "${ARCH[@]}" $OPT -w "${GLINC[@]}" -c "$GUISRC" -o "$OUT/pd_gui_glfw.o"
 $CC "${ARCH[@]}" $OPT -w -c port/a64/pd_gl_imm.c -o "$OUT/pd_gl_imm.o"
+# 无头上下文那一份（只有 linux 有；macOS 走 CGL）
+EGLOBJ=()
+if [ -n "$EGLSRC" ]; then
+	$CC "${ARCH[@]}" $OPT -w -c "$EGLSRC" -o "$OUT/pd_gl_egl.o"
+	EGLOBJ=("$OUT/pd_gl_egl.o")
+fi
 
 echo "== polydraw_x64"
 $CC "${ARCH[@]}" "$OUT/polydraw.o" "$OUT/kplib.o" "$OUT/eval.o" \
 	"$OUT/pd_win_a64.o" "$OUT/pd_gl_cgl.o" "$OUT/pd_main_a64.o" "$OUT/pd_gui_glfw.o" \
-	"$OUT/pd_gl_imm.o" "${GLLIB[@]}" -lm -o "$OUT/polydraw_x64"
+	"$OUT/pd_gl_imm.o" "${EGLOBJ[@]+"${EGLOBJ[@]}"}" "${GLLIB[@]}" -lm -o "$OUT/polydraw_x64"
 echo "-> $OUT/polydraw_x64"
 

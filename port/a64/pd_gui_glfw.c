@@ -258,6 +258,7 @@ int pd_gui_make_current (void){
 void *pd_gui_procaddr (const char *nm)
 {
 	if (!nm) return(0);
+	if (!pd_win) return(0);      /* 还没 init 就不能问 GLFW（无头那条路压根不 init） */
 	return((void *)glfwGetProcAddress(nm));
 }
 

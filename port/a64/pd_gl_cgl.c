@@ -28,7 +28,13 @@
 #define GL_GLEXT_PROTOTYPES 1
 #include <GL/gl.h>
 #include <GL/glext.h>
-/* 离屏上下文那一格（port/a64/pd_gui_glfw.c）。 */
+/* 无头上下文那一格（port/x64/pd_gl_egl.c，EGL surfaceless + llvmpipe）——
+   出图那条路的**默认**。GLFW 那个不可见窗口只是退路（EGL 开不出来时）。 */
+extern int pd_egl_open (void);
+extern int pd_egl_on (void);
+extern int pd_egl_make_current (void);
+extern void *pd_egl_procaddr (const char *nm);
+/* GLFW 的不可见窗口（port/a64/pd_gui_glfw.c），要 DISPLAY。 */
 extern int pd_gui_open_offscreen (void);
 #endif
 #include <dlfcn.h>
@@ -123,7 +129,10 @@ HGLRC wglCreateContext (HDC dc)
 		return((HGLRC)pd_cgl);
 	}
 #else
+	/* 出图那条路：**先要无头的**（EGL surfaceless + llvmpipe，不要 DISPLAY），
+	   开不出来才退到 GLFW 的不可见窗口（那一条要 X）。 */
 	if (pd_cgl) return((HGLRC)1);
+	if (pd_egl_open()) { pd_cgl = 1; return((HGLRC)1); }
 	if (!pd_gui_open_offscreen()) return(0);
 	pd_cgl = 1;
 	return((HGLRC)1);
@@ -149,7 +158,8 @@ BOOL wglMakeCurrent (HDC dc, HGLRC rc)
 	if (CGLSetCurrentContext((CGLContextObj)rc) != kCGLNoError) return(0);
 #else
 	if (!rc) return(1);
-	if (!pd_gui_make_current()) return(0);
+	if (pd_egl_on()) { if (!pd_egl_make_current()) return(0); }
+	else if (!pd_gui_make_current()) return(0);
 #endif
 	/* **一次建足够大**（不按 viewport 重建）：重建会把已经画进去的内容丢掉，
 	   而 polydraw 是先画、后我们才知道 viewport 多大 —— 踩过一次，第 0 帧的画面
@@ -267,6 +277,10 @@ static void *pd_sym (const char *nam)
 {
 	void *p = dlsym(RTLD_DEFAULT,nam);
 #if !defined(__APPLE__)
+	/* 扩展函数不一定是 libGL 的导出符号。无头那条路问 EGL，窗口那条路问 GLFW
+	   （底下是 glXGetProcAddress）。**次序不能反**：GLFW 这条路上没 init 时
+	   `glfwGetProcAddress` 是不能问的。 */
+	if (!p) p = pd_egl_procaddr(nam);
 	if (!p) p = pd_gui_procaddr(nam);
 #endif
 	return(p);

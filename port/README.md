@@ -757,20 +757,43 @@ CPU 花在**顶点抄两遍**（图元那份 scratch -> 攒批那份）。
 
 ### 显示从哪儿来（三档，别混）
 
-* **判据（出图 / GUI）**：容器自己的 `Xvfb :99` + mesa llvmpipe。为什么出图也要 X ——
-  macOS 上上下文走 CGL（不要窗口），linux 上走的是 GLFW 的**不可见窗口**，
-  而 GLFW 要一个显示才给上下文；
-* **要用眼睛看**：`bash bench/docker-x64.sh vnc ken/balls.pss` —— 容器里 `x11vnc`
-  把 `:99` 那张屏送出来，宿主 `open vnc://127.0.0.1:5900`（macOS 自带"屏幕共享"）；
-* **XQuartz**：**X11 通、GLX 不通**，量过了。
-  * 通的那一半：`defaults write org.xquartz.X11 nolisten_tcp -bool false` +（退出再开
-    XQuartz）+ `xhost +` 之后，容器里 `xdpyinfo` 与 `xeyes` 都正常（`x11` 那一档）；
-  * 不通的那一半：容器里的 mesa 要一格 `drisw` 软件屏，XQuartz 不给对应的 fbConfig ——
-    `No matching fbConfigs or visuals found` / `glx: failed to create drisw screen`，
-    `X_GLXCreateNewContext` 直接 BadValue。`enable_iglx -bool true` 也没用（试过）。
-    所以 **polydraw 的窗口走不了 XQuartz**，用 VNC 那一档。
+* **出图 / 扫描：无头**（`port/x64/pd_gl_egl.c`）。EGL 的 **surfaceless** 平台 +
+  mesa 的 llvmpipe —— 没有 X、没有窗口、没有 surface，上下文直接建出来，照旧画进
+  我们自己那张 FBO。判据里还故意 `unset DISPLAY`，顺带把"出图不要 X"这件事判了。
+  `PD_EGL=0` 退回 GLFW 的不可见窗口（那条要 X，A/B 对照用）。
+  三个坑写在那一份的头注里：`eglGetDisplay(EGL_DEFAULT_DISPLAY)` 没 DISPLAY 时会
+  去试 X11 然后 `eglInitialize` 回 **0x3001**（要点明
+  `EGL_PLATFORM_SURFACELESS_MESA`）；`EGL_SURFACE_TYPE` 要写 `EGL_PBUFFER_BIT`；
+  扩展函数走 `eglGetProcAddress`（GLFW 那条路上压根没 init，不能问它）。
+  **不传 profile 属性** = 兼容档（`4.6 (Compatibility Profile)`）—— polydraw 的
+  `glBegin/glEnd` 要固定管线，与 macOS 上"不能用 core profile"是同一件事；
+* **GUI 判据**：容器自己的 `Xvfb :99` —— 窗口那条腿走的是 GLFW，得有个 X 服务器；
+* **XQuartz**：**用来验 GLFW 那条腿**（`bash bench/docker-x64.sh guix`）。
+  量过的结论，别再猜：
+  * X11 通（`xeyes` 能显示）；
+  * **GLX 也通，但是"间接"的**。mesa 自己的 `drisw` 软件屏建不起来
+    （`glx: failed to create drisw screen` —— `glxinfo -B` 就死在这儿，
+    **先前据此写下"GLX 不通"是错的**），但它会退到 indirect GLX：`glxgears` 跑得动，
+    `GL_RENDERER = Apple M1`、`GL_VERSION = 1.4 (2.1 Metal)`，真正渲染的是**宿主那颗 GPU**；
+  * 代价：间接 GLX **一个扩展都不报**（`GL_EXTENSIONS` 空），FBO 与着色器那一族
+    在这条路上没有 —— 用着色器的脚本会退化；
+  * **回读的像素不可信**：`gui-a64.sh` 那半判据（非黑像素数）在这条路上
+    `tigrou/clock.pss`（黑底细线）**每一帧都报"整屏非黑"**（76800/76800），明显是垃圾。
+    所以 `guix` 那一档只判得了"窗口开出来了 + 帧在推进（19~20fps）+ 没报错"；
+    画得对不对要用眼睛看，或者走 Xvfb / VNC。
   * 宿主那两项设置是**持久**的：不想留着就 `defaults delete org.xquartz.X11 nolisten_tcp`
     （以及 `enable_iglx`）、`xhost -`。
+* **要用眼睛看动画**：`bash bench/docker-x64.sh vnc ken/balls.pss` —— 容器里 `x11vnc`
+  把 `:99` 那张屏送出来，宿主 `open vnc://127.0.0.1:5900`（macOS 自带"屏幕共享"）。
+
+### linux 链接时的一格：`-rdynamic` 不许省
+
+polydraw 用 `wglGetProcAddress("wglSwapIntervalEXT")` 去问**我们自己导出的那一族
+`wgl*` 垫片**，而我们那一份是 `dlsym(RTLD_DEFAULT,…)` 实现的。ELF 上可执行文件的
+符号默认**不进动态符号表**，于是查不到 -> 弹 `wglSwapIntervalEXT() not supported`
+然后退出（macOS 上可执行文件的符号一直是可见的，所以这一格是换平台才冒出来的）。
+现象很像"EGL 没建起来"，其实 GL 版本那几行都已经印出来了 —— **看日志印到哪一行**。
+
 
 ### Windows 那一格
 
@@ -799,9 +822,10 @@ GLFW 那一份是**给没有 win32 的平台补的等价实现**。真要在 Win
   那是 `klock()` 驱动那一类自带的抖动（见"扫描尺子的颜色数不可复现"）。
   同理 `heightmap` 这一趟从"空画面"变成"ok 4 色"**不算修好了**，它只是擦过了
   "≥2 种颜色"那条线。
-* **linux 那条腿的语料账**（`bash bench/docker-x64.sh scan`，qemu + llvmpipe）：
-  ok 48 / 空画面 5 / 着色器错 0 / 崩 0 / 超时 0，与 arm64 **49/53 同分类**，
-  差的那 4 份全是 **mesa 与 Apple 那颗 GL 的差**，不是 x86-64 这一侧的：
+* **linux 那条腿的语料账**（`bash bench/docker-x64.sh scan`，**无头 EGL** + llvmpipe）：
+  ok 48 / 空画面 5 / 着色器错 0 / 崩 0 / 超时 0，与 arm64 **49/53 同分类**。
+  换成 EGL 之后这张表**一格没动**（先前走 Xvfb+GLX 是同一个 49/53）—— 所以那 4 份
+  与"上下文怎么建"无关，是 **mesa 与 Apple 那颗 GL 的差**：
   * `geo_test` —— `gl_PositionIn` undeclared。那是 `EXT_geometry_shader4`（GLSL 1.20
     那一代）的名字，**mesa 早就不给这个扩展了**（它只有 3.2 起的 core 几何着色器，
     那边叫 `gl_in[].gl_Position`）。要它得改脚本，不在这条腿的范围里；
@@ -810,6 +834,10 @@ GLFW 那一份是**给没有 win32 的平台补的等价实现**。真要在 Win
   * `gears` / `ribbons_invasion` —— 着色器一个错都不报，画面却是空的。
     这两份还没定到根因（下一刀：拿 `PD_GLDBG=1` 看每帧中心像素与 viewport，
     再按"三档 A/B（PD_JIT=0/1、PD_IMM=0）"先把 JIT 与攒批排除掉）。
+* **GUI 判据的时间预算**：`gui-a64.sh` 的 fps 那半读的是**标题栏**，而原文每秒才写一次。
+  qemu + llvmpipe 上 `SECS=5` 可能一次都没写上 —— `texture` 就这么**假红过一次**
+  （同一份 `SECS=12` 再跑 145.9 fps）。`docker-x64.sh gui` 现在默认 12 秒。
+
 
 
 * 写这一份时踩的两格（都是这门语言的性质，不是 JIT）：脚本第一个字符是 `(`
