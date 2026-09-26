@@ -6,20 +6,25 @@
 #   bash bench/docker-x64.sh test               # eval 判据（PD_JIT=0 / 1 各一趟）
 #   bash bench/docker-x64.sh ops                # 按指令族那 83 行，落到 bench/out-x64/
 #   bash bench/docker-x64.sh render             # 出图判据（Xvfb 当显示）
-#   bash bench/docker-x64.sh gui ken/balls.pss  # 真窗口 —— 走 **XQuartz**（见下）
+#   bash bench/docker-x64.sh gui                # GUI 判据（Xvfb + 非黑像素/fps）
+#   bash bench/docker-x64.sh vnc ken/balls.pss  # **看得见的窗口**：VNC 到宿主
+#   bash bench/docker-x64.sh x11 xeyes          # 往宿主 XQuartz 发 X11（**GL 不行**，见下）
 #   bash bench/docker-x64.sh sh                 # 进去自己敲
 #
-# ## 显示从哪儿来（两档，别混）
+# ## 显示从哪儿来（三档，别混）
 #
-#   * **出图/判据** 用容器自己的 `Xvfb`（`:99`）—— 与宿主无关，所以判据不会因为
-#     XQuartz 没开而红。为什么出图也要 X：macOS 上上下文走 CGL（不要窗口），
-#     linux 上走的是 GLFW 的不可见窗口，而 GLFW 要一个显示才给上下文；
-#   * **GUI** 用宿主的 **XQuartz**（`DISPLAY=host.docker.internal:0`）。要三步：
-#       1. XQuartz 允许 TCP：`defaults write org.xquartz.X11 nolisten_tcp -bool false`
-#          然后**退出再开** XQuartz（这一项是持久设置，改完记得知道自己改了什么）；
-#       2. `xhost +` 放行（跑完可以 `xhost -` 收回）；
-#       3. 这个脚本把 DISPLAY 递进去。
-#     `gui` 这一档会先拿 `xdpyinfo` 探一次，通不了就把上面三步印出来、不往下跑。
+#   * **判据（出图 / GUI）** 用容器自己的 `Xvfb`（`:99`）+ mesa 的 llvmpipe。
+#     为什么出图也要 X：macOS 上上下文走 CGL（不要窗口），linux 上走的是 GLFW 的
+#     不可见窗口，而 GLFW 要一个显示才给上下文；
+#   * **要用眼睛看** 走 **VNC**：容器里 `x11vnc` 把 `:99` 那张屏送出来，宿主
+#     `open vnc://127.0.0.1:5900`（macOS 自带"屏幕共享"）。**这是能看见动画的那条路**；
+#   * **XQuartz**（`x11` 那一档）：X11 本身**通**（`xeyes` 能显示），但 **GLX 不通** ——
+#     容器里的 mesa 要一格 `drisw` 软件屏，而 XQuartz 不给对应的 fbConfig：
+#         No matching fbConfigs or visuals found / glx: failed to create drisw screen
+#     `enable_iglx` 也没用（试过）。所以 polydraw 的窗口**走不了 XQuartz**，用 VNC 那一档。
+#     宿主那侧要先：`defaults write org.xquartz.X11 nolisten_tcp -bool false`（退出再开
+#     XQuartz）+ `xhost +`（跑完 `xhost -` 收回）。
+
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -54,19 +59,30 @@ render)
 		"$IMG" bash -lc "$XVFB bash bench/render-a64.sh"
 	;;
 gui)
+	exec docker run --rm $PLAT "${MNT[@]}" -e BIN=bench/out-x64/polydraw_x64 \
+		"$IMG" bash -lc "$XVFB bash bench/gui-a64.sh"
+	;;
+vnc)
+	# 看得见的那一档：Xvfb 画、x11vnc 送出来。宿主上 `open vnc://127.0.0.1:5900`。
+	echo "窗口在 VNC 里：宿主执行  open vnc://127.0.0.1:5900  （密码没设，只听 127.0.0.1）"
+	exec docker run --rm -it $PLAT "${MNT[@]}" -p 127.0.0.1:5900:5900 \
+		"$IMG" bash -lc "$XVFB x11vnc -display :99 -forever -shared -nopw -quiet -listen 0.0.0.0 >/tmp/vnc.log 2>&1 &
+		 sleep 1; bench/out-x64/polydraw_x64 --gui ${1:-ken/balls.pss}"
+	;;
+x11)
+	# 往宿主 XQuartz 发 X11。**GL 不行**（见头注），所以这一档只给非 GL 的客户端用。
 	exec docker run --rm -it $PLAT "${MNT[@]}" -e DISPLAY=host.docker.internal:0 \
 		"$IMG" bash -lc 'xdpyinfo >/dev/null 2>&1 || {
-			echo "连不上 $DISPLAY —— XQuartz 那三步：";
+			echo "连不上 $DISPLAY —— XQuartz 那两步：";
 			echo "  1) defaults write org.xquartz.X11 nolisten_tcp -bool false（然后退出再开 XQuartz）";
 			echo "  2) xhost +（跑完 xhost - 收回）";
-			echo "  3) 再跑这一条";
 			exit 1; }
-		 bench/out-x64/polydraw_x64 --gui '"${1:-ken/balls.pss}"
+		 '"${*:-xeyes}"
 	;;
 sh)
-	exec docker run --rm -it $PLAT "${MNT[@]}" "$IMG" bash -l
+	exec docker run --rm -it $PLAT "${MNT[@]}" -e DISPLAY=host.docker.internal:0 "$IMG" bash -l
 	;;
 *)
-	echo "不认识的子命令：$CMD（build/test/ops/render/gui/sh）"; exit 1
+	echo "不认识的子命令：$CMD（build/test/ops/render/gui/vnc/x11/sh）"; exit 1
 	;;
 esac

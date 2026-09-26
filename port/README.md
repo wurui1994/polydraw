@@ -734,43 +734,68 @@ CPU 花在**顶点抄两遍**（图元那份 scratch -> 攒批那份）。
 * `roundsd`（floor/ceil/trunc 与 `%`）是 **SSE4.1**。`pd_jit_build` 开头问一句
   `__builtin_cpu_supports("sse4.1")`，没有就整份不编 —— 退回解释器，答案照旧对。
 
-### 怎么跑（两条路，各有各的限制）
+### 怎么跑（两条腿，各有各的限制）
 
-* **linux/amd64 走 docker**：`bench/Dockerfile.x64`（`arch_llvm` 上加 mesa/glfw/
-  X11 客户端库/Xvfb），`bash bench/docker-x64.sh build|test|ops|render|gui`。
-  这台机器是 Apple Silicon，所以那一档是 **qemu 转译 + llvmpipe 软件光栅** ——
-  **只能验对错，量不了速度**（eval 的微基准 arm64 10.7us vs 容器里 25us，
-  那个比值是转译的开销，不是 JIT 的）；
-* **osx x86-64 要 Rosetta 2**：`clang -arch x86_64` 交叉编出来就是合法的 Mach-O
-  （`file` 认），但本机**没装** Rosetta（`arch -x86_64 /usr/bin/true` 回
-  `Bad CPU type in executable`）。装法：`softwareupdate --install-rosetta --agree-to-license`。
-  装好之后 `bash bench/build-x64.sh` 在 macOS 上直接出 `bench/out-x64/polydraw_x64`
-  （GL 走 CGL，与 arm64 那份一模一样）。
+* **osx x86-64 走 Rosetta 2**（`bash bench/build-x64.sh`，产物落 `bench/out-x64-osx/`）。
+  Rosetta **已经装上了**（`softwareupdate --install-rosetta --agree-to-license`）。
+  这条腿上 GL 走 **CGL**（与 arm64 那份一模一样，真 GPU），所以出图判据直接可用；
+  GUI 那一族**桩掉**（`port/x64/pd_gui_stub.c`）—— homebrew 那份 `libglfw.dylib`
+  是 arm64 的，连不进 x86_64 的可执行文件。要 x64 的真窗口得先有一份 x86_64 的 GLFW，
+  而 **arm64 原生那条腿的 GUI 是通的**，所以这一格不值得再引一套 Intel homebrew；
+* **linux/amd64 走 docker**（`bash bench/docker-x64.sh build|test|ops|render|gui|vnc|x11`，
+  产物落 `bench/out-x64/`）。镜像 `bench/Dockerfile.x64` = `arch_llvm` + mesa/glfw/
+  X11 客户端库/Xvfb/x11vnc。
 
-### GUI 走 XQuartz 的三步
+  **两条腿的产物不许混在一格**：一边是 ELF、一边是 Mach-O，而容器挂的是同一个仓库目录
+  （踩过：osx 那趟把 linux 的 `.o` 覆盖掉，容器里就连不上了）。所以 `build-x64.sh`
+  按 `uname -s` 分了 `out-x64` / `out-x64-osx` 两个落点。
 
-`bench/docker-x64.sh gui 某份.pss` 会先用 `xdpyinfo` 探一次，通不了就把这三步印出来：
+* **速度这一栏两条腿都不算数**：linux 那档是 qemu 转译 + llvmpipe 软件光栅；
+  osx 那档是 Rosetta 转译，而且**我们的 JIT 吐的 x86-64 码还要再被 Rosetta 翻一次**
+  —— 同一个 eval 微基准交错跑三趟：arm64 **8.2/8.2/8.4 µs** vs Rosetta x64
+  **17.0/16.8/18.1 µs**（≈2.05x）。要 x64 的真数字得找一台真 Intel 机器。
 
-1. `defaults write org.xquartz.X11 nolisten_tcp -bool false`，然后**退出再开** XQuartz
-   （这是持久设置，改了要知道自己改了什么）；
-2. `xhost +`（跑完 `xhost -` 收回）；
-3. 容器里 `DISPLAY=host.docker.internal:0`（脚本自己递）。
+### 显示从哪儿来（三档，别混）
+
+* **判据（出图 / GUI）**：容器自己的 `Xvfb :99` + mesa llvmpipe。为什么出图也要 X ——
+  macOS 上上下文走 CGL（不要窗口），linux 上走的是 GLFW 的**不可见窗口**，
+  而 GLFW 要一个显示才给上下文；
+* **要用眼睛看**：`bash bench/docker-x64.sh vnc ken/balls.pss` —— 容器里 `x11vnc`
+  把 `:99` 那张屏送出来，宿主 `open vnc://127.0.0.1:5900`（macOS 自带"屏幕共享"）；
+* **XQuartz**：**X11 通、GLX 不通**，量过了。
+  * 通的那一半：`defaults write org.xquartz.X11 nolisten_tcp -bool false` +（退出再开
+    XQuartz）+ `xhost +` 之后，容器里 `xdpyinfo` 与 `xeyes` 都正常（`x11` 那一档）；
+  * 不通的那一半：容器里的 mesa 要一格 `drisw` 软件屏，XQuartz 不给对应的 fbConfig ——
+    `No matching fbConfigs or visuals found` / `glx: failed to create drisw screen`，
+    `X_GLXCreateNewContext` 直接 BadValue。`enable_iglx -bool true` 也没用（试过）。
+    所以 **polydraw 的窗口走不了 XQuartz**，用 VNC 那一档。
+  * 宿主那两项设置是**持久**的：不想留着就 `defaults delete org.xquartz.X11 nolisten_tcp`
+    （以及 `enable_iglx`）、`xhost -`。
+
+### Windows 那一格
+
+不用做：原文自带的 win32 实现（`bench/build.cmd` 那条路）本来就是这门程序的原生腿，
+GLFW 那一份是**给没有 win32 的平台补的等价实现**。真要在 Windows 上换成 GLFW，
+接口就是本文件里那四个分岔点（上下文 / proc 查表 / GL 头 / 可执行文件路径）。
 
 ### 判据的账
 
-* `bench/test-a64.sh`（16 行，带期望值）：linux/amd64 上 **PD_JIT=0 与 =1 各 16/16**；
-  `PD_JIT=2` 差分那一档与 arm64 **同样只红那两行**（`x*=x` 与 `static s` 会被跑两趟，
-  是那一档自己的性质）；
-* `bench/test-ops.sh`（**新**，83 行按指令族，含 12 行 NaN、9 行数组、越界那一夹）：
-  a64-jit == a64-解释器、x64-jit == x64-解释器、**a64-jit 与 x64-jit 只差 4 行**
-  （`tan`/`asin`/`acos`/`atan` 最后几个 ULP —— 两条腿自己内部都一致，所以是两家
-  libm 的差，不是 JIT 的锅）。
-  这一份的判法值得记：**不手算期望值**，拿已经判过的 arm64 那条腿当尺子逐行 diff ——
+* **osx x86-64（Rosetta）**：eval `test-a64.sh` **16/16**（PD_JIT=0 与 =1）、
+  出图 **4 过 0 红**（ceilflor2 1290 / texture 2297 / orthoglobe 735 / clock 223 色）、
+  `test-ops.sh` 那 83 行 **与 arm64 逐行相同（83/83）** ——
+  两条腿同一个 libm，所以这一档是真正的"同一门语言，两套机器码，同一个答案"；
+* **linux/amd64（qemu + llvmpipe）**：eval 16/16、`test-ops.sh` jit==解释器、
+  出图 4 过 0 红、GUI（`gui-a64.sh` 在 Xvfb 上）**4 过 0 红**；
+  与 arm64 那份 ops 的差**只有 4 行**（`tan`/`asin`/`acos`/`atan` 最后几个 ULP ——
+  glibc 与 Apple libm 的差，两条腿自己内部都一致 ⇒ 不是 JIT 的锅）；
+* `bench/test-ops.sh`（**新**，83 行按指令族，含 12 行 NaN、9 行数组、越界那一夹）
+  的判法值得记：**不手算期望值**，拿已经判过的 arm64 那条腿当尺子逐行 diff ——
   手算容易把"两边都错"当成对。
 * 写这一份时踩的两格（都是这门语言的性质，不是 JIT）：脚本第一个字符是 `(`
   的话整句被当成**参数表**（所以比较那几行要写成 `0+(2<3)*10`）；
   `a[9]` 与 `i=9;a[i]` 都会被前端当场判成 `array index out of bounds`，
   要试运行期那一夹得**从实参递下标进来**。
+
 
 
 

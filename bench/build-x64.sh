@@ -13,7 +13,12 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-OUT=${OUT:-bench/out-x64}
+# 两条 x86-64 腿的产物**不许混在一格**：docker 那条是 ELF、Rosetta 那条是 Mach-O，
+# 而两边都挂着同一个仓库目录（踩过：osx 那趟把 linux 的 .o 覆盖掉，容器里就连不上了）。
+case "$(uname -s)" in
+Darwin) OUT=${OUT:-bench/out-x64-osx};;
+*)      OUT=${OUT:-bench/out-x64};;
+esac
 mkdir -p "$OUT"
 
 CC=${CC:-clang}
@@ -46,8 +51,10 @@ echo "-> $OUT/eval_bench_x64"
 if [ "${PD_X64_GL:-1}" = 0 ]; then echo "== 跳过 polydraw（PD_X64_GL=0）"; exit 0; fi
 
 case "$(uname -s)" in
-Darwin) GLLIB=(-framework OpenGL -L/opt/homebrew/lib -lglfw); GLINC=(-I/opt/homebrew/include);;
-*)      GLLIB=(-lGL -lglfw -ldl);                             GLINC=();;
+# osx x86-64：GL 走 CGL（不要窗口），GUI 那一族**桩掉** —— homebrew 那份 libglfw
+# 是 arm64 的，连不进 x86_64 的可执行文件（见 port/x64/pd_gui_stub.c 的头注）。
+Darwin) GLLIB=(-framework OpenGL); GLINC=(); GUISRC=port/x64/pd_gui_stub.c;;
+*)      GLLIB=(-lGL -lglfw -ldl); GLINC=(); GUISRC=port/a64/pd_gui_glfw.c;;
 esac
 
 echo "== kplib"
@@ -70,7 +77,7 @@ for f in pd_win_a64 pd_gl_cgl pd_main_a64; do
 		-c "port/a64/$f.c" -o "$OUT/$f.o"
 done
 # GUI 与攒批那两份不要假 windows.h（它们用真 GLFW / 真 GL 头）
-$CC "${ARCH[@]}" $OPT -w "${GLINC[@]}" -c port/a64/pd_gui_glfw.c -o "$OUT/pd_gui_glfw.o"
+$CC "${ARCH[@]}" $OPT -w "${GLINC[@]}" -c "$GUISRC" -o "$OUT/pd_gui_glfw.o"
 $CC "${ARCH[@]}" $OPT -w -c port/a64/pd_gl_imm.c -o "$OUT/pd_gl_imm.o"
 
 echo "== polydraw_x64"

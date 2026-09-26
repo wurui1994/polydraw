@@ -21,7 +21,7 @@ FROM arch_llvm:latest
 RUN pacman -Sy --noconfirm --needed \
 		mesa libglvnd glu glfw \
 		libx11 libxrandr libxinerama libxcursor libxi libxxf86vm \
-		mesa-utils xorg-xdpyinfo xorg-server-xvfb \
+		mesa-utils xorg-xdpyinfo xorg-server-xvfb xorg-xeyes x11vnc \
 	&& pacman -Scc --noconfirm
 
 
