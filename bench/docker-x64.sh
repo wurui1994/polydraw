@@ -58,6 +58,12 @@ render)
 	exec docker run --rm $PLAT "${MNT[@]}" -e OUT=bench/out-x64/png -e BIN=bench/out-x64/polydraw_x64 \
 		"$IMG" bash -lc "$XVFB bash bench/render-a64.sh"
 	;;
+scan)
+	# 整份语料（53 份）过一遍，落 bench/out-x64/scan.tsv。qemu + llvmpipe，所以
+	# **只看分类、别看毫秒**。TMO 放宽一点（软件光栅慢）。
+	exec docker run --rm $PLAT "${MNT[@]}" -e OUT=bench/out-x64 -e BIN=bench/out-x64/polydraw_x64 \
+		-e TMO="${TMO:-60}" "$IMG" bash -lc "$XVFB bash bench/scan-a64.sh ${1:-10}"
+	;;
 gui)
 	exec docker run --rm $PLAT "${MNT[@]}" -e BIN=bench/out-x64/polydraw_x64 \
 		"$IMG" bash -lc "$XVFB bash bench/gui-a64.sh"

@@ -799,6 +799,18 @@ GLFW 那一份是**给没有 win32 的平台补的等价实现**。真要在 Win
   那是 `klock()` 驱动那一类自带的抖动（见"扫描尺子的颜色数不可复现"）。
   同理 `heightmap` 这一趟从"空画面"变成"ok 4 色"**不算修好了**，它只是擦过了
   "≥2 种颜色"那条线。
+* **linux 那条腿的语料账**（`bash bench/docker-x64.sh scan`，qemu + llvmpipe）：
+  ok 48 / 空画面 5 / 着色器错 0 / 崩 0 / 超时 0，与 arm64 **49/53 同分类**，
+  差的那 4 份全是 **mesa 与 Apple 那颗 GL 的差**，不是 x86-64 这一侧的：
+  * `geo_test` —— `gl_PositionIn` undeclared。那是 `EXT_geometry_shader4`（GLSL 1.20
+    那一代）的名字，**mesa 早就不给这个扩展了**（它只有 3.2 起的 core 几何着色器，
+    那边叫 `gl_in[].gl_Position`）。要它得改脚本，不在这条腿的范围里；
+  * `gspiral` —— arm64 上是"着色器错"，mesa 上少报了几条（GLSL 4.60 宽一些），
+    但**第 114 行那个 `float * int` 还是过不去**，仍然是"参考自己依赖非标准隐式提升"；
+  * `gears` / `ribbons_invasion` —— 着色器一个错都不报，画面却是空的。
+    这两份还没定到根因（下一刀：拿 `PD_GLDBG=1` 看每帧中心像素与 viewport，
+    再按"三档 A/B（PD_JIT=0/1、PD_IMM=0）"先把 JIT 与攒批排除掉）。
+
 
 * 写这一份时踩的两格（都是这门语言的性质，不是 JIT）：脚本第一个字符是 `(`
   的话整句被当成**参数表**（所以比较那几行要写成 `0+(2<3)*10`）；
