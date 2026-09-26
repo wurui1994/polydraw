@@ -1,26 +1,49 @@
-/* port/a64/pd_gl_cgl.c —— `wgl*` 那一族在 macOS 上的实现（CGL 离屏上下文）。
+/* port/a64/pd_gl_cgl.c —— `wgl*` 那一族的实现（**上下文**那一格按平台分岔）。
  *
- * 为什么用 CGL 而不是 GLFW/NSOpenGL：不需要窗口就能有上下文，而且不碰 AppKit
- * （不用主线程、不用 run loop）。出图那条路要的正是这个。
+ * * macOS：CGL 离屏上下文。为什么用 CGL 而不是 GLFW/NSOpenGL —— 不需要窗口就能有
+ *   上下文，而且不碰 AppKit（不用主线程、不用 run loop）。出图那条路要的正是这个；
+ * * 别的平台（linux x86-64 那条腿）：**GLFW 的不可见窗口**
+ *   （`pd_gui_open_offscreen`，与 GUI 那条腿同一份源码）。GLX 自己那套 pbuffer
+ *   样板代码不写 —— "GLFW 跨平台共用"本来就是这条腿的目标之一。
  *
  * 一格上下文 + 一张 FBO：`polydraw` 画到默认帧缓冲，我们把"默认"换成 FBO，
  * 于是 `glReadPixels` 读出来就是要存的那张图。
  *
  * 注意：macOS 的 legacy GL 最高到 **2.1**（core profile 才有 3.2+，但 core 里
- * 没有固定管线，而 polydraw 的 `glBegin/glEnd` 一族要固定管线）。所以这儿走
+ * 没有固定管线，而 polydraw 的 `glBegin/glEnd` 一族要固定管线）。所以那边走
  * legacy profile —— 2.1 够 polydraw 用（它自己的着色器是 GLSL 1.20）。
+ * mesa 那边给的是 4.5 兼容档（2.1 的超集），同一份代码照跑。
  */
+#if !defined(__APPLE__)
+/* 我们这一份要的是**真**的 GL 函数，不是 pd_head.h 那张指针表 —— 所以在包
+   winshim 的 `gl/gl.h` 之前先把那 43 行让位关掉（见那一份的注）。 */
+#define PD_NO_GL_RENAME 1
+#endif
 #include <windows.h>
+#if defined(__APPLE__)
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
+#else
+/* mesa：`GL_GLEXT_PROTOTYPES` 才有 FBO 那一族的原型（EXT 版 mesa 也导出）。 */
+#define GL_GLEXT_PROTOTYPES 1
+#include <GL/gl.h>
+#include <GL/glext.h>
+/* 离屏上下文那一格（port/a64/pd_gui_glfw.c）。 */
+extern int pd_gui_open_offscreen (void);
+#endif
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__APPLE__)
 static CGLContextObj pd_cgl = 0;
+#else
+static int pd_cgl = 0;            /* 非 macOS：只是"开没开"的标志 */
+#endif
 static GLuint pd_fbo = 0, pd_color = 0, pd_depth = 0;
 static int pd_fbw = 0, pd_fbh = 0;
+
 
 /* 帧缓冲按需重建（polydraw 改分辨率时会重新 glViewport，但 FBO 得我们自己跟）。 */
 int pd_gl_resize (int w, int h)
@@ -74,25 +97,37 @@ extern int pd_gui_on (void);
 extern int pd_gui_open (void);
 extern int pd_gui_make_current (void);
 extern void pd_gui_present (unsigned int fbo, const int *vp);
+#if !defined(__APPLE__)
+extern void *pd_gui_procaddr (const char *nm);
+#endif
 
 HGLRC wglCreateContext (HDC dc)
 {
-	CGLPixelFormatAttribute at[] = {
-		kCGLPFAAccelerated, kCGLPFAColorSize, (CGLPixelFormatAttribute)24,
-		kCGLPFAAlphaSize, (CGLPixelFormatAttribute)8,
-		kCGLPFADepthSize, (CGLPixelFormatAttribute)24,
-		(CGLPixelFormatAttribute)0 };
-	CGLPixelFormatObj pf = 0;
-	GLint n = 0;
 	(void)dc;
 	/* GUI 档：窗口自己带上下文，**不要**再开一个离屏的 —— 两个上下文之间
 	   对象不共享，FBO 就 blit 不过去了。 */
 	if (pd_gui_on()) { if (!pd_gui_open()) return(0); return((HGLRC)1); }
-	if (pd_cgl) return((HGLRC)pd_cgl);
-	if (CGLChoosePixelFormat(at,&pf,&n) != kCGLNoError) { fprintf(stderr,"pd_gl: CGLChoosePixelFormat 失败\n"); return(0); }
-	if (CGLCreateContext(pf,0,&pd_cgl) != kCGLNoError) { CGLDestroyPixelFormat(pf); fprintf(stderr,"pd_gl: CGLCreateContext 失败\n"); return(0); }
-	CGLDestroyPixelFormat(pf);
-	return((HGLRC)pd_cgl);
+#if defined(__APPLE__)
+	{
+		CGLPixelFormatAttribute at[] = {
+			kCGLPFAAccelerated, kCGLPFAColorSize, (CGLPixelFormatAttribute)24,
+			kCGLPFAAlphaSize, (CGLPixelFormatAttribute)8,
+			kCGLPFADepthSize, (CGLPixelFormatAttribute)24,
+			(CGLPixelFormatAttribute)0 };
+		CGLPixelFormatObj pf = 0;
+		GLint n = 0;
+		if (pd_cgl) return((HGLRC)pd_cgl);
+		if (CGLChoosePixelFormat(at,&pf,&n) != kCGLNoError) { fprintf(stderr,"pd_gl: CGLChoosePixelFormat 失败\n"); return(0); }
+		if (CGLCreateContext(pf,0,&pd_cgl) != kCGLNoError) { CGLDestroyPixelFormat(pf); fprintf(stderr,"pd_gl: CGLCreateContext 失败\n"); return(0); }
+		CGLDestroyPixelFormat(pf);
+		return((HGLRC)pd_cgl);
+	}
+#else
+	if (pd_cgl) return((HGLRC)1);
+	if (!pd_gui_open_offscreen()) return(0);
+	pd_cgl = 1;
+	return((HGLRC)1);
+#endif
 }
 
 BOOL wglMakeCurrent (HDC dc, HGLRC rc)
@@ -109,8 +144,13 @@ BOOL wglMakeCurrent (HDC dc, HGLRC rc)
 		if (getenv("PD_GUIDBG")) fprintf(stderr,"[gui] wglMakeCurrent：直接画进窗口（不建 FBO）\n");
 		return(1);
 	}
+#if defined(__APPLE__)
 	if (!rc) { CGLSetCurrentContext(0); return(1); }
 	if (CGLSetCurrentContext((CGLContextObj)rc) != kCGLNoError) return(0);
+#else
+	if (!rc) return(1);
+	if (!pd_gui_make_current()) return(0);
+#endif
 	/* **一次建足够大**（不按 viewport 重建）：重建会把已经画进去的内容丢掉，
 	   而 polydraw 是先画、后我们才知道 viewport 多大 —— 踩过一次，第 0 帧的画面
 	   就是这么丢的。存图时只取 viewport 那一块。 */
@@ -122,7 +162,11 @@ BOOL wglMakeCurrent (HDC dc, HGLRC rc)
 BOOL wglDeleteContext (HGLRC rc)
 {
 	if (!rc) return(0);
+#if defined(__APPLE__)
 	if ((CGLContextObj)rc == pd_cgl) { CGLDestroyContext(pd_cgl); pd_cgl = 0; pd_fbo = 0; }
+#else
+	pd_fbo = 0;
+#endif
 	return(1);
 }
 
@@ -216,10 +260,21 @@ static void pd_shadersrc_wrap (GLuint sh, GLsizei cnt, const GLchar **str, const
 
 /* `wglGetProcAddress`：polydraw 靠它填那张 GL 2.0 的函数指针表。
    macOS 没有对应的 API —— 但 legacy GL 的符号全在 OpenGL.framework 里，
-   所以 `dlsym(RTLD_DEFAULT, 名字)` 就是答案。 */
-void *wglGetProcAddress (LPCSTR nam)
+   所以 `dlsym(RTLD_DEFAULT, 名字)` 就是答案。
+   别的平台上扩展函数不一定是导出符号，所以 dlsym 之后再退到 GLFW 那一格
+   （底下是 `glXGetProcAddress`）。 */
+static void *pd_sym (const char *nam)
 {
 	void *p = dlsym(RTLD_DEFAULT,nam);
+#if !defined(__APPLE__)
+	if (!p) p = pd_gui_procaddr(nam);
+#endif
+	return(p);
+}
+
+void *wglGetProcAddress (LPCSTR nam)
+{
+	void *p = pd_sym(nam);
 	if ((!strcmp(nam,"glShaderSource") || !strcmp(nam,"glShaderSourceARB")) && p)
 		{ pd_real_shadersrc = (void (*)(GLuint,GLsizei,const GLchar **,const GLint *))p;
 		  return((void *)pd_shadersrc_wrap); }
@@ -231,21 +286,21 @@ void *wglGetProcAddress (LPCSTR nam)
 		  return((void *)pd_texsub3d_wrap); }
 	if (!strcmp(nam,"glBindFramebufferEXT") || !strcmp(nam,"glBindFramebuffer"))
 	{
-		if (!p) p = dlsym(RTLD_DEFAULT,"glBindFramebufferEXT");
+		if (!p) p = pd_sym("glBindFramebufferEXT");
 		if (p) { pd_real_bindfb = (void (*)(GLenum,GLuint))p; return((void *)pd_bindfb_wrap); }
 	}
 	if (!p)
 	{
 		/* 有几个在 macOS 上只有 `*EXT`/`*ARB` 那一版（FBO 一族就是）。 */
 		char buf[256];
-		snprintf(buf,sizeof(buf),"%sEXT",nam); p = dlsym(RTLD_DEFAULT,buf);
-		if (!p) { snprintf(buf,sizeof(buf),"%sARB",nam); p = dlsym(RTLD_DEFAULT,buf); }
+		snprintf(buf,sizeof(buf),"%sEXT",nam); p = pd_sym(buf);
+		if (!p) { snprintf(buf,sizeof(buf),"%sARB",nam); p = pd_sym(buf); }
 		if (!p)
 		{
 			/* 再试一次去掉 EXT/ARB 后缀的名字（macOS 上有些只有无后缀那一版）。 */
 			long l = (long)strlen(nam);
-			if ((l > 3) && !strcmp(&nam[l-3],"EXT")) { snprintf(buf,sizeof(buf),"%.*s",(int)(l-3),nam); p = dlsym(RTLD_DEFAULT,buf); }
-			else if ((l > 3) && !strcmp(&nam[l-3],"ARB")) { snprintf(buf,sizeof(buf),"%.*s",(int)(l-3),nam); p = dlsym(RTLD_DEFAULT,buf); }
+			if ((l > 3) && !strcmp(&nam[l-3],"EXT")) { snprintf(buf,sizeof(buf),"%.*s",(int)(l-3),nam); p = pd_sym(buf); }
+			else if ((l > 3) && !strcmp(&nam[l-3],"ARB")) { snprintf(buf,sizeof(buf),"%.*s",(int)(l-3),nam); p = pd_sym(buf); }
 		}
 	}
 	if (!p && getenv("PD_GLDBG")) fprintf(stderr,"[proc] 没找到 %s\n",nam);

@@ -144,10 +144,17 @@ static void pd_cb_cursor (GLFWwindow *w, double x, double y)
 
 /* `GetCursorPos` 在 GUI 档下问这儿要位置。回 0 表示"没开 GUI，你按老规矩来"。
    报的是**帧缓冲坐标**：Retina 上帧缓冲是窗口尺寸的两倍，而 polydraw 那边的
-   xres/yres 用的是帧缓冲尺寸（见 pd_main_a64.c 里 `/WxH` 那一句），两头要一致。 */
+   xres/yres 用的是帧缓冲尺寸（见 pd_main_a64.c 里 `/WxH` 那一句），两头要一致。
+
+   **第一句那个 `pd_gui_on()` 不许省**：离屏那条路（linux）也会开一个 GLFW 窗口
+   （只是不可见），于是 `pd_win != 0` 也成立 —— 少了这一句就会报"鼠标在 0,0"，
+   而不是 `pd_win_a64.c` 里那句"没开 GUI 就报画面中心"。踩过：`ken/orthoglobe.pss`
+   的几何是 `z = mousy/yres*4` / `glvertex(c,-s,-z)`，mousy=0 ⇒ z=0 ⇒ 整片贴在
+   相机平面上被近裁面切掉 ⇒ **全透明黑**（而且 GL 一个错都不报）。 */
 int pd_gui_mouse (int *x, int *y)
 {
 	int ww = 1, wh = 1, fw = 1, fh = 1;
+	if (!pd_gui_on()) return(0);
 	if (!pd_win) return(0);
 	glfwGetWindowSize(pd_win,&ww,&wh);
 	glfwGetFramebufferSize(pd_win,&fw,&fh);
@@ -177,8 +184,24 @@ int pd_gui_title (const char *s)
 	return(1);
 }
 
+/* GLFW 自己的错误回调 —— 不挂这一格的话 `glfwInit`/`glfwCreateWindow` 失败时
+   只能看见一句"失败了"，看不见原因（linux 上第一次就是这么卡住的：
+   GLFW 3.4 先探 Wayland，没有 `XDG_RUNTIME_DIR` 就报错）。 */
+static void pd_cb_err (int code, const char *msg)
+	{ fprintf(stderr,"[gui] GLFW 错误 %d：%s\n",code,msg ? msg : "?"); }
+
+/* 平台**点明**（GLFW 3.4 起有这一格）：容器里没有 Wayland，让它别去探。 */
+static void pd_glfw_prep (void)
+{
+	glfwSetErrorCallback(pd_cb_err);
+#if defined(GLFW_PLATFORM) && defined(GLFW_PLATFORM_X11) && !defined(__APPLE__)
+	if (glfwPlatformSupported(GLFW_PLATFORM_X11)) glfwInitHint(GLFW_PLATFORM,GLFW_PLATFORM_X11);
+#endif
+}
+
 int pd_gui_open (void){
 	if (pd_win) return(1);
+	pd_glfw_prep();
 	if (!glfwInit()) { fprintf(stderr,"[gui] glfwInit 失败\n"); return(0); }
 	/* 什么都不设 = legacy（macOS 上给 2.1）—— polydraw 的固定管线要的正是它。 */
 	glfwWindowHint(GLFW_DOUBLEBUFFER,GLFW_TRUE);
@@ -194,10 +217,48 @@ int pd_gui_open (void){
 	return(1);
 }
 
+/**
+ * **看不见的那一格**：只要上下文、不要窗口。
+ *
+ * 谁用：macOS 上出图那条路用的是 CGL（不需要窗口就有上下文，也不碰 AppKit）；
+ * 别的平台没有那种东西 —— GLX 要么给 pbuffer（一堆样板代码）要么就得有窗口。
+ * 既然 GUI 那条腿已经把 GLFW 这条路走通了，离屏就复用它：开一个
+ * `GLFW_VISIBLE=FALSE` 的窗口当上下文的载体。**渲染照旧进我们自己的 FBO**，
+ * 所以这个窗口的尺寸/可见性一个字都不影响出来的图。
+ *
+ * 代价：linux 上出图也要 `DISPLAY`（docker 里就是 XQuartz 转发那一格）。
+ * 真要完全无头的话下一刀是 EGL surfaceless —— 但那会再引一个依赖，
+ * 而"GLFW 跨平台共用"这件事本身是这条腿的一个目标。
+ */
+int pd_gui_open_offscreen (void)
+{
+	if (pd_win) return(1);
+	pd_glfw_prep();
+	if (!glfwInit()) { fprintf(stderr,"[gui] glfwInit 失败（离屏档）\n"); return(0); }
+	glfwWindowHint(GLFW_VISIBLE,GLFW_FALSE);
+	glfwWindowHint(GLFW_DOUBLEBUFFER,GLFW_TRUE);
+	glfwWindowHint(GLFW_DEPTH_BITS,24);
+	pd_win = glfwCreateWindow(64,64,"polydraw (offscreen)",0,0);
+	if (!pd_win) { fprintf(stderr,"[gui] 离屏上下文开不出来（DISPLAY=%s）\n",getenv("DISPLAY") ? getenv("DISPLAY") : "未设"); glfwTerminate(); return(0); }
+	glfwMakeContextCurrent(pd_win);
+	if (getenv("PD_GUIDBG")) fprintf(stderr,"[gui] 离屏上下文开好了（不可见窗口）\n");
+	return(1);
+}
+
 int pd_gui_make_current (void){
 	if (!pd_win) return(0);
 	glfwMakeContextCurrent(pd_win);
 	return(1);
+}
+
+/* `wglGetProcAddress` 的退路（非 macOS）：GL 的扩展函数不一定是 libGL 的导出符号，
+   `dlsym` 查不到；GLFW 那一格底下就是 `glXGetProcAddress`/`eglGetProcAddress`，
+   而且跨平台同一个名字。要求：调的时候得有当前上下文（polydraw 是先建上下文
+   再填那张表，次序正好）。 */
+void *pd_gui_procaddr (const char *nm)
+{
+	if (!nm) return(0);
+	return((void *)glfwGetProcAddress(nm));
 }
 
 int pd_gui_closing (void)

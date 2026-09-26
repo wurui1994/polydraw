@@ -60,7 +60,21 @@ BOOL GetVersionEx (OSVERSIONINFO *v)
 }
 
 /* ── 真的：自己的可执行文件路径（polydraw 拿它找 .ini 与 ken/ 那批脚本） ── */
+#if defined(__APPLE__)
 extern int _NSGetExecutablePath (char *, unsigned int *);
+#endif
+/* 自己那份可执行文件的路径。查不到回 0（macOS 一个 API，linux 是 /proc/self/exe）。 */
+static int pd_exe_path (char *exe, unsigned int sz)
+{
+#if defined(__APPLE__)
+	return(_NSGetExecutablePath(exe,&sz) == 0);
+#else
+	long n = (long)readlink("/proc/self/exe",exe,(size_t)sz-1);
+	if (n <= 0) return(0);
+	exe[n] = 0;
+	return(1);
+#endif
+}
 DWORD GetModuleFileName (HMODULE h, LPSTR buf, DWORD n)
 {
 	char exe[1024];
@@ -76,7 +90,7 @@ DWORD GetModuleFileName (HMODULE h, LPSTR buf, DWORD n)
 	   照真路径报的话图一张都找不到（现象：`GLD_TEXTURE_INDEX_2D is unloadable`，
 	   画面全黑）。报 cwd 才是 Unix 上"在哪儿跑就从哪儿找数据"的常规。
 	   顺带 `polydraw.ini` 也落在 cwd。 */
-	if (_NSGetExecutablePath(exe,&sz) == 0)
+	if (pd_exe_path(exe,sz))
 	{
 		for(i=(long)strlen(exe)-1;i>=0;i--) if (exe[i] == '/') { base = &exe[i+1]; break; }
 	}

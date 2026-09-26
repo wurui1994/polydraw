@@ -1,0 +1,30 @@
+# bench/Dockerfile.x64 —— x86-64 那条腿的跑场（linux/amd64）。
+#
+# 为什么要自己搭一层：底下那个 `arch_llvm` 镜像只有 clang/gcc/make，**没有 GL 也没有
+# X11** —— eval 核心够用（`bench/build-x64.sh` 只要 libm），但 polydraw 的出图与 GUI
+# 要 mesa（软件光栅 llvmpipe）+ GLFW + X11 客户端库。
+#
+# 三件事：
+#   * `mesa` 给 libGL（这台机器是 Apple Silicon，容器是 qemu 转译，所以 GL 一定是
+#     **软件**的 llvmpipe —— 只能验对错，量不了速度）；
+#   * `glfw` 那一格与 macOS 那条腿**是同一份源码**（`port/a64/pd_gui_glfw.c`）；
+#   * `mesa-utils` 里的 `glxinfo`/`glxgears` 是"X11 转发通没通"的最小判据 ——
+#     先拿它验 XQuartz，再谈 polydraw 的窗口；
+#   * `xorg-server-xvfb` 是**出图那条腿**的 X 服务器：GLFW 要一个显示才给上下文
+#     （macOS 上走 CGL 不用），拿 Xvfb 当那格显示，判据就不依赖 XQuartz 通不通了。
+#     GUI 那条腿才真的要 XQuartz。
+#
+# 用法（镜像名 pd_x64）：
+#   docker build --platform linux/amd64 -f bench/Dockerfile.x64 -t pd_x64 bench
+FROM arch_llvm:latest
+
+RUN pacman -Sy --noconfirm --needed \
+		mesa libglvnd glu glfw \
+		libx11 libxrandr libxinerama libxcursor libxi libxxf86vm \
+		mesa-utils xorg-xdpyinfo xorg-server-xvfb \
+	&& pacman -Scc --noconfirm
+
+
+# 软件光栅：qemu 里没有 GPU，不点明会掉到 swrast（更慢）或者干脆开不出上下文。
+ENV LIBGL_ALWAYS_SOFTWARE=1
+ENV GALLIUM_DRIVER=llvmpipe

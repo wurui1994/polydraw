@@ -33,7 +33,13 @@
  *      当前色/纹理坐标/法向摆回去（脚本在 begin/end 外头设的那些照旧成立）；
  *   3. `PD_IMM=0` 关掉（A/B 对照用：同一个二进制跑两趟再逐份 join）。
  */
+#if defined(__APPLE__)
 #include <OpenGL/gl.h>
+#else
+#define GL_GLEXT_PROTOTYPES 1
+#include <GL/gl.h>
+#include <GL/glext.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

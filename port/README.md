@@ -703,6 +703,76 @@ CPU 花在**顶点抄两遍**（图元那份 scratch -> 攒批那份）。
 都在等 GPU）。那两份是片元着色器里的光线步进，参考那台机器是另一颗 GPU ——
 这一栏不可比，也不是我们这一侧能改的。
 
+## x86-64 那条腿（`port/x64/` + `bench/build-x64.sh` + `bench/docker-x64.sh`）
+
+同一份源码，第二个架构。分岔的地方**一共只有四处**，别的（LP64 那五份 fork、
+解释器那 25 个洞、攒批、PNG 写出器、GUI 那一套）全是共用的：
+
+1. **thunk**（`port/a64/pd_a64_jit.c`）：36 字节的 x86-64 版
+   `movabs r10=&gkasm87cptr / movabs r11=kcd / mov [r10],r11 / movabs r10=entry / jmp r10`。
+   只许用 r10/r11 —— SysV 里这两个既不传参也不是 `al`，而 `kasm87c(double,...)`
+   是变参函数，callee 的 `va_start` 要读 `al`（用了几个向量寄存器）。拿 rax 当草稿纸
+   就把它踩了；
+2. **JIT 发射器**（`port/x64/pd_x64_jitc.c`，新）：同一串 `gasm[]` 吐成 SSE2 的码。
+   公共的那几格（走解释器的退路 `pd_a64_jit_one`、`PD_JITNO`/`PD_JITFB` 那两把
+   按指令二分的开关、kcd 缓存、`PD_JIT` 三档）提到了 `pd_a64_jitc.c` 前头两边共用；
+3. **GL 上下文**：macOS 走 CGL（不要窗口），linux 走 **GLFW 的不可见窗口**
+   （`pd_gui_open_offscreen`，与 GUI 那条腿同一份源码）。所以 linux 上连"出图"
+   也要一个 `DISPLAY` —— 判据里那格显示是容器自己的 **Xvfb**，与 XQuartz 无关；
+4. **GL 头与 proc 查表**：`OpenGL/gl.h` -> `GL/gl.h`（`GL_GLEXT_LEGACY` 两家认同一个
+   开关，winshim 那 43 行让位一个字都不用改）；`wglGetProcAddress` 在 dlsym 之后
+   再退一次 `glfwGetProcAddress`（底下是 `glXGetProcAddress`）。
+
+### x86 特有的三个坑（都是**语义**上的，不是编码错）
+
+* **比较的 NaN 语义与 arm64 反过来**。`ucomisd` 无序时把 ZF/PF/CF 全置 1，所以
+  `a<b` **不能**写 `setb`（NaN 会给出 1）；要把两个操作数反过来比、用 `seta`
+  （CF=0 且 ZF=0）。`==` 要 `sete && setnp`、`!=` 要 `setne || setp`
+  （arm64 的 NE 含"无序"，正是 C 里 `NaN != x` 为真）；
+* `MINSD/MAXSD` 的"无序取**第二个**操作数"正好等于 arm64 那句 `fcsel …,MI/GT`
+  的语义（含 ±0 那一格），所以 MIN/MAX 一条指令就够，不用分支；
+* `roundsd`（floor/ceil/trunc 与 `%`）是 **SSE4.1**。`pd_jit_build` 开头问一句
+  `__builtin_cpu_supports("sse4.1")`，没有就整份不编 —— 退回解释器，答案照旧对。
+
+### 怎么跑（两条路，各有各的限制）
+
+* **linux/amd64 走 docker**：`bench/Dockerfile.x64`（`arch_llvm` 上加 mesa/glfw/
+  X11 客户端库/Xvfb），`bash bench/docker-x64.sh build|test|ops|render|gui`。
+  这台机器是 Apple Silicon，所以那一档是 **qemu 转译 + llvmpipe 软件光栅** ——
+  **只能验对错，量不了速度**（eval 的微基准 arm64 10.7us vs 容器里 25us，
+  那个比值是转译的开销，不是 JIT 的）；
+* **osx x86-64 要 Rosetta 2**：`clang -arch x86_64` 交叉编出来就是合法的 Mach-O
+  （`file` 认），但本机**没装** Rosetta（`arch -x86_64 /usr/bin/true` 回
+  `Bad CPU type in executable`）。装法：`softwareupdate --install-rosetta --agree-to-license`。
+  装好之后 `bash bench/build-x64.sh` 在 macOS 上直接出 `bench/out-x64/polydraw_x64`
+  （GL 走 CGL，与 arm64 那份一模一样）。
+
+### GUI 走 XQuartz 的三步
+
+`bench/docker-x64.sh gui 某份.pss` 会先用 `xdpyinfo` 探一次，通不了就把这三步印出来：
+
+1. `defaults write org.xquartz.X11 nolisten_tcp -bool false`，然后**退出再开** XQuartz
+   （这是持久设置，改了要知道自己改了什么）；
+2. `xhost +`（跑完 `xhost -` 收回）；
+3. 容器里 `DISPLAY=host.docker.internal:0`（脚本自己递）。
+
+### 判据的账
+
+* `bench/test-a64.sh`（16 行，带期望值）：linux/amd64 上 **PD_JIT=0 与 =1 各 16/16**；
+  `PD_JIT=2` 差分那一档与 arm64 **同样只红那两行**（`x*=x` 与 `static s` 会被跑两趟，
+  是那一档自己的性质）；
+* `bench/test-ops.sh`（**新**，83 行按指令族，含 12 行 NaN、9 行数组、越界那一夹）：
+  a64-jit == a64-解释器、x64-jit == x64-解释器、**a64-jit 与 x64-jit 只差 4 行**
+  （`tan`/`asin`/`acos`/`atan` 最后几个 ULP —— 两条腿自己内部都一致，所以是两家
+  libm 的差，不是 JIT 的锅）。
+  这一份的判法值得记：**不手算期望值**，拿已经判过的 arm64 那条腿当尺子逐行 diff ——
+  手算容易把"两边都错"当成对。
+* 写这一份时踩的两格（都是这门语言的性质，不是 JIT）：脚本第一个字符是 `(`
+  的话整句被当成**参数表**（所以比较那几行要写成 `0+(2<3)*10`）；
+  `a[9]` 与 `i=9;a[i]` 都会被前端当场判成 `array index out of bounds`，
+  要试运行期那一夹得**从实参递下标进来**。
+
+
 
 
 

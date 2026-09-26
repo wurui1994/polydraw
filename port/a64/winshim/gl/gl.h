@@ -10,14 +10,30 @@
  * 与 SDK 那套不打架。原文一个字节都不用改。
  *
  * `GL_GLEXT_LEGACY` 顺带开着（SDK gl.h 第 43 行那个开关），少拉一堆 glext。
+ * mesa 那份 `GL/gl.h` 认同一个开关（不定义它就会自己把 glext.h 拉进来），
+ * 所以 linux 那条腿只是换个头文件名，下面那 43 行让位一个字都不用改。
  */
 #ifndef PD_WINSHIM_GL_H
 #define PD_WINSHIM_GL_H
 #define GL_SILENCE_DEPRECATION 1
 #define GL_GLEXT_LEGACY 1
+#if defined(__APPLE__)
 #include <OpenGL/gl.h>
+#else
+/* **必须是 `include_next`**：原文写的是 `<gl/gl.h>`（小写），而我们这份垫片就在
+   `winshim/gl/gl.h`。docker 在 macOS 上挂进来的卷是**大小写不敏感**的，所以
+   `#include <GL/gl.h>` 会转回来找到**自己**（头保护一挡，等于什么都没包，
+   于是 pd_head.h 里 GLfloat/GLuint 全是"unknown type name"）。
+   `include_next` 从搜索路径里**当前这一格之后**接着找，正好跳过自己。 */
+#include_next <GL/gl.h>
+#endif
 
-/* GL 2.0 那一批：让位给 pd_head.h 自己的指针表。 */
+/* GL 2.0 那一批：让位给 pd_head.h 自己的指针表。
+   **只对 polydraw 那个翻译单元成立** —— 我们自己那几份（pd_gl_cgl.c 之类）要的是
+   真函数，所以它们先 `#define PD_NO_GL_RENAME` 再包。
+   （为什么它们也会撞上这一份：linux 上那几份也吃 `-I port/a64/winshim`，
+   而 docker 挂进来的卷大小写不敏感，`<GL/gl.h>` 会先撞到这里。） */
+#ifndef PD_NO_GL_RENAME
 #define glActiveTexture pd_glActiveTexture
 #define glAttachShader pd_glAttachShader
 #define glBeginQuery pd_glBeginQuery
@@ -65,5 +81,7 @@
 /* `GLhandleARB`：SDK 说是 `void *`，pd_head.h:111 说是 `unsigned int`（Windows 的口径）。
    一样让位 —— 这个类型只在 pd 自己那套里用。 */
 #define GLhandleARB pd_GLhandleARB
+
+#endif   /* PD_NO_GL_RENAME */
 
 #endif

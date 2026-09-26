@@ -43,5 +43,6 @@ chk 6      'fact(3)'
 chk 2      'max(min(2,5),1)'
 
 echo
-echo "$pass passed, $fail failed（arm64 osx：COMPILE=0 + port/a64 的 thunk）"
+# 这一份两条腿共用（`BIN=bench/out-x64/eval_x64` 就是 x86-64 那条），所以标签按机器报。
+echo "$pass passed, $fail failed（$(uname -s)/$(uname -m)：COMPILE=0 + 我们自己的 thunk，PD_JIT=${PD_JIT:-默认开}）"
 [ "$fail" = 0 ]
