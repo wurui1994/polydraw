@@ -831,9 +831,22 @@ GLFW 那一份是**给没有 win32 的平台补的等价实现**。真要在 Win
     那边叫 `gl_in[].gl_Position`）。要它得改脚本，不在这条腿的范围里；
   * `gspiral` —— arm64 上是"着色器错"，mesa 上少报了几条（GLSL 4.60 宽一些），
     但**第 114 行那个 `float * int` 还是过不去**，仍然是"参考自己依赖非标准隐式提升"；
-  * `gears` / `ribbons_invasion` —— 着色器一个错都不报，画面却是空的。
-    这两份还没定到根因（下一刀：拿 `PD_GLDBG=1` 看每帧中心像素与 viewport，
-    再按"三档 A/B（PD_JIT=0/1、PD_IMM=0）"先把 JIT 与攒批排除掉）。
+  * `gears` / `ribbons_invasion` —— 着色器一个错都不报，画面却是空的。查到这儿了：
+    * `ribbons_invasion` 在 arm64 上也只有 **5 种颜色**（擦着"≥2"那条线），
+      属于"klock 驱动 + 擦线"那一类，**别当成真差异**；
+    * `gears` 是真的黑（arm64 595 色）。它的主循环是
+      `glsetshader(0); glcapture(); scene(); glcaptureend(0); glsetshader(1); glquad();`
+      —— **抓屏那一族**。两个探针（都在容器里，改的是 `/tmp` 里的副本，没动原文）：
+      把 `glcapture/glcaptureend` 与第二趟着色器去掉、直接画场景 -> **270 色**
+      （所以场景与它自己那个着色器在 mesa 上是好的）；只去掉第二趟着色器、
+      抓屏照旧 -> **1 色**。⇒ 黑在**抓屏那一段**；
+    * 但"抓屏整族坏了"还不成立：另写的一份最小抓屏探针在 mesa 上出的**不是黑**。
+      所以 `gears` 这一格还没定到根因。**下一刀先把探针改成可分辨的**
+      （两个着色器的颜色要能区分"取到了纹理"与"根本没换着色器"——
+      现在那份两条路都给蓝，等于什么都没证明），再看
+      `qglEndCapture` 里那句 `glCopyTexImage2D`（`pd_host_gl.c:309`，
+      1 参的 `glcapture()` 走的是**拷贝**那条路，4 参的才用 FBO）。
+
 * **GUI 判据的时间预算**：`gui-a64.sh` 的 fps 那半读的是**标题栏**，而原文每秒才写一次。
   qemu + llvmpipe 上 `SECS=5` 可能一次都没写上 —— `texture` 就这么**假红过一次**
   （同一份 `SECS=12` 再跑 145.9 fps）。`docker-x64.sh gui` 现在默认 12 秒。
