@@ -45,7 +45,7 @@ done
 #     `'&' does not operate on 'int' and 'int'`。要它得换 core profile（3.2+），
 #     可是 core 里没有固定管线，而 polydraw 的 glBegin/glEnd 一族要固定管线 ——
 #     这是一整条另外的路，不在这一轴里。
-echo "  skip gspiral                GLSL 1.20 没有整数位运算（macOS legacy GL 的上限）"
+echo "  skip gspiral                GLSL 1.20 没有 int->float 隐式提升（位运算那几条已经靠 GL_EXT_gpu_shader4 通了）"
 
 echo
 echo "$pass passed, $fail failed（出图：PNG 不是空画面）"

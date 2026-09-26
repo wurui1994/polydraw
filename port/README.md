@@ -568,6 +568,35 @@ if ((((int)p) < ((int)gevalfunc)) || (((int)p)+((xs*ys*zs*evalvalperpix)<<3) >
 **以后写探针必须带 `@f`，而且先确认它非黑再拿它当判据。**
 
 
+## 第 25 个洞：GLSL 1.20 那道"上限"其实是我们没开扩展
+
+先前记的是"`gspiral` 用了整数位运算、`mipmap` 用了 `texture2DLod`，macOS 的 legacy GL
+最高 GLSL 1.20，要它们得换 core profile —— 另一条路"。**那个结论是错的。**
+探针（`/tmp/pdprobe/glext.c`，CGL 起个 2.1 上下文问 `GL_EXTENSIONS`）量到这台机器有：
+
+* **`GL_EXT_gpu_shader4`**（整数位运算 `& | ^ << >>`、整型的各种内建）；
+* **`GL_ARB_shader_texture_lod`**（片元里的 `texture2DLod`）。
+
+所以只要在着色器源码前面塞两行 `#extension … : enable` 就行，**脚本一个字都不用改**。
+落点在 `port/a64/pd_gl_cgl.c` 的 `wglGetProcAddress`：把 `glShaderSource` 换成包了一层的
+（polydraw 那一族 GL 2.0 入口全从这张表来），前缀后头补一句 `#line 1`，
+不然 `glsl_geterrorlines` 报的行号整体偏。
+
+**踩过一次：`#version` 必须是第一句。** 几何着色器那一族（`@g`）polydraw 自己会写
+`#version 150` —— 一律塞最前面的话 `geo_test` / `geo_duptris` 当场报
+"#version must occur before any other statement"（`ok 2777 色 -> 着色器错`）。
+所以要先找 `#version`，有它就塞在那一行**后头**。
+
+账：`mipmap` **着色器错 -> ok**；`gspiral` 那五条错剩一条 ——
+`f*f*npoints*(1.0/16.0)`（`npoints` 是 `uniform int`）。**`int -> float` 的隐式提升是
+GLSL 1.30 才有的**，`EXT_gpu_shader4` 不给；NVIDIA 的编译器宽松所以原版能过，
+Apple 严格。那一句按 1.20 的规矩是非法的 —— 属于"参考自己错"那一类，记在这儿不动它
+（要治得改脚本，而脚本是语料，不许动）。
+
+现在的分类：**ok 50 / 空画面 2 / 着色器错 1 / 崩 0 / 超时 0**。
+
+
+
 ## 立即模式**攒批**（`port/a64/pd_gl_imm.c`）：`balls` 窗口里 30 -> 115 fps
 
 ### 为什么慢（两个探针量出来的，前一个结论是错的）

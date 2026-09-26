@@ -165,12 +165,64 @@ static void pd_texsub3d_wrap (GLenum tar, GLint lev, GLint xo, GLint yo, GLint z
 			tar,lev,xo,yo,zo,(int)w,(int)h,(int)d,fmt,typ,px,glGetError());
 }
 
+/* ── 着色器源码前面塞一行 `#extension`（`GL_EXT_gpu_shader4`）──────────────────
+ *
+ * macOS 的 legacy profile 只到 **GLSL 1.20**，而 1.20 没有整数位运算，也没有
+ * int -> float 的隐式提升。语料里 `ken/gspiral.pss` 正好要这两样：
+ *   `f = dot(vec4(i&255,(i>>8)&255,…),…)`  -> `'&' does not operate on 'int' and 'int'`
+ *   `f*f*npoints*(1.0/16.0)`（npoints 是 uniform int）-> `'*' … 'float' and 'int'`
+ * 先前这一份记成"GLSL 1.20 的上限、要换 core profile"——**那是错的**：
+ * 这台机器的 2.1 上下文**有 `GL_EXT_gpu_shader4`**（探针量过，还有
+ * `GL_ARB_shader_texture_lod`），那个扩展给的正是位运算 + 整型提升 + 片元里的
+ * `texture2DLod`。所以只要在源码最前面加一行 `#extension … : enable` 就行，
+ * 一个字的脚本都不用改。
+ *
+ * 两个细节：`#extension` 必须在任何非预处理记号之前（所以塞在最前面）；
+ * 塞完要补一句 `#line 1`，不然 polydraw 那个 `glsl_geterrorlines`
+ * 报的行号会整体偏移。`: enable` 而不是 `require` —— 不支持的机器上不会当场报错。
+ */
+static void (*pd_real_shadersrc)(GLuint, GLsizei, const GLchar **, const GLint *) = 0;
+
+static void pd_shadersrc_wrap (GLuint sh, GLsizei cnt, const GLchar **str, const GLint *len)
+{
+	static const char *pre =
+		"#extension GL_EXT_gpu_shader4 : enable\n"
+		"#extension GL_ARB_shader_texture_lod : enable\n"
+		"#line 1\n";
+	static char *buf = 0; static long bufn = 0;
+	const char *src, *ver;
+	long l0, l1, at = 0;
+	if (!pd_real_shadersrc) return;
+	/* 一段以上、或者给了长度表的那种：原样转（语料里 polydraw 只发一段、len=0）。 */
+	if ((cnt != 1) || (len) || (!str) || (!str[0])) { pd_real_shadersrc(sh,cnt,str,len); return; }
+	src = str[0];
+	/* **`#version` 必须是第一句**（几何着色器那一族 polydraw 自己会写 `#version …`）——
+	   所以有它的时候塞在那一行**后头**，没有就塞最前面。踩过：一律塞最前面 ⇒
+	   `geo_test` / `geo_duptris` 报 "#version must occur before any other statement"。 */
+	ver = strstr(src,"#version");
+	if (ver)
+	{
+		const char *nl = strchr(ver,'\n');
+		at = nl ? (long)(nl+1-src) : (long)strlen(src);
+	}
+	l0 = (long)strlen(pre); l1 = (long)strlen(src);
+	if (l0+l1+1 > bufn) { bufn = l0+l1+1; buf = (char *)realloc(buf,(size_t)bufn); }
+	if (!buf) { pd_real_shadersrc(sh,cnt,str,len); return; }
+	memcpy(buf,src,(size_t)at);
+	memcpy(&buf[at],pre,(size_t)l0);
+	memcpy(&buf[at+l0],&src[at],(size_t)(l1-at)+1);
+	{ const GLchar *one = buf; pd_real_shadersrc(sh,1,&one,0); }
+}
+
 /* `wglGetProcAddress`：polydraw 靠它填那张 GL 2.0 的函数指针表。
    macOS 没有对应的 API —— 但 legacy GL 的符号全在 OpenGL.framework 里，
    所以 `dlsym(RTLD_DEFAULT, 名字)` 就是答案。 */
 void *wglGetProcAddress (LPCSTR nam)
 {
 	void *p = dlsym(RTLD_DEFAULT,nam);
+	if ((!strcmp(nam,"glShaderSource") || !strcmp(nam,"glShaderSourceARB")) && p)
+		{ pd_real_shadersrc = (void (*)(GLuint,GLsizei,const GLchar **,const GLint *))p;
+		  return((void *)pd_shadersrc_wrap); }
 	if (!strcmp(nam,"glTexImage3D") && p)
 		{ pd_real_teximg3d = (void (*)(GLenum,GLint,GLint,GLsizei,GLsizei,GLsizei,GLint,GLenum,GLenum,const void *))p;
 		  return((void *)pd_teximg3d_wrap); }
