@@ -297,25 +297,42 @@ double pd_imm_vertex2d (double x, double y)                       { addv(x,y,0.0
 double pd_imm_vertex3d (double x, double y, double z)              { addv(x,y,z,1.0);   return(0.0); }
 double pd_imm_vertex4d (double x, double y, double z, double w)    { addv(x,y,z,w);     return(0.0); }
 
+/* **这几格"当前状态"要*同时*写进真 GL**，不只是攒起来。
+ *
+ * 正本里有几处画图**不走 `qglVertex`**，而是自己 `glBegin/glVertex2f` 直接画 ——
+ * 最要紧的是 `qglQuad`（`polydraw.c:979` 那个满屏四边形，后处理那一族全靠它）。
+ * 那条路用的是**真 GL 的当前色**，而这儿从前只在"没攒批"时才 `glColor4fv` ⇒
+ * 攒批开着时脚本的 `glcolor(…)` 到不了那个四边形，它永远是白的。
+ *
+ * 探针（满屏四边形、片元直接印 `gl_Color`、`glcolor(.2,.4,.6)`）：改之前这份移植给
+ * 白 (255,255,255)，而 Omni 与 c_impl 都给 (51,102,153)。正本没有含糊 ——
+ * `qglColor3d`（`polydraw.c:622`）就是立刻调真 `glColor3d`。
+ * 看得见的后果：`ken/drawcone2.pss` 的背景成了 0.8×白（该是 0.8×0.2）、
+ * `tigrou/disco blur shader +blur.pss` 那 41 层每层的 alpha 全丢。
+ *
+ * 代价：每次**状态变化**多一句 GL 调用（不是每个顶点）—— 攒批那条路本来就在 `flush()`
+ * 之后照 `C_col` 还一次当前色，口径一致；攒批画的时候顶点色走 `glColorPointer` 那张数组，
+ * 当前色被数组盖住，不受影响。
+ */
 double pd_imm_texcoord2d (double u, double v)
 { C_tex[0] = (float)u; C_tex[1] = (float)v; C_tex[2] = 0.f; C_tex[3] = 1.f;
-  if (P_raw || !F_on || !pd_imm_on()) glTexCoord4fv(C_tex); return(0.0); }
+  glTexCoord4fv(C_tex); return(0.0); }
 double pd_imm_texcoord3d (double u, double v, double s)
 { C_tex[0] = (float)u; C_tex[1] = (float)v; C_tex[2] = (float)s; C_tex[3] = 1.f;
-  if (P_raw || !F_on || !pd_imm_on()) glTexCoord4fv(C_tex); return(0.0); }
+  glTexCoord4fv(C_tex); return(0.0); }
 double pd_imm_texcoord4d (double u, double v, double s, double t)
 { C_tex[0] = (float)u; C_tex[1] = (float)v; C_tex[2] = (float)s; C_tex[3] = (float)t;
-  if (P_raw || !F_on || !pd_imm_on()) glTexCoord4fv(C_tex); return(0.0); }
+  glTexCoord4fv(C_tex); return(0.0); }
 
 double pd_imm_color3d (double r, double g, double b)
 { C_col[0] = (float)r; C_col[1] = (float)g; C_col[2] = (float)b; C_col[3] = 1.f;
-  if (P_raw || !F_on || !pd_imm_on()) glColor4fv(C_col); return(0.0); }
+  glColor4fv(C_col); return(0.0); }
 double pd_imm_color4d (double r, double g, double b, double a)
 { C_col[0] = (float)r; C_col[1] = (float)g; C_col[2] = (float)b; C_col[3] = (float)a;
-  if (P_raw || !F_on || !pd_imm_on()) glColor4fv(C_col); return(0.0); }
+  glColor4fv(C_col); return(0.0); }
 double pd_imm_normal3d (double x, double y, double z)
 { C_nrm[0] = (float)x; C_nrm[1] = (float)y; C_nrm[2] = (float)z;
-  if (P_raw || !F_on || !pd_imm_on()) glNormal3fv(C_nrm); return(0.0); }
+  glNormal3fv(C_nrm); return(0.0); }
 
 /**
  * **这个宿主函数会动 GL 状态吗**（JIT 拿它决定要不要在调用点发 `pd_imm_break`）。
