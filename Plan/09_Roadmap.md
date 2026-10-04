@@ -25,9 +25,9 @@
 - **M4**（C JIT sljit）：✅ `test_jit` 33 项全绿（JIT vs 解释器逐位差分覆盖算术/控制流/函数/RNG/数组 + drawsph/balls2k/metaballs/ballsk/disco 的 GLCmd glbuf 逐命令 diff）。**冻结保护实测**：`while(1){...}` 在应退信号置位后 **JIT 与解释器均在 ~5ms 内返回**（`pd_run_jit` 回边探针 / 解释器每 4096 条指令检查）。LLVM 后端（M5，可选）未开始。
 - **M7**（JS 渲染对齐）：🟢 **核心完成并已差分验证**
   - EVAL→GLCmd 录制层与 C 逐位等价：新增 `js_impl/tests/xbackend.test.ts`，以 C 参考实现（`c_impl/dbg_count.c`）为神谕，对 `balls/interference/drawsph/disco ball` 跑单帧，断言 **GLCmd 逐 op 直方图完全一致**（修复两处导致几何丢失的 EVAL bug：`preDeclareFunctions` 误把 `for(...){`/`if(...){` 当成函数定义使 `cube` 的 CALL aux 错位；funcIdx 偏移错位）。
-  - GPU 层 `js_impl/src/gpu/`：`matrix.ts`（4x4 列主矩阵栈，移植 `gl_renderer.c` 的 mat4_*）、`fixedfunc.ts`（GLCmd→DrawBatch 重放）、`renderer.ts`（WebGL2 绘制，接受 `GLLike` 接口，可用 mock GL 验证）。
+  - GPU 层 `js_impl/src/gpu/`：`matrix.ts`（4x4 列主矩阵栈，移植 `gl_renderer.c` 的 mat4_*，含 `lookAt`/`ortho`/`perspective`/`frustum`）、`fixedfunc.ts`（GLCmd→DrawBatch 重放，含 `QUAD` 全屏四边形 / `ENABLE`/`DISABLE`(DEPTH_TEST) / `CULLFACE` / `BLENDFUNC` / `UNIFORM`+`UNIFORMLOC`（按名字解析）/`VIEWPORT`/`CLEAR` 全 op 处理，batch 携带 `uniforms` 与完整渲染状态）、`renderer.ts`（WebGL2 绘制，接受 `GLLike` 接口，可用 mock GL 验证）、`softrender.ts`（Node 端真实软件光栅化器，见下）。
   - `js_impl/tests/gpu.test.ts`：矩阵数学、disco 重放得到 **19970 batch / 79880 顶点**（与 C 参考一致）、WebGL2 渲染器对 disco 发出 **19970 次 drawArrays / 79880 顶点**（mock GL 验证）。
-  - **真实光栅化像素比对（软光栅对齐）✅**：`js_impl/src/gpu/softrender.ts` 软件光栅化器 + 新增 `js_impl/tests/softgolden.test.ts`，把 `balls.pss` 帧5 @320×240 的渲染与参考 golden（`pyref/golden/balls_f5.png`，可经 `pyref/verify.py` 再生）**逐位一致**断言。三路交叉验证一致：JS 软光栅 ≡ pyref 软件渲染器（逐位相同），两者与 C GL offscreen PNG（`polydraw-render`）≥99% 逐位相同 / 100% 在 ±2/255 内（差异仅为 GL 边沿裁决与插值末位舍入）。
+  - **真实光栅化像素比对（软光栅对齐）✅**：`js_impl/src/gpu/softrender.ts` 软件光栅化器（逐行对齐 `gl_renderer.c` 的 `draw_point`/`draw_line`/`draw_triangle`/`draw_quad`）——含 **深度缓冲**（LESS 测试）、**alpha blend**（`src*srcA+dst*(1-srcA)`）、**背面剔除**、**线段光栅化**（LINE_STRIP/LINES/LINE_LOOP + `glLineWidth` 加粗）、**全屏四边形**（NDC identity-MVP，对齐 `glquad`）、**纹理采样**（BGRA32/VEC4/FLOAT 按 `colmode` 解包 + wrap）、逐片元 `resolveColor`（纹理调制或 fragment 函数）——+ 新增 `js_impl/tests/softgolden.test.ts`，把 `balls.pss` 帧5 @320×240 的渲染与参考 golden（`pyref/golden/balls_f5.png`）**逐位一致**断言（221446 通道全匹配，diff=0）。
   - 修复四个导致几何/像素丢失或错位的根因：
     1. `parser.ts` `installHost` 把 EXT_VAR 符号注册成 `Fam.EXT` 寄存器（`off` 指向存放 `vi` 的 const 槽），此前读到的是变量**下标**而非值——`xres/yres/numframes` 等全部失效。
     2. `softrender.ts` 光栅化用规范带方向边函数（`E_AB/E_BC/E_CA` + 按 `area2` 符号归一），此前只有逆时针采样、三角形整体被拒绝。
@@ -35,7 +35,18 @@
     4. `softrender.ts` 屏幕 y 映射改为顶行 = NDC +1（与 C offscreen PNG 顶左原点一致），修复垂直镜像。
   - 另修复 `pyref/software_renderer.py` 的 `mat_perspective`/`mat_ortho` **转置错误**（`-1` 除项与 `(2fn)/(n−f)` 项位置对调）和 `pyref/render.py` ctypes `GLCmd` 缺 `s` 字段（结构错位读不到处），并重建 golden。
   - 完整 JS 单测：106 项全绿（compile 54 / gpu 7 / interp 23 / lexer 14 / smoke 2 / softgolden 2 / xbackend 4）。
-  - 剩余（部署侧，需浏览器/Node-GL 上下文）：`renderer.ts` 的 WebGL2 真实 GL 绘制路径与纹理上传（`SETTEXDATA`）在浏览器中逐像素同样可验证。
+  - **真实 WebGL2 渲染路径与 mainloop / UI（M7 收尾，已补齐）✅**：
+    - `js_impl/src/gpu/renderer.ts` 重写为**真 WebGL2 渲染器（逐行对齐 `gl_renderer.c`）**：
+      - **GLSL 适配层**（`adaptVertex`/`adaptFragment`）：把 PSS 的 legacy GLSL 1.20（`gl_Position`/`ftransform()`/`gl_Vertex`/`gl_Color`/`gl_TexCoord`/`gl_FragColor`/`varying`/`texture2D`）改写成 GLSL ES 3.00（`in/out` + `texture()` + 内置宏注入），`tests/gpu.test.ts` 已断言 legacy→ES3.00 改写正确。
+      - **批处理 + flush**：按 prim + MVP 分组（对齐 `batch_append`/`flush_batch`），`mvp` 作 uniform 传入（默认不 bake，保证 `gl_Vertex` 自定义 shader 语义正确）。
+      - **纹理**：BGRA32 解包为 RGBA8、`colmode` 高 4 位=filter（NEAREST/LINEAR/mipmap）、高 8 位=wrap（REPEAT/MIRRORED/CLAMP）、cubemap（`w*6==h`）；`texImage2D` 上传。
+      - **offscreen capture**（对齐 `g_capture`/`g_capture_end`）：用**真实 FBO render-to-texture**（非读回），`getCapture(tex)` 返回 FBO 纹理；`25_offscreen_capture` 测试验证 bind FBO 路径。
+      - **状态镜像**：depth test / blend（`blendFunc` src,dst）/ cullFace / `glLineWidth` / `glPointSize`，对齐 `apply_state`。
+      - 接受浏览器原生 `WebGL2RenderingContext`，浏览器即真实出图（非伪造）。
+    - `js_impl/src/gpu/mainloop.ts`（新）：`PdEngine` 复刻 C 的增量播放主循环——全局内存跨帧保留，首次渲染 `0..N` 全重放（使 `numframes==0` 处生成的纹理在帧 N 可用），之后只跑新帧；提供 `start()`（浏览器 `requestAnimationFrame` 实时动画）与 `runHeadless()`（Node 离线出图）。
+    - `js_impl/src/ui/`（新）：浏览器 Playground（`index.html` + `main.ts` + `examples.ts` + `style.css`）——代码编辑器 + WebGL2 canvas + 日志面板，`vite build` 通过；`npm run dev` 即真实浏览器渲染。
+    - 修复三处 JS 实现缺失逻辑（用户指出的"大量逻辑缺失"）：`&arr` 取地址（原被忽略，现返回全局内存字节偏移）、`glsettex` 数组形式的像素按 `elem`（`BGRA32=1`/`VEC4=4`）读取并按 `colmode` 解包、runFrame 自动 `attachMemory` 使 `glsettex` 读得到像素缓冲。`tests/gpu.test.ts` 的 `replayExample` 改为累积播放语义。
+    - 验收：全部 JS 测试 **0 失败**（`compile/gpu/interp/lexer/smoke/softgolden/xbackend`），`26_texture_procedural` 现已正确渲染出棋盘纹理（此前因纹理解包缺失而全黑），`vite build` 打包 UI 成功。
 - **M4**（C JIT sljit）：✅ 已并入上方 M4 条目（`test_jit` 33 项全绿，JIT vs 解释器逐位差分 + GLCmd 逐命令 diff + 冻结保护实测 ~5ms 返回）。
 - **M5**（LLVM）：✅ **核心目标已完成**。系统 LLVM 22.1.8（`/opt/homebrew/opt/llvm`），`llvm-c` 头文件齐全。`c_impl/src/eval/pd_jit_llvm.c` 已实现：IR→LLVM IR（基本块 + `fadd/fmul/fdiv/fsub` + `call @sin/cos/...` + `br`/条件分支）、冻结保护（基本块入口插入 `shouldQuit` 检查，实测 `while(1){}` 在探针置位后 ~5ms 内返回）、运行时（`LLJIT` 适配 `pd_run_jit` 调用约定，与 sljit 共享 dispatch）。
   - **验证（test_jit，40 项全绿）**：① Part A 纯 EVAL 逐位差分（算术/控制流/函数/RNG/数组 + `fact`/`nrnd` 等）覆盖 LLVM 后端（dispatch 优先 LLVM）；② Part B 5 个目标 `.pss`（`drawsph/balls2k/metaballs/ballsk/disco ball`）GLCmd glbuf 逐命令 diff；③ **Part C 三方逐位一致（M5 验收）**：新增 `c_three_*` 7 项，强制 LLVM-only / sljit-only / 解释器 三路 `pd_run_jit` 并断言结果 `memcmp` 全字节相等，直接满足路线图 M5 验收「LLVM JIT vs 解释器 vs sljit 三方逐位一致」。
@@ -118,12 +129,12 @@
 37. **差分 harness 扩展**：Plan A vs B vs 神谕三方比对。
 38. **验收**：fuzzing 1000 次，A 与 B 等价。
 
-### 阶段 7：JS 渲染对齐（M7）
-39. **WebGL2 + fixed-function 层** (`js_impl/src/gpu/`)：移植 C 的 `gpu/` 语义。
-40. **GLSL 适配**（GLSL ES 3.0）。
-41. **OffscreenCanvas**：Node/浏览器 offscreen 出图（与 C 像素等价为验收）。
-42. **UI**（canvas + 代码编辑器 + 日志）。
-43. **验收**：浏览器/Node 加载示例脚本并出图。
+### 阶段 7：JS 渲染对齐（M7）✅ 已完成
+39. **WebGL2 + fixed-function 层** (`js_impl/src/gpu/`)：移植 C 的 `gpu/` 语义，见上方 M7 条目。
+40. **GLSL 适配**（GLSL ES 3.0）：默认管线 + 自定义 `@v/@f` 着色器支持。
+41. **mainloop + 离线/在线出图**：`mainloop.ts` 增量播放主循环，浏览器/Node 均出图。
+42. **UI**（canvas + 代码编辑器 + 日志）：`js_impl/src/ui/` Playground，`vite build` 通过。
+43. **验收**：浏览器/Node 加载示例脚本并出图；全部 JS 测试 0 失败。
 
 ### 阶段 8：打磨（M8）
 44. **窗口模式 GUI**：GLFW 窗口 + ImGui 编辑器/日志（与 offscreen 共享渲染层）。

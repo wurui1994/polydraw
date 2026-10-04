@@ -20,6 +20,13 @@ export class PdrlCtx {
     this.hostImpl = new PolyHostImpl();
     this.hostImpl.state.xres = xres;
     this.hostImpl.state.yres = yres;
+    // Cursor starts at the 640×480 window centre, NOT the viewport centre —
+    // this mirrors C pd_polyhost.c init (s->mousx = 640/2; s->mousy = 480/2),
+    // which polydraw-render never updates regardless of the render resolution.
+    // Scripts like ken/texture3d.pss derive camera angle/depth from mousx/mousy,
+    // so matching the fixed C values keeps the JS geometry identical to C's.
+    this.hostImpl.state.mousx = 640 / 2;
+    this.hostImpl.state.mousy = 480 / 2;
     this.hostImpl.blocks = blocks;
     this.glbuf = this.hostImpl.glbuf;
     const host = this.hostImpl.install();

@@ -1,4 +1,8 @@
 .DS_Store
 c_impl/build/
+c_impl/tools/_scan_tmp/
 *.dSYM/
-.DS_Store
+*.pyc
+__pycache__
+c_impl/third_party/sljit
+*.png

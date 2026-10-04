@@ -23,9 +23,90 @@ export interface GLSLVaryings {
   nx: number; ny: number; nz: number;         // normal
   px: number; py: number; pz: number; pw: number; // object-space pos (gl_Vertex)
   ndx: number; ndy: number; ndz: number; ndw: number; // NDC pos (gl_Position)
+  // gl_FragCoord: window-space (x+0.5, y+0.5, depth, 1/w_clip). Set per pixel
+  // by the rasterizer; fragment shaders read gl_FragCoord.xy for screen-space
+  // effects (poster.pss, showmouse.pss, ...).
+  fcx: number; fcy: number; fcz: number; fcw: number;
 }
 
-export type GLSLTexFn = (unit: number, u: number, v: number, w?: number) => [number, number, number];
+export type GLSLTexFn = (unit: number, u: number, v: number, w?: number, lod?: number) => [number, number, number, number];
+
+// ---------------------------------------------------------------------------
+// Preprocessor: #ifdef / #ifndef / #if / #elif / #else / #endif / #undef /
+// object-like #define. The C baseline compiles shaders as GLSL 330 core, where
+// legacy GL 2.x extension macros (GL_ARB_shader_texture_lod, ...) are NOT
+// predefined, so `#ifdef GL_ARB_shader_texture_lod` takes the #else branch
+// (plain texture2D → automatic mipmap LOD). We mirror that by defining no
+// GL_ARB_* macros.
+// #version / #extension / #pragma and function-like macros are dropped.
+// ---------------------------------------------------------------------------
+const PREDEFINED_MACROS: Record<string, string> = {};
+
+function stripLineComment(s: string): string {
+  const i = s.indexOf('//');
+  return (i >= 0 ? s.slice(0, i) : s).trim();
+}
+
+function preprocess(src: string): string {
+  const defines = new Map<string, string>(Object.entries(PREDEFINED_MACROS));
+  const out: string[] = [];
+  // conditional stack: taken = some branch of this #if already emitted;
+  // active = current branch emits.
+  const stack: { taken: boolean; active: boolean }[] = [];
+  const active = () => stack.every((s) => s.active);
+  for (const raw of src.split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('#')) {
+      const mIfdef = /^#\s*ifdef\s+(\w+)/.exec(line);
+      const mIfndef = /^#\s*ifndef\s+(\w+)/.exec(line);
+      const mDefine = /^#\s*define\s+(\w+)(?:\s+(.*))?$/.exec(line);
+      const mUndef = /^#\s*undef\s+(\w+)/.exec(line);
+      const mIf = /^#\s*if\b\s+(.*)$/.exec(line);
+      const mElif = /^#\s*elif\b\s+(.*)$/.exec(line);
+      if (mIfdef || mIfndef) {
+        const name = (mIfdef ?? mIfndef)![1];
+        const cond = mIfdef ? defines.has(name) : !defines.has(name);
+        stack.push({ taken: cond, active: cond });
+        continue;
+      }
+      if (mIf || mElif) {
+        // supported forms: `defined(X)`, `!defined(X)`, bare macro, 0/1
+        let cond = true;
+        const expr = stripLineComment((mIf ?? mElif)![1]);
+        const mDef = /^!?\s*defined\s*\(\s*(\w+)\s*\)$/.exec(expr);
+        const mNot = /^!\s*defined/.test(expr);
+        if (mDef) cond = mNot ? !defines.has(mDef[1]) : defines.has(mDef[1]);
+        else if (/^\d+$/.test(expr)) cond = expr !== '0';
+        else if (/^\w+$/.test(expr)) cond = defines.has(expr) && defines.get(expr) !== '0';
+        if (mIf) { stack.push({ taken: cond, active: cond }); continue; }
+        const top = stack[stack.length - 1];
+        if (top && !top.taken) { top.active = cond; top.taken = cond; }
+        else if (top) top.active = false;
+        continue;
+      }
+      if (mDefine) {
+        // function-like macros (#define F(x) ...): drop (unused in ken/)
+        if (/^#\s*define\s+\w+\s*\(/.test(line)) continue;
+        if (active()) defines.set(mDefine[1], stripLineComment(mDefine[2] ?? '1') || '1');
+        continue;
+      }
+      if (mUndef) { if (active()) defines.delete(mUndef[1]); continue; }
+      if (/^#\s*else\b/.test(line)) {
+        const top = stack[stack.length - 1];
+        if (top && !top.taken) { top.active = !top.active; top.taken = true; }
+        else if (top) top.active = false;
+        continue;
+      }
+      if (/^#\s*endif\b/.test(line)) { stack.pop(); continue; }
+      continue; // #version / #extension / #pragma / unknown: drop
+    }
+    if (!active()) continue;
+    if (defines.size === 0) { out.push(raw); continue; }
+    // whole-word object-like macro substitution (never inside the directive)
+    out.push(raw.replace(/\b\w+\b/g, (w) => defines.get(w) ?? w));
+  }
+  return out.join('\n');
+}
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -141,7 +222,7 @@ class GLSLParser {
 
   private isTypeWord(w: string): boolean {
     return w === 'float' || w === 'int' || w === 'bool' || w === 'vec2' || w === 'vec3' || w === 'vec4' ||
-      w === 'sampler2D' || w === 'sampler3D' || w === 'varying' || w === 'uniform';
+      w === 'sampler2D' || w === 'sampler3D' || w === 'samplerCube' || w === 'varying' || w === 'uniform';
   }
 
   parseProgram(): S[] {
@@ -172,6 +253,14 @@ class GLSLParser {
     if (this.isId('for')) return this.parseFor();
     if (this.isId('while')) return this.parseWhile();
     if (this.peek()?.t === 'id' && this.isTypeWord(this.peek()!.v as string)) return this.parseVarDecl(false);
+    return this.parseExprStmt(true);
+  }
+
+  // Parse an expression statement that may be an assignment to an id /
+  // array element / swizzle. With consumeSemi=false (for-init clauses) the
+  // trailing ';' is left for the caller (parseFor consumes it as the clause
+  // separator); statements pass consumeSemi=true so this always eats it.
+  private parseExprStmt(consumeSemi: boolean): S {
     if (this.peek()?.t === 'id') {
       const save = this.pos;
       const name = (this.peek() as Tok).v as string;
@@ -182,7 +271,7 @@ class GLSLParser {
         const compOp = this.peek()?.t === 'op' && (this.peek()!.v === '+=' || this.peek()!.v === '-=' || this.peek()!.v === '*=' || this.peek()!.v === '/=') ? this.next()!.v as string : null;
         if (this.eatOp('=') || compOp) {
           const e = this.parseAssignment();
-          this.expect('op', ';');
+          if (consumeSemi) this.expect('op', ';');
           if (compOp) {
             const bin: E = { k: 'bin', op: compOp[0], l: { k: 'idx', e: { k: 'var', name }, i }, r: e };
             return { k: 'idxassign', name, i, e: bin };
@@ -192,18 +281,18 @@ class GLSLParser {
         // not an assignment (e.g. part of a larger expr) — reparse as expr stmt
         this.pos = save;
         const e = this.parseExpr();
-        this.expect('op', ';');
+        if (consumeSemi) this.expect('op', ';');
         return { k: 'expr', e };
       }
       if (this.eatOp('=')) {
         const e = this.parseAssignment();
-        this.expect('op', ';');
+        if (consumeSemi) this.expect('op', ';');
         return { k: 'assign', name, e };
       }
       const compOp = this.peek()?.t === 'op' && (this.peek()!.v === '+=' || this.peek()!.v === '-=' || this.peek()!.v === '*=' || this.peek()!.v === '/=') ? this.next()!.v as string : null;
       if (compOp) {
         const e = this.parseAssignment();
-        this.expect('op', ';');
+        if (consumeSemi) this.expect('op', ';');
         const op = compOp[0];
         const bin: E = { k: 'bin', op, l: { k: 'var', name }, r: e };
         return { k: 'assign', name, e: bin };
@@ -212,13 +301,13 @@ class GLSLParser {
         const sw = (this.next() as Tok).v as string;
         if (this.eatOp('=')) {
           const e = this.parseAssignment();
-          this.expect('op', ';');
+          if (consumeSemi) this.expect('op', ';');
           return { k: 'swassign', name, sw, e };
         }
         if (this.peek()?.t === 'op' && (this.peek()!.v === '+=' || this.peek()!.v === '-=' || this.peek()!.v === '*=' || this.peek()!.v === '/=')) {
           const compOp2 = this.next()!.v as string;
           const e = this.parseAssignment();
-          this.expect('op', ';');
+          if (consumeSemi) this.expect('op', ';');
           const op = compOp2[0];
           const bin: E = { k: 'bin', op, l: { k: 'swz', e: { k: 'var', name }, sw }, r: e };
           return { k: 'swassign', name, sw, e: bin };
@@ -227,7 +316,7 @@ class GLSLParser {
       this.pos = save;
     }
     const e = this.parseExpr();
-    this.expect('op', ';');
+    if (consumeSemi) this.expect('op', ';');
     return { k: 'expr', e };
   }
 
@@ -264,7 +353,7 @@ class GLSLParser {
     const init: S[] = [];
     if (!this.isOp(';')) {
       if (this.peek()?.t === 'id' && this.isTypeWord(this.peek()!.v as string)) init.push(this.parseVarDecl(false));
-      else { const e = this.parseExpr(); this.expect('op', ';'); init.push({ k: 'expr', e }); }
+      else init.push(this.parseExprStmt(true));
     } else this.expect('op', ';');
     let cond: E | null = null;
     if (!this.isOp(';')) cond = this.parseExpr();
@@ -327,7 +416,7 @@ class GLSLParser {
       const tw = this.peek();
       const typeWord = tw && tw.t === 'id' ? (tw.v as string) : '';
       if (tw && tw.t === 'id') this.next();
-      const isSampler = typeWord === 'sampler2D' || typeWord === 'sampler3D';
+      const isSampler = typeWord === 'sampler2D' || typeWord === 'sampler3D' || typeWord === 'samplerCube';
       while (!this.isOp(';')) {
         const p = this.peek();
         if (p && p.t === 'id') {
@@ -552,9 +641,9 @@ class GLSLParser {
 }
 
 const BUILTINS = new Set([
-  'cos', 'sin', 'sqrt', 'abs', 'mod', 'exp', 'pow', 'floor', 'min', 'max',
+  'cos', 'sin', 'sqrt', 'inversesqrt', 'acos', 'abs', 'mod', 'exp', 'pow', 'floor', 'min', 'max',
   'clamp', 'length', 'dot', 'cross', 'normalize', 'mix', 'step', 'smoothstep',
-  'sign', 'fract', 'atan', 'atan2', 'texture2D', 'texture3D', 'int', 'float', 'ftransform',
+  'sign', 'fract', 'atan', 'atan2', 'texture2D', 'texture2DLod', 'texture3D', 'textureCube', 'int', 'float', 'ftransform',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -623,6 +712,8 @@ function genCall(e: { name: string; args: E[] }): string {
     case 'cos': return `_ufun(${a[0]},Math.cos)`;
     case 'sin': return `_ufun(${a[0]},Math.sin)`;
     case 'sqrt': return `_ufun(${a[0]},Math.sqrt)`;
+    case 'inversesqrt': return `_ufun(${a[0]},(x)=>1/Math.sqrt(x))`;
+    case 'acos': return `_ufun(${a[0]},Math.acos)`;
     case 'abs': return `_ufun(${a[0]},Math.abs)`;
     case 'exp': return `_ufun(${a[0]},Math.exp)`;
     case 'floor': return `_ufun(${a[0]},Math.floor)`;
@@ -648,7 +739,9 @@ function genCall(e: { name: string; args: E[] }): string {
     case 'float': return `${a[0]}`;
     case 'ftransform': return `_ftransform(env)`;
     case 'texture2D': return `_tex(${a[0]},${a[1]},texFn)`;
+    case 'texture2DLod': return `_texLod(${a[0]},${a[1]},${a[2]},texFn)`;
     case 'texture3D': return `_tex3(${a[0]},${a[1]},texFn)`;
+    case 'textureCube': return `_texCube(${a[0]},${a[1]},texFn)`;
     case '__inc': {
       // a[0] is the raw E node: pass the NAME string so _inc writes it back
       const src = e.args[0];
@@ -675,7 +768,7 @@ function genStmt(s: S, out: string[]): void {
         if (sz !== undefined) { out.push(`env[${JSON.stringify(nm)}]=_arr(${sz},${JSON.stringify(s.type)});`); continue; }
         const init = s.inits.get(nm);
         if (init) out.push(`env[${JSON.stringify(nm)}]=${genE(init)};`);
-        else if (s.type === 'sampler2D' || s.type === 'sampler3D') out.push(`env[${JSON.stringify(nm)}]=_sunit(${JSON.stringify(nm)});`);
+        else if (s.type === 'sampler2D' || s.type === 'sampler3D' || s.type === 'samplerCube') out.push(`env[${JSON.stringify(nm)}]=_sunit(${JSON.stringify(nm)});`);
         else if (s.type === 'uniform') out.push(`env[${JSON.stringify(nm)}]=0;`);
         else out.push(`env[${JSON.stringify(nm)}]=_dflt(${JSON.stringify(s.type)});`);
       }
@@ -735,8 +828,10 @@ function _g_mix(a,b,t){ const tv=_sc(t); if(_isV(a)||_isV(b)){ const av=_isV(a)?
 function _g_step(e,x){ if(_isV(e)||_isV(x)) return _bop(x,e,(edge,v)=>v>=edge?1:0); return x>=e?1:0; }
 function _g_smooth(a,b,x){ const e0=_sc(a),e1=_sc(b),xv=_sc(x); const t=Math.min(1,Math.max(0,(xv-e0)/(e1-e0))); return t*t*(3-2*t); }
 function _dflt(t){ return t==='vec2'?[0,0]:t==='vec3'?[0,0,0]:t==='vec4'?[0,0,0,0]:0; }
-function _tex(sm,coord){ const c=_isV(coord)?coord:[coord]; if(!texFn) return [0,0,0,1]; const u=(sm===undefined||sm===null)?0:(_isV(sm)?(sm[0]??0):sm)|0; const r=texFn(u,c[0]??0,c[1]??0); return [r[0],r[1],r[2],1]; }
-function _tex3(sm,coord){ const c=_isV(coord)?coord:[coord]; if(!texFn) return [0,0,0,1]; const u=(sm===undefined||sm===null)?0:(_isV(sm)?(sm[0]??0):sm)|0; const r=texFn(u,c[0]??0,c[1]??0,c[2]??0); return [r[0],r[1],r[2],1]; }
+function _tex(sm,coord){ const c=_isV(coord)?coord:[coord]; if(!texFn) return [0,0,0,1]; const u=(sm===undefined||sm===null)?0:(_isV(sm)?(sm[0]??0):sm)|0; const r=texFn(u,c[0]??0,c[1]??0); return [r[0],r[1],r[2],r[3]??1]; }
+function _texLod(sm,coord,lod){ const c=_isV(coord)?coord:[coord]; if(!texFn) return [0,0,0,1]; const u=(sm===undefined||sm===null)?0:(_isV(sm)?(sm[0]??0):sm)|0; const r=texFn(u,c[0]??0,c[1]??0,undefined,_sc(lod)); return [r[0],r[1],r[2],r[3]??1]; }
+function _tex3(sm,coord){ const c=_isV(coord)?coord:[coord]; if(!texFn) return [0,0,0,1]; const u=(sm===undefined||sm===null)?0:(_isV(sm)?(sm[0]??0):sm)|0; const r=texFn(u,c[0]??0,c[1]??0,c[2]??0); return [r[0],r[1],r[2],r[3]??1]; }
+function _texCube(sm,coord){ const c=_isV(coord)?coord:[coord]; if(!texFn) return [0,0,0,1]; const u=(sm===undefined||sm===null)?0:(_isV(sm)?(sm[0]??0):sm)|0; const r=texFn(u,c[0]??0,c[1]??0,c[2]??0); return [r[0],r[1],r[2],r[3]??1]; }
 function _swset(env,name,i,v){ const cur=env[name]; const a=_isV(cur)?cur.slice():[cur??0]; a[i]=_isV(v)?v[0]:v; env[name]=a.length===1?a[0]:a; }
 function _inc(env,name,v){ const old=env[name]; env[name]=v; return old; }
 function _ag(a,i){ if(_isV(a)) return a[i|0]??0; return i===0?(a??0):0; }
@@ -761,16 +856,17 @@ export interface GLSLProgram {
 export function parseVaryingMap(vertSrc: string): Map<string, string> {
   const map = new Map<string, string>();
   if (!vertSrc) return map;
+  const src = preprocess(vertSrc);
   const re = /varying\s+(?:vec[234]|float|bool)\s+([a-zA-Z_]\w*(?:\s*,\s*[a-zA-Z_]\w*)*)/g;
   const names: string[] = [];
   let m: RegExpExecArray | null;
-  while ((m = re.exec(vertSrc)) !== null) {
+  while ((m = re.exec(src)) !== null) {
     for (const part of m[1].split(',')) names.push(part.trim());
   }
   const assignRe = /([a-zA-Z_]\w*)\s*=\s*(gl_Color|gl_MultiTexCoord0|gl_Vertex|gl_Normal|gl_Position)/g;
   const semanticByAssign = new Map<string, string>();
   let am: RegExpExecArray | null;
-  while ((am = assignRe.exec(vertSrc)) !== null) {
+  while ((am = assignRe.exec(src)) !== null) {
     const g = am[2];
     if (g.startsWith('gl_Color')) semanticByAssign.set(am[1], 'color');
     else if (g.startsWith('gl_MultiTexCoord0')) semanticByAssign.set(am[1], 'tex');
@@ -797,7 +893,7 @@ export function parseVaryingMap(vertSrc: string): Map<string, string> {
   return map;
 }
 
-const genCache = new Map<string, ((vary: GLSLVaryings, texFn: GLSLTexFn | null, vmap?: Map<string, string>, uniforms?: GLSLUniform[]) => [number, number, number] | null) | null>();
+const genCache = new Map<string, ((vary: GLSLVaryings, texFn: GLSLTexFn | null, vmap?: Map<string, string>, uniforms?: GLSLUniform[]) => [number, number, number, number] | null) | null>();
 
 // Depth written by the last executed fragment via gl_FragDepth (null if the
 // shader never touched it). Read by the soft rasterizer after each run().
@@ -816,7 +912,7 @@ export function compileGLSL(src: string, vmap?: Map<string, string>): GLSLProgra
     return cached ? { run: cached } : null;
   }
   try {
-    const toks = tokenize(src);
+    const toks = tokenize(preprocess(src));
     const parser = new GLSLParser(toks);
     const stmts = parser.parseProgram();
     // Generate the JS body.
@@ -846,6 +942,7 @@ export function compileGLSL(src: string, vmap?: Map<string, string>): GLSLProgra
     if (!coveredByVR('p')) body.push(bind('p', '[vary.px,vary.py,vary.pz,vary.pw]'));
     if (!coveredByVR('n')) body.push(bind('n', '[vary.nx,vary.ny,vary.nz]'));
     body.push(bind('gl_Position', '[vary.ndx,vary.ndy,vary.ndz,vary.ndw]'));
+    body.push(bind('gl_FragCoord', '[vary.fcx,vary.fcy,vary.fcz,vary.fcw]'));
     if (vmap) {
       for (const [name, key] of vmap) {
         if (name === 'c' || name === 't' || name === 'n') continue; // handled above
@@ -888,11 +985,11 @@ export function compileGLSL(src: string, vmap?: Map<string, string>): GLSLProgra
     // RUNTIME defines the helpers inside the compiled fn (once per program,
     // zero per-pixel cost), so the generated code references them directly.
     const fnSrc = `return function(ARGV, texFn, vmap, uniforms, VR) {\n${RUNTIME}\n${body.join('\n')}\n};`;
-    const factory = new Function(fnSrc) as () => (vary: GLSLVaryings, texFn: GLSLTexFn | null, vmap?: Map<string, string>, uniforms?: GLSLUniform[], vr?: GLSLVaryRecord) => [number, number, number] | null;
+    const factory = new Function(fnSrc) as () => (vary: GLSLVaryings, texFn: GLSLTexFn | null, vmap?: Map<string, string>, uniforms?: GLSLUniform[], vr?: GLSLVaryRecord) => [number, number, number, number] | null;
     const fn = factory();
     genCache.set(cacheKey, fn);
     return {
-      run(vary: GLSLVaryings, tex: GLSLTexFn | null, vmap?: Map<string, string>, uniforms?: GLSLUniform[], vr?: GLSLVaryRecord): [number, number, number] | null {
+      run(vary: GLSLVaryings, tex: GLSLTexFn | null, vmap?: Map<string, string>, uniforms?: GLSLUniform[], vr?: GLSLVaryRecord): [number, number, number, number] | null {
         const out = fn(vary, tex, vmap, uniforms, vr);
         if (!out) { g_fragDepth = null; return null; }
         g_fragDepth = (out as { fd?: number }).fd ?? null;
@@ -904,7 +1001,7 @@ export function compileGLSL(src: string, vmap?: Map<string, string>): GLSLProgra
           }
           console.error(`[nan] out=${JSON.stringify(out)} vr=${JSON.stringify(vr)}`);
         }
-        return [Math.min(1, Math.max(0, out[0])), Math.min(1, Math.max(0, out[1])), Math.min(1, Math.max(0, out[2]))];
+        return [Math.min(1, Math.max(0, out[0])), Math.min(1, Math.max(0, out[1])), Math.min(1, Math.max(0, out[2])), Math.min(1, Math.max(0, out[3] ?? 1))];
       },
     };
   } catch (e) {
@@ -944,7 +1041,7 @@ export function compileVertexGLSL(src: string): GLSLVertexRunner | null {
   if (vtxCache.has(src)) return vtxCache.get(src)!;
   let runner: GLSLVertexRunner | null = null;
   try {
-    const toks = tokenize(src);
+    const toks = tokenize(preprocess(src));
     const parser = new GLSLParser(toks);
     const stmts = parser.parseProgram();
     const body: string[] = [];

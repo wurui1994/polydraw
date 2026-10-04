@@ -62,6 +62,11 @@ export class PdEngine {
     const f0 = blocks.find((b) => b.type === SEC_FRAGMENT);
     if (f0) this.ff.defaultShaderF = f0.src;
     if (v0) this.ff.defaultShaderV = v0.src;
+    // Seed the CURRENT program from the default @v/@f so early batches render
+    // with the script's shader even before any glsetshader. Shader state is
+    // persistent across frames (reset() preserves it), so this stays live.
+    if (f0) this.ff.shaderF = f0.src;
+    if (v0) this.ff.shaderV = v0.src;
   }
 
   attach(renderer: RendererBackend): void {

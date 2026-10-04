@@ -1,0 +1,3 @@
+// Test: render cube with the interference shader (shader 0) instead of
+// the multitexture shader, to isolate p/c interpolation from texture sampling.
+#include "../ken/texture.pss"

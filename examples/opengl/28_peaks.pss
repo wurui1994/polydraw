@@ -6,6 +6,49 @@
 // The surface is z = fun(x, y). fun() below is a plain user-defined function
 // and can be replaced with any height field — that is the point of this demo.
 // (Compare 12_mesh_surface.pss / 13_saddle.pss which use z = x*x - y*y.)
+//
+// NOTE ON SHAPE: the main body is written as `() { ... }` and the helper comes
+// *after* it. That order is not cosmetic — the language reads the FIRST function
+// as main, and a named definition followed by bare top-level statements is not a
+// legal script (checked against the real kasm87: `fun(x,y){…} z=fun(1,2); z`
+// answers `ERROR: FUN undefined`).
+
+()
+{
+    setfov(45);
+    glTranslate(0, 0, -9);
+    glRotate(45.0, 1, 0, 0);
+    glRotate(klock() * 40.0, 0, 0, 1);   // slow Z spin so the shape reads in 3D
+
+    M = 40;
+    N = 40;
+    dx = 6.0 / M;   // sample x in [-3, 3]
+    dy = 6.0 / N;   // sample y in [-3, 3]
+    sx0 = -3.0;
+    sy0 = -3.0;
+    zscale = 1.0;   // peaks already returns ~[-2.2, 2.7]; keep as-is
+
+    for (i = 0; i < M; i = i + 1) {
+        sx = sx0 + i * dx;
+        for (j = 0; j < N; j = j + 1) {
+            sy = sy0 + j * dy;
+            // four corners of the cell (original GL_QUADS order), with z = fun()
+            x0 = sx;       y0 = sy;       z0 = fun(x0, y0) * zscale;
+            x1 = sx + dx;  y1 = sy;       z1 = fun(x1, y1) * zscale;
+            x2 = sx + dx;  y2 = sy + dy;  z2 = fun(x2, y2) * zscale;
+            x3 = sx;       y3 = sy + dy;  z3 = fun(x3, y3) * zscale;
+            // height-based color (blue in valleys -> red on peaks)
+            glColor(0.5 + 0.18 * z0, 0.5, 0.6 - 0.18 * z0, 1);
+            glBegin(GL_LINE_STRIP);
+            glVertex(x0, y0, z0);
+            glVertex(x1, y1, z1);
+            glVertex(x2, y2, z2);
+            glVertex(x3, y3, z3);
+            glVertex(x0, y0, z0);   // close the loop (GL_LINE_LOOP not implemented)
+            glEnd();
+        }
+    }
+}
 
 
 // MATLAB peaks function, ported verbatim from the C reference.
@@ -14,39 +57,4 @@ fun(x, y) {
         - 10 * (x / 5 - x * x * x - y * y * y * y * y) * exp(-x * x - y * y)
         - 1.0 / 3 * exp(-(x + 1) * (x + 1) - y * y);
     return z / 3.0;
-}
-
-
-setfov(45);
-glTranslate(0, 0, -9);
-glRotate(45.0, 1, 0, 0);
-glRotate(klock() * 40.0, 0, 0, 1);   // slow Z spin so the shape reads in 3D
-
-M = 40;
-N = 40;
-dx = 6.0 / M;   // sample x in [-3, 3]
-dy = 6.0 / N;   // sample y in [-3, 3]
-sx0 = -3.0;
-sy0 = -3.0;
-zscale = 1.0;   // peaks already returns ~[-2.2, 2.7]; keep as-is
-
-for (i = 0; i < M; i = i + 1) {
-    sx = sx0 + i * dx;
-    for (j = 0; j < N; j = j + 1) {
-        sy = sy0 + j * dy;
-        // four corners of the cell (original GL_QUADS order), with z = fun()
-        x0 = sx;       y0 = sy;       z0 = fun(x0, y0) * zscale;
-        x1 = sx + dx;  y1 = sy;       z1 = fun(x1, y1) * zscale;
-        x2 = sx + dx;  y2 = sy + dy;  z2 = fun(x2, y2) * zscale;
-        x3 = sx;       y3 = sy + dy;  z3 = fun(x3, y3) * zscale;
-        // height-based color (blue in valleys -> red on peaks)
-        glColor(0.5 + 0.18 * z0, 0.5, 0.6 - 0.18 * z0, 1);
-        glBegin(GL_LINE_STRIP);
-        glVertex(x0, y0, z0);
-        glVertex(x1, y1, z1);
-        glVertex(x2, y2, z2);
-        glVertex(x3, y3, z3);
-        glVertex(x0, y0, z0);   // close the loop (GL_LINE_LOOP not implemented)
-        glEnd();
-    }
 }

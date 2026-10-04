@@ -10,6 +10,11 @@ import { Builder, Op, Fam, reg, NEGMOV } from './ir.ts';
 import type { Tok, LexResult } from './lexer.ts';
 import { TokKind, lex } from './lexer.ts';
 
+// String-literal slots passed to host functions start at 2^30, safely above
+// the pointer-id range minted by ADDR/ADDRSLOT (interp.ts caps at 0x3fffffff),
+// so host fns can tell a string slot from an array pointer by value.
+export const STR_SLOT_BASE = 0x40000000;
+
 // ---- symbol kinds ----
 const SymKind = {
   VAR: 0, PARAM: 1, CONST: 2, BUILTIN: 3, EXT_VAR: 4, EXT_FUNC: 5, FUNC: 6, ARRAY: 7,
@@ -374,11 +379,16 @@ export class Parser {
     }
     if (t.kind === TokKind.STRING) {
       if (this.host && this.host.strings) {
-        // register the literal and pass its slot index to host fns
+        // register the literal and pass its slot index to host fns.
+        // Slots live in the high range [STR_SLOT_BASE, 2^31) so they can
+        // never collide with pointer ids minted by ADDR/ADDRSLOT
+        // (interp.ts ptrMint caps at 0x3fffffff) — C dispatches glsettex's
+        // file/array overload by ARG TYPE ($ vs &), but JS passes both as
+        // plain numbers, so the ranges must be disjoint.
         const text = t.text;
         let slot = -1;
         for (const [k, v] of this.host.strings) if (v === text) { slot = k; break; }
-        if (slot < 0) { slot = this.host.strings.size; this.host.strings.set(slot, text); }
+        if (slot < 0) { slot = STR_SLOT_BASE + this.host.strings.size; this.host.strings.set(slot, text); }
         const out = this.b.newLocal();
         const c = this.b.newConst(slot);
         this.b.emit1(Op.MOV, out, c);

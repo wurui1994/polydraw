@@ -547,7 +547,12 @@ function jitBody(prog: Program): string {
         if (in_.aux <= -1000) {
           const hidx = -1000 - in_.aux;
           s = set(`(B.HF(${hidx}) ? B.HF(${hidx}).fn(${na}, [${alist}]) : 0)`);
-        } else if (in_.aux >= 0 && in_.aux < prog.funcs.length) {
+        } else if (in_.aux >= 0) {
+          // user function call. NOTE: can't gate on prog.funcs.length — only
+          // the ROOT program carries the funcs table; function bodies have an
+          // empty funcs array, so gating on it silently emitted `0` for any
+          // call inside a JIT-compiled function. B.CAL itself returns 0 for
+          // out-of-range idx, matching the interpreter's root.funcs lookup.
           s = set(`B.CAL(${in_.aux}, [${alist}])`);
         } else {
           s = set('0');
@@ -629,8 +634,9 @@ export function makeJitBridge(root: Program, G: Float64Array, SQ: { value: boole
   B.CAL = (idx: number, args: number[]): number => {
     const fn = root.funcs[idx];
     if (!fn) return 0;
-    let jf = jitFuncs.get(root)?.[idx];
-    if (jf === undefined) jf = jitCompileFunc(root, idx);
+    const NOFUNCJIT = typeof process !== 'undefined' && process.env.PD_JIT_FUNCS === '0';
+    let jf = NOFUNCJIT ? null : jitFuncs.get(root)?.[idx];
+    if (jf === undefined) jf = NOFUNCJIT ? null : jitCompileFunc(root, idx);
     if (jf) return jf(Float64Array.from(args), G, fn.consts, SQ, root, H, B);
     // interpreter fallback (compile failure)
     const child: Ctx = {

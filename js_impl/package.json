@@ -5,12 +5,16 @@
   "type": "module",
   "main": "src/main.ts",
   "scripts": {
-    "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "test": "for f in tests/*.test.ts; do echo \"=== $f ===\"; node --experimental-strip-types --test \"$f\"; done",
+    "dev": "vite",
+    "build:ui": "vite build",
+    "preview": "vite preview",
     "cli": "node --experimental-strip-types src/cli.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.9.3",
+    "vite": "^8.2.1"
   }
 }

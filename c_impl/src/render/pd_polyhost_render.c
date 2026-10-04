@@ -104,6 +104,28 @@ static double rh_glPointSize(pd_Host *h, int n, const double *a) { (void)h;(void
 static double rh_glCullFace(pd_Host *h, int n, const double *a) { (void)h;(void)n;
     GLCmd *c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_CULLFACE; c->mode=(int)(n>=1?a[0]:0);} return 0; }
 
+/* glAlphaEnable()/glAlphaDisable() — deprecated polydraw convenience used by
+ * the ken/ scripts (volume renders like texture3d.pss rely on it). Mirrors
+ * the JS host: disable depth test + enable blending + standard alpha blend:
+ *   glDisable(GL_DEPTH_TEST); glEnable(GL_BLEND);
+ *   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA) */
+static double rh_glAlphaEnable(pd_Host *h, int n, const double *a) {
+    (void)n; (void)a;
+    GLCmd *c;
+    c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_DISABLE; c->mode=0x0B71;}  /* GL_DEPTH_TEST */
+    c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_ENABLE;  c->mode=0x0BE2;}  /* GL_BLEND */
+    c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_BLENDFUNC;
+        c->mode=((0x0302 & 0xFFFF)<<16) | (0x0303 & 0xFFFF);}            /* SRC_ALPHA, ONE_MINUS_SRC_ALPHA */
+    return 0;
+}
+static double rh_glAlphaDisable(pd_Host *h, int n, const double *a) {
+    (void)n; (void)a;
+    GLCmd *c;
+    c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_ENABLE;  c->mode=0x0B71;}  /* GL_DEPTH_TEST */
+    c=glcmd_push(h->glbuf); if(c){c->op=GLCMD_DISABLE; c->mode=0x0BE2;}  /* GL_BLEND */
+    return 0;
+}
+
 /* GL_ constants as static doubles (registered as host vars). */
 static double c_GL_POINTS = PDGL_POINTS;
 static double c_GL_LINES = PDGL_LINES;
@@ -171,4 +193,8 @@ void pd_polyhost_install_render(pd_Host *h, pd_PolyState *s, GLCmdBuf *glbuf) {
     pd_host_add_var(h, "GL_FRONT",          &c_GL_FRONT);
     pd_host_add_var(h, "GL_BACK",           &c_GL_BACK);
     pd_host_add_var(h, "GL_FRONT_AND_BACK", &c_GL_FRONT_AND_BACK);
+    /* glAlphaEnable/glAlphaDisable — not in the base install; register as new
+     * entries (pd_host_add_fn appends; sym_find matches by name). */
+    pd_host_add_fn(h, "GLALPHAENABLE()",  rh_glAlphaEnable, 0);
+    pd_host_add_fn(h, "GLALPHADISABLE()", rh_glAlphaDisable, 0);
 }

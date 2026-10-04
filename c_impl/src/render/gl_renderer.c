@@ -1568,6 +1568,27 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
                                  GL_UNSIGNED_BYTE, bytes);
                 }
             }
+            if (getenv("PD_DUMP_TEX") && !cube) {
+                char fn[256];
+                snprintf(fn, sizeof(fn), "/tmp/pd_dump_tex_%d.ppm", (int)c->a);
+                FILE *fp = fopen(fn, "wb");
+                if (fp) {
+                    fprintf(fp, "P6\n%d %d\n255\n", fw, fh);
+                    for (int p = 0; p < fw * fh; p++)
+                        fprintf(fp, "%c%c%c", bytes[p*4], bytes[p*4+1], bytes[p*4+2]);
+                    fclose(fp);
+                    fprintf(stderr, "PD_DUMP_TEX %d: %s (%dx%d)\n", (int)c->a, fn, fw, fh);
+                }
+                snprintf(fn, sizeof(fn), "/tmp/pd_dump_tex_%d_alpha.pgm", (int)c->a);
+                fp = fopen(fn, "wb");
+                if (fp) {
+                    fprintf(fp, "P5\n%d %d\n255\n", fw, fh);
+                    for (int p = 0; p < fw * fh; p++)
+                        fputc(bytes[p*4+3], fp);
+                    fclose(fp);
+                    fprintf(stderr, "PD_DUMP_TEX %d alpha: %s\n", (int)c->a, fn);
+                }
+            }
             free(bytes);
             /* filtering / wrap from the colmode bits */
             int colmode = c->mode;
@@ -1595,18 +1616,6 @@ void pd_gl_renderer_render(pd_GLRenderer *rd, const GLCmdBuf *buf)
                     bytes[(1*fw+1)*4+0],bytes[(1*fw+1)*4+1],bytes[(1*fw+1)*4+2],bytes[(1*fw+1)*4+3],
                     bytes[((fh/2)*fw+fw/2)*4+0],bytes[((fh/2)*fw+fw/2)*4+1],bytes[((fh/2)*fw+fw/2)*4+2],bytes[((fh/2)*fw+fw/2)*4+3]);
                 (void)check;
-            }
-            if (getenv("PD_DUMP_TEX") && !cube) {
-                char fn[256];
-                snprintf(fn, sizeof(fn), "/tmp/pd_dump_tex_%d.ppm", (int)c->a);
-                FILE *fp = fopen(fn, "wb");
-                if (fp) {
-                    fprintf(fp, "P6\n%d %d\n255\n", fw, fh);
-                    for (int p = 0; p < fw * fh; p++)
-                        fprintf(fp, "%c%c%c", bytes[p*4], bytes[p*4+1], bytes[p*4+2]);
-                    fclose(fp);
-                    fprintf(stderr, "PD_DUMP_TEX %d: %s (%dx%d)\n", (int)c->a, fn, fw, fh);
-                }
             }
             break;
         }

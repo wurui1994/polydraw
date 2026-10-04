@@ -103,9 +103,11 @@ function newTex(): Tex { return { valid: false, w: 0, h: 0, z: 1, colmode: 0, pi
 
 export class PolyState {
   xres = 640; yres = 480;
-  // C pd_polyhost.c starts the cursor at window center (mousx=640/2,
-  // mousy=480/2); scripts like ken/texture.pss position geometry from it.
-  mousx = 640 / 2; mousy = 480 / 2; bstatus = 0; numframes = 0;
+  // C pd_polyhost.c starts the cursor at window center (mousx=xres/2,
+  // mousy=yres/2); scripts like ken/texture.pss position geometry from it.
+  // The renderer updates these to the actual viewport size before runFrame,
+  // so mousx/mousy track the real center.
+  mousx = 320; mousy = 240; bstatus = 0; numframes = 0;
   clockScale = 0;
   private startTime = Date.now() / 1000;
 }
@@ -114,6 +116,7 @@ export class PolyState {
 let g_holdrand = 1 >>> 0;
 let g_normstat = false;
 let g_srand2 = 0;
+let g_noiseN = 0;
 function krand(): number {
   let v = g_holdrand | 0;
   v = (Math.imul(v, 214013 * 2) + 2531011 * 2) >>> 0;
@@ -266,7 +269,11 @@ export class PolyHostImpl {
       const c0 = this.glbuf.push(); c0.op = GLCMD.MATRIXMODE; c0.mode = 1;
       const c1 = this.glbuf.push(); c1.op = GLCMD.LOADIDENTITY;
       const c2 = this.glbuf.push(); c2.op = GLCMD.PERSPECTIVE;
-      c2.a = n >= 1 ? a[0] : 0; c2.b = n >= 2 ? a[1] : 1; c2.c = n >= 3 ? a[2] : 0.1; c2.d = n >= 4 ? a[3] : 1000; return 0;
+      c2.a = n >= 1 ? a[0] : 0; c2.b = n >= 2 ? a[1] : 1; c2.c = n >= 3 ? a[2] : 0.1; c2.d = n >= 4 ? a[3] : 1000;
+      // back to MODELVIEW (rh_gluPerspective emits the same 4th command — a
+      // script calling gltranslate after gluperspective must not hit proj)
+      const c3 = this.glbuf.push(); c3.op = GLCMD.MATRIXMODE; c3.mode = 0;
+      return 0;
     });
     addFn('GLULOOKAT', 0, (n, a) => this.hf_glLookAt(n, a));
     addFn('GLMULTMATRIX', 0, (n, a) => { const c = this.glbuf.push(); c.op = GLCMD.MULTMATRIX; c.s = (a[0] as unknown as number[]); return 0; });
@@ -302,7 +309,7 @@ export class PolyHostImpl {
     // KGL_* colmode constants
     const kgl: [string, number][] = [
       ['KGL_BGRA32', 0], ['KGL_CHAR', 1], ['KGL_SHORT', 2], ['KGL_INT', 3], ['KGL_FLOAT', 4], ['KGL_VEC4', 5],
-      ['KGL_LINEAR', 0], ['KGL_NEAREST', 1 << 4], ['KGL_MIPMAP', 2 << 4], ['KGL_MIPMAP2', 3 << 4], ['KGL_MIPMAP1', 4 << 4], ['KGL_MIPMAP0', 5 << 4],
+      ['KGL_LINEAR', 0], ['KGL_NEAREST', 1 << 4], ['KGL_MIPMAP', 2 << 4], ['KGL_MIPMAP3', 0], ['KGL_MIPMAP2', 3 << 4], ['KGL_MIPMAP1', 4 << 4], ['KGL_MIPMAP0', 5 << 4],
       ['KGL_REPEAT', 0], ['KGL_MIRRORED_REPEAT', 1 << 8], ['KGL_CLAMP', 2 << 8], ['KGL_CLAMP_TO_EDGE', 3 << 8],
     ];
     for (const [nm, v] of kgl) addVar(nm, c(v));
@@ -352,9 +359,13 @@ export class PolyHostImpl {
     return (ac << 24) | (rc << 16) | (gc << 8) | bc;
   }
   private hf_noise(n: number, a: number[]): number {
+    // Mirrors C hf_noise (pd_polyhost.c, used by the render path):
+    // loop-based sin pseudo-noise, range [0,1].
     let s = 0;
     for (let i = 0; i < n; i++) s = s * 12.9898 + a[i] * 78.233;
     s = Math.sin(s) * 43758.5453;
+    if (process.env.PD_DEBUG_NOISE && (g_noiseN++ < 4))
+      console.error(`[noise] n=${n} a=[${a.join(',')}] -> ${(s - Math.floor(s)).toFixed(6)}`);
     return s - Math.floor(s);
   }
   private hf_glSetTex(n: number, a: number[]): number {

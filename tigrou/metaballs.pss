@@ -6,7 +6,7 @@ enum
    attract = 0.075
 }
 static mpos[n * 3];
-static gnballs, gmpos, gradius, gattract;
+static gnbballs, gmpos, gradius, gattract;
 
 ()
 {

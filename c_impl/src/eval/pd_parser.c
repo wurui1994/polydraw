@@ -154,6 +154,23 @@ static int sym_visible(const pd_Parser *p, const pd_Sym *s) {
     return 1;
 }
 
+/* Variadic host/builtin functions (EXT_FUNC / BUILTIN) ignore arity in
+ * sym_find, so a same-name set that binds *different* handlers by arity
+ * (e.g. GLSETTEX string-file vs array forms) must be resolved explicitly:
+ * return the last-registered same-name, same-kind symbol whose arity matches
+ * `nParams`, or NULL if there is none (caller falls back to variadic). */
+static pd_Sym *sym_find_arity(pd_Parser *p, const pd_Sym *s, const char *name, int nParams, int ci) {
+    for (int j = p->nSyms - 1; j >= 0; j--) {
+        pd_Sym *o = &p->syms[j];
+        if (ci ? (strncasecmp(o->name, name, sizeof(o->name)) != 0)
+               : (strncmp(o->name, name, sizeof(o->name)) != 0)) continue;
+        if (o->kind != s->kind) continue;
+        if (!sym_visible(p, o)) continue;
+        if (o->nParams == nParams) return o;
+    }
+    return NULL;
+}
+
 static pd_Sym *sym_find(pd_Parser *p, const char *name, int nParams) {
     if (getenv("PD_DEBUG_FUNCS")) {
         fprintf(stderr, "sym_find(name='%s' nParams=%d nSyms=%d) FUNCs: ", name, nParams, p->nSyms);
@@ -174,9 +191,18 @@ static pd_Sym *sym_find(pd_Parser *p, const char *name, int nParams) {
             /* Host (EXT_FUNC) and builtin functions are variadic — their
              * registered nParams is just a nominal value, so never reject a
              * call on arity (e.g. setcol(1) vs setcol(3), srand(1),
-             * glvertex(3)). Only user FUNCs enforce exact arity via overloads. */
-            if (nParams >= 0 && s->kind == PD_SYM_FUNC && s->nParams != nParams) {
-                /* try overload chain */
+             * glvertex(3)). Only user FUNCs enforce exact arity via overloads.
+             * BUT when the same name binds different handlers by arity (e.g.
+             * GLSETTEX string-file vs array forms) pick the exact-arity
+             * overload first; fall back to the last-registered symbol only if
+             * no exact-arity overload exists. */
+            if (nParams >= 0 && s->nParams != nParams) {
+                if (s->kind == PD_SYM_EXT_FUNC || s->kind == PD_SYM_BUILTIN) {
+                    pd_Sym *o = sym_find_arity(p, s, s->name, nParams, 0);
+                    if (o) return o;
+                    return s; /* variadic fallback */
+                }
+                /* user FUNC: try overload chain, else keep scanning */
                 int next = s->nextOverload;
                 while (next >= 0) {
                     pd_Sym *o = &p->syms[next];
@@ -201,7 +227,13 @@ static pd_Sym *sym_find(pd_Parser *p, const char *name, int nParams) {
         if (s->kind != PD_SYM_BUILTIN && s->kind != PD_SYM_EXT_FUNC && s->kind != PD_SYM_FUNC) continue;
         if (strcasecmp(s->name, name) != 0) continue;
         if (!sym_visible(p, s)) continue;
-        if (nParams >= 0 && s->kind == PD_SYM_FUNC && s->nParams != nParams) {
+        if (nParams >= 0 && s->nParams != nParams) {
+            /* same arity-resolution as the exact loop above (see GLSETTEX) */
+            if (s->kind == PD_SYM_EXT_FUNC || s->kind == PD_SYM_BUILTIN) {
+                pd_Sym *o = sym_find_arity(p, s, s->name, nParams, 1);
+                if (o) return o;
+                return s; /* variadic fallback */
+            }
             int next = s->nextOverload;
             while (next >= 0) {
                 pd_Sym *o = &p->syms[next];

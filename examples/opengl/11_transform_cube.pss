@@ -7,9 +7,11 @@
 setfov(45);
 
 glPushMatrix();
+glTranslate(0, 0, -5);       // push into view（**必须在两句 rotate 之前**：GL 的矩阵是
+                             // 反着作用到顶点上的，放在后面就变成"先平移再绕原点转"，
+                             // 立方体会整个转出视野 —— 三档设备都只出黑屏）
 glRotate(45.0, 0, 1, 0);     // rot1
 glRotate(45.0, 1, 0, 0);     // rot2
-glTranslate(0, 0, -5);     // push into view
 
 hx = 0.5; hy = 0.5; hz = 0.5;
 glColor(0.7, 0.7, 0.7);

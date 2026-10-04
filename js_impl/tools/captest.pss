@@ -1,0 +1,21 @@
+()
+{
+	glcapture();
+	glsetshader(0); glColor(0,0,0); glquad(1);
+	glcaptureend(2);
+	glactivetexture(GL_TEXTURE0+2); glbindtexture(2);
+	glsetshader(1); glColor(1,1,1); glquad(1);
+}
+
+@v:
+varying vec4 t;
+void main () { gl_Position = ftransform(); t = gl_MultiTexCoord0; }
+
+@f:
+varying vec4 t;
+void main () { gl_FragColor = vec4(t.x, t.y, 0.0, 1.0); }
+
+@
+varying vec4 t;
+uniform sampler2D tex2;
+void main () { gl_FragColor = texture2D(tex2, vec2(t.x, t.y)); }

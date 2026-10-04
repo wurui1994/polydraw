@@ -128,6 +128,15 @@ export class FixedFunc {
     this.stack.matrixMode(0);
   }
 
+  // Per-frame reset. Mirrors C gl_renderer.c pd_gl_renderer_render: only the
+  // matrix stack + pending geometry are frame-local and re-initialized here.
+  // The rest of the GL state (cull, texture bindings, shaders, blend, depth,
+  // uniforms, clear color, uploaded textures, capture target) is CONTEXT state
+  // that persists across frames — commands issued on an early frame (e.g.
+  // under `numframes==0`, like curvybuild.pss's glcullface(GL_FRONT) or
+  // glsettex) stay live for every later frame. A fresh FixedFunc (constructor
+  // field defaults) is still clean, so single-shot callers (tests) are
+  // unaffected; only multi-frame replays now carry state forward.
   reset(): void {
     this.stack = new MatrixStack();
     this.applyDefaultProjection();
@@ -135,24 +144,12 @@ export class FixedFunc {
     this.inBegin = false;
     this.cur = blankVert();
     this.batches = [];
-    this.shaderV = this.defaultShaderV;
-    this.shaderF = this.defaultShaderF;
-    this.activeTex = 0; this.boundTex = 0; this.texBound = false;
-    this.texUnits = [-1, -1, -1, -1];
-    this.pointSize = 1.0;
-    this.lineWidth = 1.0;
-    this.depthTest = false;
-    this.blend = false;
-    this.blendSrc = 0x0302; this.blendDst = 0x0303;
-    this.cullFace = 0;
-    this.clearColor = [0, 0, 0, 1];
-    this.uniLoc = new Map();
-    this.uniState = new Map();
-    this.texData = [];
+    // capture *events* are frame-local: the snapshot point indexes THIS
+    // frame's batch stream. The capture texture target (capTex) persists.
     this.captures = [];
-    this.capTex = -1;
     this.capturing = false;
-    this.quadMode = 0;
+    this.cmdIdx = 0;
+    this.batchCmdStart = 0;
   }
 
   private pushVert(): void {
@@ -309,7 +306,13 @@ export class FixedFunc {
         this.shaderV = (c.s as string) ?? null;
         this.shaderF = (c.s2 as string) ?? null;
         break;
-      case GLCMD.SETTEXDATA: this.texData.push({ id: c.a, w: c.b, h: c.c, z: c.d, colmode: c.mode, pixels: c.s as number[] | null }); break;
+      case GLCMD.SETTEXDATA:
+        this.texData.push({ id: c.a, w: c.b, h: c.c, z: c.d, colmode: c.mode, pixels: c.s as number[] | null });
+        // glsettex binds the texture to the current active unit immediately
+        // (gl_renderer.c SETTEXDATA does glBindTexture(target, tex_obj) after
+        // upload — scripts like mipmap.pss never call glbindtexture).
+        if (this.activeTex >= 0 && this.activeTex < 4) this.texUnits[this.activeTex] = c.a;
+        break;
       case GLCMD.BINDTEX:
         this.boundTex = c.a;
         this.texBound = true;

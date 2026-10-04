@@ -66,6 +66,8 @@ export function glslStats(): { calls: number; discards: number } {
   return { calls: g_shaderCalls, discards: g_shaderDiscards };
 }
 
+let g_smpN = 0;
+
 export class SoftRenderer {
   private img: Float32Array; // w*h*3 in [0,1] — main framebuffer
   private depth: Float32Array; // w*h, NDC z in [-1,1]; -Inf = empty
@@ -79,7 +81,7 @@ export class SoftRenderer {
   // 1=mirrored,2/3=clamp-to-edge (mirrors C glTexParameteri). `mips` holds
   // pre-filtered half-resolution levels (box filter, matching glGenerateMipmap)
   // for LINEAR_MIPMAP_LINEAR sampling on minified surfaces.
-  private tex: Map<number, { w: number; h: number; d: number; data: Float32Array; filter: number; wrap: number; mips?: { w: number; h: number; data: Float32Array }[] }> = new Map();
+  private tex: Map<number, { w: number; h: number; d: number; data: Float32Array; filter: number; wrap: number; cube?: boolean; faces?: Float32Array[]; mips?: { w: number; h: number; data: Float32Array }[] }> = new Map();
   // Active render target. When capturing (glcapture..glcaptureend), geometry is
   // drawn to capBuf instead of img, mirroring C's FBO render-target switch.
   private target: Float32Array = new Float32Array(0);
@@ -88,12 +90,18 @@ export class SoftRenderer {
   // Set by rasterTri from the screen-space gradient of the `t` (texcoord)
   // varying; read by the tex closure. -1 = no mip (use base level).
   private curTexLod = -1;
+  // Per-pixel finite-difference texture-LOD capture state (see rasterTri).
+  // When set, every texFn call records (texId, u, v) into texCap.coords in call
+  // order; in 'final' mode the implicit LOD is replaced with the per-call value
+  // derived from the finite differences (texCap.lods, indexed by call order).
+  private texCap: { coords: number[][]; lods: number[]; call: number } | null = null;
+  private texMode: 'capture' | 'final' | null = null;
   // GLSL fragment-shader cache: (shaderF, shaderV) -> program + varying map
   private glslCache = new Map<string, GLSLBatchEntry | null>();
   // GLSL vertex-shader cache: shaderV -> runner (null = no/failed VS)
   private vshCache = new Map<string, GLSLVertexRunner | null>();
   // scratch objects reused across pixels (filled then consumed synchronously)
-  private gvScratch: GLSLVaryings = { r: 0, g: 0, b: 0, a: 0, s: 0, t: 0, p: 0, q: 1, nx: 0, ny: 0, nz: 0, px: 0, py: 0, pz: 0, pw: 0, ndx: 0, ndy: 0, ndz: 0, ndw: 0 };
+  private gvScratch: GLSLVaryings = { r: 0, g: 0, b: 0, a: 0, s: 0, t: 0, p: 0, q: 1, nx: 0, ny: 0, nz: 0, px: 0, py: 0, pz: 0, pw: 0, ndx: 0, ndy: 0, ndz: 0, ndw: 0, fcx: 0, fcy: 0, fcz: 0, fcw: 1 };
 
   constructor(opt: RasterizeOptions) {
     this.opt = opt;
@@ -152,11 +160,15 @@ export class SoftRenderer {
   // performs trilinear filtering (bilinear within two adjacent mip levels +
   // linear blend across). `lod` is the base-2 log of the minification factor;
   // 0 = base level, 1 = half-res, etc. lod < 0 = use filter mode directly (no mip).
-  private sampleTex(texId: number, s: number, t: number, lod = -1, wCoord?: number): [number, number, number] | null {
+  private sampleTex(texId: number, s: number, t: number, lod = -1, wCoord?: number): [number, number, number, number] | null {
     const T = this.tex.get(texId);
     if (!T) return null;
+    if (process.env.PD_DEBUG_SAMPLE && ((s * 640 + t * 480) % 7919 < 2)) console.error(`[smp] id=${texId} s=${s.toFixed(4)} t=${t.toFixed(4)} lod=${lod.toFixed(3)} filter=${T.filter} mips=${T.mips?.length ?? 0}`);
+    if (process.env.PD_DEBUG_SAMPLE && (g_smpN++ % 500) === 0) console.error(`[smp] id=${texId} s=${s.toFixed(4)} t=${t.toFixed(4)} lod=${lod.toFixed(3)} filter=${T.filter} mips=${T.mips?.length ?? 0}`);
     // 3D (volumetric) texture: trilinear over slice[z][y][x]
     if (T.d > 1 && wCoord !== undefined) return this.sampleTex3D(T, s, t, wCoord);
+    // Cube map: the coords are a 3D direction (s,t,r) selecting a face
+    if (T.cube && wCoord !== undefined) return this.sampleCube(T, s, t, wCoord);
     if (lod < 0 || !T.mips || T.mips.length === 0 || lod < 1e-6) {
       return this.sampleTexLevel(T, s, t);
     }
@@ -173,7 +185,7 @@ export class SoftRenderer {
     const lv1 = l1 === 0 ? T : T.mips[l1 - 1];
     const c0 = this.sampleTexLevel({ ...T, w: lv0.w, h: lv0.h, data: lv0.data, filter: 1 }, s, t);
     const c1 = this.sampleTexLevel({ ...T, w: lv1.w, h: lv1.h, data: lv1.data, filter: 1 }, s, t);
-    return [c0[0] + (c1[0] - c0[0]) * f, c0[1] + (c1[1] - c0[1]) * f, c0[2] + (c1[2] - c0[2]) * f];
+    return [c0[0] + (c1[0] - c0[0]) * f, c0[1] + (c1[1] - c0[1]) * f, c0[2] + (c1[2] - c0[2]) * f, c0[3] + (c1[3] - c0[3]) * f];
   }
 
   // 3D (volumetric) texture sampling: data is laid out slice[z][y][x] with
@@ -264,6 +276,31 @@ export class SoftRenderer {
     return [rv, gv, bv, av];
   }
 
+  // Cube-map sampling: a direction (x,y,z) selects a face by dominant axis,
+  // then maps to (s,t) UV per the OpenGL cubemap table (spec 3.9.x):
+  //   major axis  face           sc   tc   ma
+  //   +x  POSITIVE_X (0)  -rz  -ry  rx
+  //   -x  NEGATIVE_X (1)  +rz  -ry  rx
+  //   +y  POSITIVE_Y (2)  +rx  +rz  ry
+  //   -y  NEGATIVE_Y (3)  +rx  -rz  ry
+  //   +z  POSITIVE_Z (4)  +rx  -ry  rz
+  //   -z  NEGATIVE_Z (5)  -rx  -ry  rz
+  //   s = (sc/|ma| + 1)/2, t = (tc/|ma| + 1)/2.
+  // Cube faces always use CLAMP_TO_EDGE (bilinear within the face).
+  private sampleCube(T: { w: number; h: number; filter: number; faces?: Float32Array[] }, x: number, y: number, z: number): [number, number, number, number] {
+    const ax = Math.abs(x), ay = Math.abs(y), az = Math.abs(z);
+    let fi: number, sc: number, tc: number, ma: number;
+    if (ax >= ay && ax >= az) { fi = x >= 0 ? 0 : 1; ma = ax; sc = x >= 0 ? -z : z; tc = -y; }
+    else if (ay >= az) { fi = y >= 0 ? 2 : 3; ma = ay; sc = x; tc = y >= 0 ? z : -z; }
+    else { fi = z >= 0 ? 4 : 5; ma = az; sc = z >= 0 ? x : -x; tc = -y; }
+    if (ma < 1e-12) return [0, 0, 0, 1];
+    const s = 0.5 * (sc / ma + 1);
+    const t = 0.5 * (tc / ma + 1);
+    const face = T.faces?.[fi];
+    if (!face) return [0, 0, 0, 1];
+    return this.sampleTexLevel({ w: T.w, h: T.h, data: face, filter: T.filter, wrap: 2 }, s, t);
+  }
+
   private sampleTexLevel(T: { w: number; h: number; data: Float32Array; filter: number; wrap: number }, s: number, t: number): [number, number, number, number] {
     const { w, h, data, filter, wrap } = T;
     const wrapCoord = (c: number) => {
@@ -306,7 +343,20 @@ export class SoftRenderer {
   // fixed-function attributes (c/t/p/n) — matching C's default program.
   private vertexStage(b: DrawBatch, mvp: Float64Array, mv: Float64Array, pr: Float64Array, vs: Vertex[]): { clip: number[][]; vary: GLSLVaryRecord[]; hasVS: boolean } {
     let vsh: GLSLVertexRunner | null = null;
-    if (b.shaderV) {
+    // C's mvp_bake (gl_renderer.c): when the vertex shader source never
+    // references gl_Vertex, the MVP is folded into each vertex position on the
+    // CPU (baking it to NDC with w=1) and the shader receives an identity
+    // matrix. Every baked vertex then has gl_Position.w=1, so varying
+    // interpolation becomes AFFINE in screen space (no perspective correction).
+    // Mirror that exactly so UVs/colors match the C reference.
+    const mvpBake = !!(b.shaderV && b.shaderV.indexOf('gl_Vertex') < 0);
+    // C gl_renderer.c adapt_vertex leaves gl_FrontColor/gl_TexCoord (GLSL 1.x
+    // builtins) unreplaced, so a vertex shader using them fails to compile and
+    // C renders with the default passthrough program (u_mvp * a_vertex +
+    // vertex color). Skip the script's vertex shader here too so geometry and
+    // colors match C (geo_test.pss).
+    const legacyVS = !!(b.shaderV && (b.shaderV.indexOf('gl_FrontColor') >= 0 || b.shaderV.indexOf('gl_TexCoord') >= 0));
+    if (b.shaderV && !legacyVS) {
       if (!this.vshCache.has(b.shaderV)) this.vshCache.set(b.shaderV, compileVertexGLSL(b.shaderV));
       vsh = this.vshCache.get(b.shaderV) ?? null;
     }
@@ -315,15 +365,41 @@ export class SoftRenderer {
     if (vsh) {
       // normal matrix: upper-left 3x3 of the modelview
       const nrm = [mv[0], mv[1], mv[2], mv[4], mv[5], mv[6], mv[8], mv[9], mv[10]];
+      const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
       for (const v of vs) {
+        let vertex = [v.x, v.y, v.z, v.w];
+        let mvpAttr = Array.from(mvp);
+        if (mvpBake) {
+          // C bakes against (x,y,z,1) — GVertex is xyz-only, w implicit 1
+          const x = v.x, y = v.y, z = v.z;
+          const o0 = mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12];
+          const o1 = mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13];
+          const o2 = mvp[2] * x + mvp[6] * y + mvp[10] * z + mvp[14];
+          const o3 = mvp[3] * x + mvp[7] * y + mvp[11] * z + mvp[15];
+          vertex = o3 !== 0 && o3 !== 1 ? [o0 / o3, o1 / o3, o2 / o3, 1] : [o0, o1, o2, 1];
+          mvpAttr = identity;
+        }
         const r = vsh({
-          vertex: [v.x, v.y, v.z, v.w],
+          vertex,
           color: [v.r, v.g, v.b, v.a],
           texcoord: [v.s, v.t, v.p, v.q],
           normal: [v.nx, v.ny, v.nz],
-          mvp: Array.from(mvp), modelview: Array.from(mv), projection: Array.from(pr), normalMat: nrm,
+          mvp: mvpAttr, modelview: Array.from(mv), projection: Array.from(pr), normalMat: nrm,
         }, b.uniforms as never);
-        if (!r) { clip.push(this.project(mvp, v).concat(1)); vary.push({}); continue; }
+        if (!r) {
+          if (mvpBake) {
+            const x = v.x, y = v.y, z = v.z;
+            const o0 = mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12];
+            const o1 = mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13];
+            const o2 = mvp[2] * x + mvp[6] * y + mvp[10] * z + mvp[14];
+            const o3 = mvp[3] * x + mvp[7] * y + mvp[11] * z + mvp[15];
+            clip.push(o3 !== 0 && o3 !== 1 ? [o0 / o3, o1 / o3, o2 / o3, 1] : [o0, o1, o2, 1]);
+          } else {
+            clip.push(this.project(mvp, v).concat(1));
+          }
+          vary.push({});
+          continue;
+        }
         clip.push(r.pos.length >= 4 ? r.pos.slice(0, 4) : r.pos.concat([0, 0, 0, 1]).slice(0, 4));
         vary.push(r.vary);
       }
@@ -353,7 +429,7 @@ export class SoftRenderer {
   // as vertex color in the C baseline — the same here.
   // `vr` carries the interpolated vertex-stage varyings (by declared name)
   // when a script vertex shader ran; null uses the fixed semantic bindings.
-  private resolveColor(b: DrawBatch, vv: Varyings, vr: GLSLVaryRecord | null, entry: GLSLBatchEntry | null, tex: GLSLTexFn | null): [number, number, number, number] | null {
+  private resolveColor(b: DrawBatch, vv: Varyings, vr: GLSLVaryRecord | null, entry: GLSLBatchEntry | null, tex: GLSLTexFn | null, fc?: { x: number; y: number; z: number; w: number }): [number, number, number, number] | null {
     resetFragDepth(); // shader-written gl_FragDepth (if any) applies per pixel
     if (entry) {
       // Execute the script's actual fragment shader through the GLSL subset
@@ -364,6 +440,7 @@ export class SoftRenderer {
       gv.nx = vv.nx; gv.ny = vv.ny; gv.nz = vv.nz;
       gv.px = vv.ox; gv.py = vv.oy; gv.pz = vv.oz; gv.pw = vv.ow;
       gv.ndx = vv.ndx; gv.ndy = vv.ndy; gv.ndz = vv.ndz; gv.ndw = vv.ndw;
+      if (fc) { gv.fcx = fc.x; gv.fcy = fc.y; gv.fcz = fc.z; gv.fcw = fc.w; }
       try {
         const rc = entry.prog.run(gv, tex, entry.vmap, b.uniforms as never, vr ?? undefined);
         if (process.env.PD_DEBUG_GLSL) {
@@ -378,9 +455,12 @@ export class SoftRenderer {
         return null;
       }
     }
-    // unsupported GLSL -> fall through to passthrough color (alpha from vertex)
-    const fc = this.opt.fragment(vv);
-    return [fc[0], fc[1], fc[2], vv.a];
+    if (!entry) {
+      // unsupported GLSL -> fall through to passthrough color (alpha from vertex)
+      const fc = this.opt.fragment(vv) ?? [0, 0, 0];
+      return [fc[0], fc[1], fc[2], vv.a];
+    }
+    return null;
   }
 
   // Resolve the compiled GLSL program + varying map once per draw batch.
@@ -393,9 +473,20 @@ export class SoftRenderer {
     if (entry === undefined) {
       entry = null;
       try {
-        const vmap = parseVaryingMap(b.shaderV ?? '');
-        const prog = compileGLSL(b.shaderF, vmap);
-        if (prog) entry = { prog, vmap };
+        // C gl_renderer.c adapt_vertex does NOT rewrite gl_FrontColor /
+        // gl_TexCoord (GLSL 1.x builtins), so any vertex shader using them
+        // fails to compile under GLSL 330 core and C falls back to its default
+        // passthrough program (vertex color only, no texture sampling). Mirror
+        // that here: when the vertex shader carries such legacy builtins,
+        // skip the fragment program so resolveColor falls through to
+        // passthrough color too (geo_test.pss / geo_duptris.pss).
+        const hasLegacyBuiltins = (b.shaderV || '').includes('gl_FrontColor') ||
+                                  (b.shaderV || '').includes('gl_TexCoord');
+        if (!hasLegacyBuiltins) {
+          const vmap = parseVaryingMap(b.shaderV ?? '');
+          const prog = compileGLSL(b.shaderF, vmap);
+          if (prog) entry = { prog, vmap };
+        }
       } catch { entry = null; }
       this.glslCache.set(key, entry);
     }
@@ -408,19 +499,53 @@ export class SoftRenderer {
   private texFnFor(b: DrawBatch): GLSLTexFn | null {
     const units = b.texUnits ?? null;
     if (units) {
-      return (unit: number, u: number, v: number, w?: number) => {
-        const tid = units[unit] ?? units[0];
-        const t = tid >= 0 ? this.sampleTex(tid, u, v, this.curTexLod, w) : null;
-        return t ?? [0, 0, 0];
+      return (unit: number, u: number, v: number, w?: number, lod?: number) => {
+        // C gl_renderer.c flush_batch rebinds the ACTIVE texture unit to
+        // tex_obj[active_unit] on every draw call (a safety net for scripts
+        // that sample a texture left bound by glcaptureend without an explicit
+        // glbindtexture). tex_obj[] is indexed by texture ID, so the active
+        // unit's texture is the texture whose ID equals the active unit index
+        // — NOT whatever glbindtexture last bound to it (e.g. curvybuild.pss
+        // binds tex 1 for the floor while the active unit is still 0, so C
+        // samples tex 0 there too). Non-active units keep their last
+        // glbindtexture/SETTEXDATA binding. If the ID==active-unit texture was
+        // never created (tex_obj[active_unit]==0 in C) no rebind happens and
+        // the explicit binding wins.
+        const tid = (unit === b.texUnit && this.tex.has(b.texUnit))
+          ? b.texUnit
+          : (units[unit] ?? units[0]);
+        const t = tid >= 0 ? this.sampleTexCap(tid, u, v, lod, w) : null;
+        return t ?? [0, 0, 0, 1];
       };
     }
     if (b.tex >= 0) {
-      return (_unit: number, u: number, v: number, w?: number) => {
-        const t = this.sampleTex(b.tex, u, v, this.curTexLod, w);
-        return t ?? [0, 0, 0];
+      return (_unit: number, u: number, v: number, w?: number, lod?: number) => {
+        const t = this.sampleTexCap(b.tex, u, v, lod, w);
+        return t ?? [0, 0, 0, 1];
       };
     }
     return null;
+  }
+
+  // Sample texture `tid` at (u,v), wrapping sampleTex with finite-difference
+  // LOD capture. When this.texCap is set every call records (texId, u, v) into
+  // this.texCap.coords in call order; in 'final' mode the per-call LOD derived
+  // from those finite differences (this.texCap.lods, indexed by call order) is
+  // substituted for the implicit LOD. The C GPU derives the mip level from the
+  // fragment shader's ACTUAL texture-coordinate derivatives, which can be a
+  // nonlinear function of the varyings (e.g. orthoglobe's acos() mapping), so
+  // the LOD cannot be approximated from the raw s/t varying gradient alone.
+  private sampleTexCap(tid: number, u: number, v: number, lod: number | undefined, w?: number): [number, number, number, number] | null {
+    const cap = this.texCap;
+    if (cap) {
+      cap.coords.push([tid, u, v]);
+      if (this.texMode === 'final') {
+        const li = cap.call++;
+        if (lod === undefined) lod = cap.lods[li];
+      }
+    }
+    if (tid < 0) return null;
+    return this.sampleTex(tid, u, v, lod ?? this.curTexLod, w);
   }
 
   // Upload a procedural texture array (glsettex array form). Mirrors the
@@ -438,6 +563,11 @@ export class SoftRenderer {
     const filter = fnib === 0 ? 1 : fnib === 1 ? 0 : fnib;
     const wrap = (colmode >> 8) & 0xF;
     const dep = z > 1 ? z : 1;
+    // A vertical strip whose height is exactly 6× its width is a cubemap
+    // (mirrors C: kglsettex detects xs*6==ys and switches to a cubemap).
+    const cube = (z <= 1) && (w * 6 === h);
+    const fw = w;
+    const fh = cube ? h / 6 : h;
     const n = w * h * dep;
     const data = new Float32Array(n * 4);
     if (cm === 0) {
@@ -452,16 +582,41 @@ export class SoftRenderer {
         data[i * 4 + 3] = ((v >> 24) & 255) / 255;
       }
     } else {
+      // KGL_FLOAT/KGL_VEC4/CHAR/SHORT/INT: the C renderer's GLCMD_SETTEXDATA
+      // packs EVERY scalar as a 0xAARRGGBB uint32 (double -> uint32 truncation),
+      // regardless of colmode — the host-side elem only affects how many
+      // doubles were copied into the buffer, and only the first n are read.
+      // Fractional values truncate to 0 (e.g. gpgpu.pss's 0.5 seeds -> black).
+      // Mirror that exactly so the software texture bytes match C's GL upload.
       for (let i = 0; i < n; i++) {
-        data[i * 4] = pixels[i * 4] ?? 0;
-        data[i * 4 + 1] = pixels[i * 4 + 1] ?? 0;
-        data[i * 4 + 2] = pixels[i * 4 + 2] ?? 0;
-        data[i * 4 + 3] = pixels[i * 4 + 3] ?? 1;
+        const v = Math.trunc(pixels[i] ?? 0) >>> 0;
+        data[i * 4] = ((v >> 16) & 255) / 255;
+        data[i * 4 + 1] = ((v >> 8) & 255) / 255;
+        data[i * 4 + 2] = (v & 255) / 255;
+        data[i * 4 + 3] = ((v >> 24) & 255) / 255;
       }
     }
-    // 3D textures: no mip chain (genMips is 2D; C's 3D path also skips mips
-    // unless explicitly requested — ken scripts never do).
-    this.tex.set(id, { w, h, d: dep, data, filter, wrap, mips: filter >= 2 && dep === 1 ? this.genMips(w, h, data, wrap) : undefined });
+    // Cubemap strips store faces bottom-to-top (C: row = (5-f)*fh); face index
+    // 0..5 = +X,-X,+Y,-Y,+Z,-Z, matching C's GL_TEXTURE_CUBE_MAP_*_FACE array.
+    // Reorder each face into its own fw×fh RGBA buffer so sampling is a plain
+    // 2D lookup on faces[fi].
+    let faces: Float32Array[] | undefined;
+    if (cube) {
+      faces = new Array(6);
+      for (let fi = 0; fi < 6; fi++) {
+        const row0 = (5 - fi) * fh;
+        const fd = new Float32Array(fw * fh * 4);
+        for (let y = 0; y < fh; y++) fd.set(data.subarray((row0 + y) * fw * 4, (row0 + y) * fw * 4 + fw * 4), y * fw * 4);
+        faces[fi] = fd;
+      }
+    }
+    // 3D textures / cubemaps: no mip chain (genMips is 2D; C's 3D/cube paths
+    // skip mips unless explicitly requested — ken scripts never do).
+    this.tex.set(id, { w: fw, h: fh, d: dep, data, cube, faces, filter, wrap, mips: filter >= 2 && dep === 1 && !cube ? this.genMips(w, h, data, wrap) : undefined });
+    if (process.env.PD_DEBUG_TEX && id === 0) {
+      console.error(`[tex] id=${id} w=${fw} h=${fh} cube=${!!cube} filter=${filter} wrap=${wrap} mips=${(this.tex.get(0)?.mips?.length ?? 0)}`);
+      console.error(`[tex] tl(0,0)=(${(data[0] * 255).toFixed(0)},${(data[1] * 255).toFixed(0)},${(data[2] * 255).toFixed(0)}) tl(1,0)=(${(data[4] * 255).toFixed(0)},${(data[5] * 255).toFixed(0)},${(data[6] * 255).toFixed(0)}) tl(0,1)=(${(data[h * 4] * 255).toFixed(0)},${(data[h * 4 + 1] * 255).toFixed(0)},${(data[h * 4 + 2] * 255).toFixed(0)})`);
+    }
   }
 
   // Box-filter mip chain (mirrors glGenerateMipmap). Each level is half the
@@ -607,7 +762,7 @@ export class SoftRenderer {
           const minY = Math.max(0, Math.floor(cy - half));
           const maxY = Math.min(height - 1, Math.ceil(cy + half));
           const vv: Varyings = { r: vs[i].r, g: vs[i].g, b: vs[i].b, a: vs[i].a, s: vs[i].s, t: vs[i].t, p: vs[i].p, nx: vs[i].nx, ny: vs[i].ny, nz: vs[i].nz, ox: vs[i].x, oy: vs[i].y, oz: vs[i].z, ow: vs[i].w, ndx: ndc[i][0], ndy: ndc[i][1], ndz: ndc[i][2], ndw: 1 };
-          const out = this.resolveColor(b, vv, vvary[i] ?? null, entry, tex);
+          const out = this.resolveColor(b, vv, vvary[i] ?? null, entry, tex, { x: cx + 0.5, y: (height - 1 - cy) + 0.5, z: ndc[i][2], w: 1 });
           if (!out) continue;
           const fd = lastFragDepth();
           for (let yy = minY; yy <= maxY; yy++) for (let xx = minX; xx <= maxX; xx++) {
@@ -879,6 +1034,15 @@ export class SoftRenderer {
     let texLod = -1;
     const hasMip = b.texUnits?.some((id) => { const T = this.tex.get(id); return T && T.mips && T.mips.length > 0; })
       ?? (() => { const T = b.tex >= 0 ? this.tex.get(b.tex) : null; return T && T.mips && T.mips.length > 0; })();
+    // Per-varying-component screen derivatives (d/dx, d/dy) evaluated at the
+    // triangle centroid, for per-pixel texture LOD. The C GPU derives the mip
+    // level from the fragment shader's ACTUAL texture coordinate derivatives
+    // (which can be a nonlinear function of the varyings — e.g. orthoglobe's
+    // acos() mapping), so we re-run the shader at perturbed varyings.
+    let vdx: number[][] | null = null, vdy: number[][] | null = null;
+    // d(weight)/dx and d(weight)/dy (edge-function slopes / area2); hoisted so
+    // the per-pixel finite-difference LOD path can reuse them below.
+    let dwAdx = 0, dwBdx = 0, dwCdx = 0, dwAdy = 0, dwBdy = 0, dwCdy = 0;
     if (hasMip) {
        const sa = vs[a].s, ta = vs[a].t;
        const sb = vs[bb].s, tb = vs[bb].t;
@@ -890,9 +1054,9 @@ export class SoftRenderer {
        const eCac = (ax - cx) * (ccy - cy) - (ay - cy) * (ccx - cx);
        const cwA = eBcc / area2, cwB = eCac / area2, cwC = eAbc / area2;
        // d(weight)/dx and d(weight)/dy (edge-function slopes / area2)
-       const dwAdx = -(cy - by) / area2, dwAdy = (cx - bx) / area2;
-       const dwBdx = -(ay - cy) / area2, dwBdy = (ax - cx) / area2;
-       const dwCdx = -(by - ay) / area2, dwCdy = (bx - ax) / area2;
+       dwAdx = -(cy - by) / area2; dwAdy = (cx - bx) / area2;
+       dwBdx = -(ay - cy) / area2; dwBdy = (ax - cx) / area2;
+       dwCdx = -(by - ay) / area2; dwCdy = (bx - ax) / area2;
        // numerator/denominator of perspective-correct s and t at centroid
        const Ns = cwA * sa * iwa + cwB * sb * iwb + cwC * sc * iwc;
        const Nt = cwA * ta * iwa + cwB * tb * iwb + cwC * tc * iwc;
@@ -914,8 +1078,32 @@ export class SoftRenderer {
       const rho = Math.max(Math.hypot(dudx * tw, dvdx * th), Math.hypot(dudy * tw, dvdy * th));
       texLod = rho > 0 ? Math.log2(rho) : 0;
       texLod = Math.max(0, texLod); // no magnification LOD bias (C uses default)
+      const _forceLod = process.env.PD_FORCE_LOD;
+      if (_forceLod !== undefined) texLod = parseFloat(_forceLod);
+      // d(varying)/d(x|y) per component: o = N/D with N,D affine in screen;
+      // evaluated at the centroid (exact when w is constant, i.e. affine).
+      if (vnames.length > 0) {
+        const Dc = cwA * iwa + cwB * iwb + cwC * iwc;
+        const dDdx = dwAdx * iwa + dwBdx * iwb + dwCdx * iwc;
+        const dDdy = dwAdy * iwa + dwBdy * iwb + dwCdy * iwc;
+        const invD2c = Dc !== 0 ? 1 / (Dc * Dc) : 0;
+        vdx = []; vdy = [];
+        for (let q = 0; q < vnames.length; q++) {
+          const A = vdataA[q], B = vdataB[q], C = vdataC[q];
+          const dx = new Array<number>(vcomps[q]), dy = new Array<number>(vcomps[q]);
+          for (let j = 0; j < vcomps[q]; j++) {
+            const N = cwA * A[j] + cwB * B[j] + cwC * C[j];
+            const dNdx = dwAdx * A[j] + dwBdx * B[j] + dwCdx * C[j];
+            const dNdy = dwAdy * A[j] + dwBdy * B[j] + dwCdy * C[j];
+            dx[j] = (dNdx * Dc - N * dDdx) * invD2c;
+            dy[j] = (dNdy * Dc - N * dDdy) * invD2c;
+          }
+          vdx.push(dx); vdy.push(dy);
+        }
+      }
     }
     this.curTexLod = texLod;
+    if (process.env.PD_DEBUG_LOD) console.error(`[lod] tri(${a},${bb},${c}) area=${area2.toFixed(1)} texLod=${texLod.toFixed(3)}`);
     // Reuse a single Varyings object across all pixels of this triangle
     // (filled, then consumed synchronously by resolveColor below).
     const vv: Varyings = { r: 0, g: 0, b: 0, a: 0, s: 0, t: 0, p: 0, nx: 0, ny: 0, nz: 0, ox: 0, oy: 0, oz: 0, ow: 0, ndx: 0, ndy: 0, ndz: 0, ndw: 0 };
@@ -926,10 +1114,69 @@ export class SoftRenderer {
     const vrReuse: GLSLVaryRecord | null = vnames.length ? {} : null;
     const vrArr: number[][] = [];
     if (vrReuse) for (let q = 0; q < vnames.length; q++) { vrArr.push(new Array(vcomps[q])); vrReuse[vnames[q]] = vrArr[q]; }
+    // Perturbed VR records (varying + d/dx, varying + d/dy) for the per-pixel
+    // texture-LOD finite-difference re-run. Filled per pixel from vrArr.
+    let vrX: GLSLVaryRecord | null = null, vrY: GLSLVaryRecord | null = null;
+    const vrArrX: number[][] = [], vrArrY: number[][] = [];
+    if (vdx) {
+      vrX = {}; vrY = {};
+      for (let q = 0; q < vnames.length; q++) {
+        const ax = new Array<number>(vcomps[q]), ay = new Array<number>(vcomps[q]);
+        vrArrX.push(ax); vrArrY.push(ay);
+        vrX[vnames[q]] = ax; vrY[vnames[q]] = ay;
+      }
+    }
+    // Per-pixel finite-difference texture LOD. The C GPU derives the mip level
+    // from the fragment shader's ACTUAL texture-coordinate derivatives, which
+    // may be a nonlinear function of the varyings (e.g. orthoglobe's acos()
+    // mapping) — so the centroid s/t gradient (texLod above) is only a fallback.
+    // When the shader does an implicit-LOD texture2D on a mipmapped texture, we
+    // re-evaluate the varyings at the +x/+y neighbors, capture the coordinates
+    // each sample requests via sampleTexCap, and derive the per-sample LOD from
+    // the finite differences (GL's 2×2-quad dFdx/dFdy).
+    const useFdLod = hasMip && tex !== null && /texture2D\(/.test(b.shaderF ?? '') && process.env.PD_FORCE_LOD === undefined && process.env.PD_DISABLE_FDLOD === undefined;
+    // Reusable neighbor Varyings objects (filled per pixel in the FD path).
+    const vvX: Varyings = { r: 0, g: 0, b: 0, a: 0, s: 0, t: 0, p: 0, nx: 0, ny: 0, nz: 0, ox: 0, oy: 0, oz: 0, ow: 0, ndx: 0, ndy: 0, ndz: 0, ndw: 0 };
+    const vvY: Varyings = { r: 0, g: 0, b: 0, a: 0, s: 0, t: 0, p: 0, nx: 0, ny: 0, nz: 0, ox: 0, oy: 0, oz: 0, ow: 0, ndx: 0, ndy: 0, ndz: 0, ndw: 0 };
+    // Interpolate the fixed Varyings fields from three barycentric weights.
+    const fillVV = (w0: number, w1: number, w2: number, o: Varyings): void => {
+      o.r = w0 * va.r + w1 * vb.r + w2 * vc.r;
+      o.g = w0 * va.g + w1 * vb.g + w2 * vc.g;
+      o.b = w0 * va.b + w1 * vb.b + w2 * vc.b;
+      o.a = w0 * va.a + w1 * vb.a + w2 * vc.a;
+      o.s = w0 * va.s + w1 * vb.s + w2 * vc.s;
+      o.t = w0 * va.t + w1 * vb.t + w2 * vc.t;
+      o.p = w0 * va.p + w1 * vb.p + w2 * vc.p;
+      o.nx = w0 * va.nx + w1 * vb.nx + w2 * vc.nx;
+      o.ny = w0 * va.ny + w1 * vb.ny + w2 * vc.ny;
+      o.nz = w0 * va.nz + w1 * vb.nz + w2 * vc.nz;
+      o.ox = w0 * va.ox + w1 * vb.ox + w2 * vc.ox;
+      o.oy = w0 * va.oy + w1 * vb.oy + w2 * vc.oy;
+      o.oz = w0 * va.oz + w1 * vb.oz + w2 * vc.oz;
+      o.ow = w0 * va.ow + w1 * vb.ow + w2 * vc.ow;
+      o.ndx = w0 * va.ndx + w1 * vb.ndx + w2 * vc.ndx;
+      o.ndy = w0 * va.ndy + w1 * vb.ndy + w2 * vc.ndy;
+      o.ndz = w0 * va.ndz + w1 * vb.ndz + w2 * vc.ndz;
+      o.ndw = w0 * va.ndw + w1 * vb.ndw + w2 * vc.ndw;
+    };
+    // Perspective-correct interpolation of the custom varyings into `arrs`.
+    const fillVR = (w0: number, w1: number, w2: number, arrs: number[][]): void => {
+      const den = w0 * iwa + w1 * iwb + w2 * iwc;
+      const inv = den !== 0 ? 1 / den : 0;
+      for (let q = 0; q < vnames.length; q++) {
+        const AA = vdataA[q], BB = vdataB[q], CC = vdataC[q];
+        const o = arrs[q];
+        if (vcomps[q] === 1) o[0] = (w0 * AA[0] + w1 * BB[0] + w2 * CC[0]) * inv;
+        else for (let j = 0; j < vcomps[q]; j++) o[j] = (w0 * AA[j] + w1 * BB[j] + w2 * CC[j]) * inv;
+      }
+    };
+    const _pxOff = process.env.PD_PIXEL_X_OFF, _pyOff = process.env.PD_PIXEL_Y_OFF;
+    const xoff = _pxOff !== undefined ? parseFloat(_pxOff) : 0.5;
+    const yoff = _pyOff !== undefined ? parseFloat(_pyOff) : 0.5;
     for (let yy = minY; yy <= maxY; yy++) {
-      const cyy = yy + 0.5;
+      const cyy = yy + yoff;
       for (let xx = minX; xx <= maxX; xx++) {
-        const cxx = xx + 0.5;
+        const cxx = xx + xoff;
         // canonical oriented edge functions; s flips the sign for CW winding
         const eAb = (bx - ax) * (cyy - ay) - (by - ay) * (cxx - ax);
         const eBc = (cx - bx) * (cyy - by) - (cy - by) * (cxx - bx);
@@ -969,13 +1216,58 @@ export class SoftRenderer {
             }
           }
         }
-        const out = this.resolveColor(b, vv, vr, entry, tex);
+        const zz = lastFragDepth() ?? (wA * pa[2] + wB * pb[2] + wC * pc[2]);
+        let out: [number, number, number, number] | null;
+        if (useFdLod) {
+          // Barycentric weights are affine in screen, so the +x/+y neighbor
+          // weights are the base weights shifted by the (constant) edge-function
+          // slopes — exact for the triangle's linear interpolation.
+          const wAx = wA + dwAdx, wBx = wB + dwBdx, wCx = wC + dwCdx;
+          const wAy = wA + dwAdy, wBy = wB + dwBdy, wCy = wC + dwCdy;
+          fillVV(wAx, wBx, wCx, vvX);
+          fillVV(wAy, wBy, wCy, vvY);
+          fillVR(wAx, wBx, wCx, vrArrX);
+          fillVR(wAy, wBy, wCy, vrArrY);
+          const fc = { x: xx + 0.5, y: (height - 1 - yy) + 0.5, z: zz, w: 1 };
+          // 1) capture runs: record the coordinates each sample requests at the
+          //    base, +x, +y pixel centers (the shader's ACTUAL texcoord mapping,
+          //    including nonlinear transforms like orthoglobe's acos()).
+          this.texCap = { coords: [], lods: [], call: 0 };
+          this.texMode = 'capture';
+          if (!this.resolveColor(b, vv, vr, entry, tex, fc)) { this.texCap = null; this.texMode = null; continue; }
+          const coords0 = this.texCap.coords;
+          this.texCap = { coords: [], lods: [], call: 0 };
+          this.resolveColor(b, vvX, vrX, entry, tex, { x: xx + 1.5, y: (height - 1 - yy) + 0.5, z: zz, w: 1 });
+          const coordsX = this.texCap.coords;
+          this.texCap = { coords: [], lods: [], call: 0 };
+          this.resolveColor(b, vvY, vrY, entry, tex, { x: xx + 0.5, y: (height - 1 - (yy + 1)) + 0.5, z: zz, w: 1 });
+          const coordsY = this.texCap.coords;
+          // 2) per-sample LOD from the finite differences (GL's dFdx/dFdy).
+          const lods: number[] = [];
+          for (let i = 0; i < coords0.length; i++) {
+            const c0 = coords0[i];
+            const T0 = this.tex.get(c0[0]);
+            const tw = T0?.w ?? 1, th = T0?.h ?? 1;
+            const cx = coordsX[i] ?? c0, cy = coordsY[i] ?? c0;
+            const rho = Math.max(
+              Math.hypot((cx[1] - c0[1]) * tw, (cx[2] - c0[2]) * th),
+              Math.hypot((cy[1] - c0[1]) * tw, (cy[2] - c0[2]) * th),
+            );
+            lods.push(rho > 0 ? Math.max(0, Math.log2(rho)) : 0);
+          }
+          // 3) final run with the derived per-sample LODs.
+          this.texCap = { coords: [], lods, call: 0 };
+          this.texMode = 'final';
+          out = this.resolveColor(b, vv, vr, entry, tex, fc);
+          this.texCap = null; this.texMode = null;
+        } else {
+          out = this.resolveColor(b, vv, vr, entry, tex, { x: xx + 0.5, y: (height - 1 - yy) + 0.5, z: zz, w: 1 });
+        }
         if (process.env.PD_DEBUG_AT && b.shaderF && b.shaderF.length > 100) {
           const [dx, dy] = (process.env.PD_DEBUG_AT as string).split(',').map(Number);
           if (xx === dx && yy === dy) console.error(`[at] (${xx},${yy}) vr=${JSON.stringify(vr)} ndw=${vv.ndw} out=${JSON.stringify(out)} uni=${JSON.stringify(b.uniforms)}`);
         }
         if (!out) continue;
-        const zz = lastFragDepth() ?? (wA * pa[2] + wB * pb[2] + wC * pc[2]);
         // Inline writePixel (xx/yy already within [minX,minY]⊆viewport, so the
         // per-pixel bounds check is redundant here). Saves a call + branch per
         // covered pixel — material for the ~33M fragment calls of texture3d.
@@ -1045,7 +1337,7 @@ export class SoftRenderer {
         vv.oy = va.oy + (vb.oy - va.oy) * t;
         vv.oz = va.oz + (vb.oz - va.oz) * t;
         vv.ow = va.ow + (vb.ow - va.ow) * t;
-        const out = this.resolveColor(b, vv, null, entry, tex);
+        const out = this.resolveColor(b, vv, null, entry, tex, { x: xx + 0.5, y: (height - 1 - yy) + 0.5, z: zz, w: 1 });
         if (!out) continue;
         this.writePixel(xx, yy, zz, out, b);
       }
