@@ -5,3 +5,4 @@ polydraw_bench.txt
 bench/out/
 bench/out-x64/
 bench/out-x64-osx/
+bench/out-dbg/
