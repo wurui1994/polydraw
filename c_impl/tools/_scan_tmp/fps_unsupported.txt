@@ -1,0 +1,5 @@
+drawsph_asm.pss | ARB-assembly shader (unsupported by GLSL backend)
+interference_asm.pss | ARB-assembly shader (unsupported by GLSL backend)
+multiarb_asm.pss | ARB-assembly shader (unsupported by GLSL backend)
+drawcone2_asm.pss | ARB-assembly shader (unsupported by GLSL backend)
+creepers_asm.pss | ARB-assembly shader (unsupported by GLSL backend)

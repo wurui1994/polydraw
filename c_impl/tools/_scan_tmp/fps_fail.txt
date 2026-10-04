@@ -1,0 +1,48 @@
+heightmap.pss | FAIL
+ceilflor2.pss | FAIL
+texture.pss | FAIL
+showmouse.pss | FAIL
+drawsph.pss | FAIL
+cubetex.pss | FAIL
+orthoglobe.pss | FAIL
+texture3d.pss | FAIL
+geo_duptris.pss | FAIL
+gspiral.pss | FAIL
+drawcone2.pss | FAIL
+driftbox.pss | FAIL
+curvybuild.pss | FAIL
+interference.pss | FAIL
+gpgpu.pss | FAIL
+geo_test.pss | FAIL
+mipmap.pss | FAIL
+balls.pss | FAIL
+poster.pss | FAIL
+tree.pss | FAIL
+snake tube.pss | FAIL
+disco blur shader +blur.pss | FAIL
+metaballs.pss | FAIL
+clock.pss | FAIL
+balls2k.pss | FAIL
+particules morphing.pss | FAIL
+fractal rainbow.pss | FAIL
+sphere ellipsis.pss | FAIL
+town textured.pss | FAIL
+fractal.pss | FAIL
+ribbons invasion.pss | FAIL
+funky.pss | FAIL
+cubes reflection.pss | FAIL
+menger tower.pss | FAIL
+town no texture.pss | FAIL
+cubes.pss | FAIL
+dominos.pss | FAIL
+ballsk.pss | FAIL
+sphere.pss | FAIL
+disco ball.pss | FAIL
+metaballs cube.pss | FAIL
+gears.pss | FAIL
+twister.pss | FAIL
+particules sparks.pss | FAIL
+you massive clod.pss | FAIL
+snake stars.pss | FAIL
+menger sponge.pss | FAIL
+disco ball shader.pss | FAIL
